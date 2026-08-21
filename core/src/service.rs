@@ -24,13 +24,10 @@ use crate::{paths, proc, recall, runner, workdir};
 
 /// What a worker is told when the stop that took it down has been undone.
 ///
-/// It says three things, and it needs all three. That it was stopped, because
-/// otherwise the gap in its own transcript is unexplained and a model will
-/// invent an explanation. That the stop is over, so it knows to carry on rather
-/// than to report a failure. And that its work may be halfway through
-/// something, because the stop landed wherever it landed — mid-edit, mid-test,
-/// mid-commit — and a worker that assumes its last action completed will build
-/// on something that did not.
+/// Three things, all needed. That it was stopped, or the gap in its transcript
+/// is unexplained and a model will invent one. That the stop is over, so it
+/// carries on rather than reporting a failure. And that its work may be halfway
+/// through something, because the stop landed wherever it landed.
 const RESUMED_AFTER_CASCADE: &str = "\
 The session that gave you this work was stopped, and stopping it stopped you \
 too. It has now been resumed, so please carry on.
@@ -134,13 +131,13 @@ pub struct AgentSummary {
     pub cwd: String,
     pub model: Option<String>,
     pub permission: PermissionPolicy,
-    /// The supervising `jod-run` process, and the group holding both it and the
+    /// The supervising `jod-run` process, and the group holding it and the
     /// harness. `None` before the launch; kept afterwards, so a finished run
     /// still says what ran it.
     ///
-    /// Defaulted on deserialise so a summary written by an older build — one
-    /// that recorded a tmux session instead — still loads. Losing a whole run's
-    /// history to a renamed field would be a worse trade than a missing pid.
+    /// Defaulted on deserialise so a summary from an older build still loads —
+    /// losing a whole run's history to a renamed field is a worse trade than a
+    /// missing pid.
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
@@ -205,31 +202,19 @@ fn title_from(prompt: &str) -> String {
     }
 }
 
-/// Resolve the conversation a run belongs to, and open it with the prompt that
-/// started it.
-///
-/// `None` means "record nothing", which is an ordinary ending rather than a
-/// failure: a detached run, a conversation id that names nothing, or a store
-/// that would not take the write. The run happens either way — see
-/// [`record_in_conversation`] for why that direction is never reversed.
-///
-/// Returns the row and not just its id, because the row is what
-/// [`Jod::spawn_agent_in`] has to read the model and the mode off before it
-/// launches anything.
 /// Turn a directory *name* on a request into the directory a run starts in.
 ///
 /// A caller naming `tetris` means one of this conversation's directories, never
-/// `$HOME/tetris` — which is where a relative name ended up, either as a
-/// home-directory project nobody asked for or as a failed `chdir` into the
-/// run's scratch directory.
+/// `$HOME/tetris` — which is where a relative name ended up, either as a home-
+/// directory project nobody asked for or as a failed `chdir`.
 ///
 /// So: resolve against the declared roots and **refuse** a name that answers to
-/// none of them, with a blocking card naming what was on offer. Guessing is the
-/// one option ruled out — see the run this was written for, whose entire output
-/// landed in `$HOME` while the directory the user added stayed empty.
+/// none, with a blocking card naming what was on offer. Guessing is ruled out —
+/// see the run whose entire output landed in `$HOME` while the directory the
+/// user added stayed empty.
 ///
-/// An absolute path is left alone, which is every ordinary spawn: somebody
-/// decided it, and roots are a convention rather than a sandbox.
+/// An absolute path is left alone: somebody decided it, and roots are a
+/// convention rather than a sandbox.
 fn settle_cwd(store: &Store, req: &mut SpawnRequest, binding: &RunConversation) -> Result<()> {
     if req.cwd.is_absolute() {
         return Ok(());
@@ -296,6 +281,15 @@ fn settle_cwd(store: &Store, req: &mut SpawnRequest, binding: &RunConversation) 
     }
 }
 
+/// Resolve the conversation a run belongs to, and open it with the prompt that
+/// started it.
+///
+/// `None` means "record nothing", which is an ordinary ending rather than a
+/// failure. The run happens either way — see [`record_in_conversation`] for why
+/// that direction is never reversed.
+///
+/// Returns the row, not just its id, because [`Jod::spawn_agent_in`] reads the
+/// model and the mode off it before launching anything.
 fn open_conversation(
     store: &Store,
     req: &SpawnRequest,
@@ -338,15 +332,14 @@ fn open_conversation(
     }
 
     // The prompt is the conversation's user turn, and the only one there will
-    // ever be: `NewMessage::from_event` produces no `User` message because no
+    // be — `NewMessage::from_event` produces no `User` message because no
     // harness reports its own prompt back. Without this a transcript reads as
-    // an agent talking to itself, and `resume`-by-replay would hand the next
-    // harness an answer to a question nobody asked.
+    // an agent talking to itself.
     //
     // `append_prompt` rather than a plain append, so the question is keyed like
-    // everything else the run writes. It cannot double today — every spawn
-    // mints a fresh run id — and that is exactly why the guard belongs in the
-    // store rather than in this call site's good behaviour.
+    // everything else the run writes. It cannot double today, which is exactly
+    // why the guard belongs in the store rather than in this call site's good
+    // behaviour.
     if let Err(e) = store.append_prompt(&conversation.id, run_id, &req.prompt) {
         eprintln!(
             "[jod] could not record the prompt on conversation {}: {e}",
@@ -359,30 +352,22 @@ fn open_conversation(
 
 /// Let the conversation overrule the request on the two settings it owns.
 ///
-/// **Why the stored value wins outright.** Neither setting was ever a property
-/// of a process: the harness is respawned once per turn, so `--model` and
-/// `--permission-mode` are decided afresh each spawn and a choice held in the
-/// caller lasts exactly one turn. That was the bug — `/model` set a field on
-/// the next request, and reopening the conversation reverted to the client's
-/// default. The only place an answer survives a restart is the row the spawn is
-/// for, and deferring to the request would make every client remember to read
-/// that row first.
+/// **Why the stored value wins outright.** Neither was ever a property of a
+/// process: the harness is respawned once per turn, so a choice held in the
+/// caller lasts exactly one turn. That was the bug — reopening a conversation
+/// reverted to the client's default. The only place an answer survives a
+/// restart is the row the spawn is for.
 ///
-/// So changing either on a live thread is a write, not a different argument on
-/// the next spawn.
-///
-/// `None` on the row means "no opinion" rather than a value, and leaves the
-/// caller's choice where it was.
+/// `None` on the row means "no opinion" and leaves the caller's choice alone.
 ///
 /// **`harness` is deliberately not treated this way.** Moving a thread has
 /// consequences a spawn cannot quietly perform — a meaningless session id, a
-/// transcript to replay, context to compact first
-/// ([`Store::switch_harness`]). A handoff arrives as
+/// transcript to replay, context to compact first. A handoff arrives as
 /// [`RunConversation::Existing`] naming the *new* conversation.
-/// Public because "what will this spawn actually use" is a question clients ask
-/// *before* spawning — a status bar that shows the app's own mode while the
-/// conversation's stored one is what the run will get is a status bar that lies.
-/// [`Jod::spawn_agent_in`] applies it either way; nobody has to remember to.
+///
+/// Public because "what will this spawn actually use" is asked *before*
+/// spawning: a status bar showing the app's mode while the conversation's
+/// stored one is what the run will get is a status bar that lies.
 pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conversation) {
     if let Some(model) = &conversation.model {
         req.model = Some(model.clone());
@@ -395,24 +380,20 @@ pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conve
 /// Fold one of a run's events into the conversation the run belongs to.
 ///
 /// **Who owns this write:** any process holding a binding for the run.
-/// Deliberately not one owner — `runner::follow` is not exclusive, and a
-/// `jod watch` in another terminal forwards the same rows. Sole ownership could
-/// only be enforced by discipline, and discipline is not a guard.
+/// Deliberately not one owner — `runner::follow` is not exclusive, and sole
+/// ownership could only be enforced by discipline, which is not a guard.
 ///
 /// The guard is in the write: [`Store::append_envelopes`] is unique over
-/// `(run_id, seq)`, so a second writer of the same event appends nothing.
+/// `(run_id, seq)`, so a second writer appends nothing.
 ///
-/// **This is no longer the writer that matters.** A binding lasts as long as
-/// the process holding it, and launchers routinely exit while the run is still
-/// talking, so everything said afterwards went unwritten while `events` stayed
-/// complete. The supervisor now projects the transcript too and is the writer
-/// that cannot miss an event. This one still runs, because it is the same write
-/// with the same idempotence key, and a live client should not wait on another
-/// process's turn to see the row.
+/// **This is no longer the writer that matters.** Launchers routinely exit while
+/// the run is still talking, so everything said afterwards went unwritten while
+/// `events` stayed complete. The supervisor now projects the transcript too.
+/// This still runs, because a live client should not wait on another process's
+/// turn to see the row.
 ///
-/// Nothing here returns an error. A conversation is a *side effect* of a run,
-/// and the Hermes audit is clear on letting a memory side effect fail the work
-/// it watched: a looping write suppressed the user's own reply
+/// Nothing here returns an error: a conversation is a *side effect* of a run,
+/// and a looping memory write once suppressed the user's own reply
 /// (`research/hermes-parity-2026/REPORT.md` §3.2).
 fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &AgentEnvelope) {
     // The session id belongs on the conversation row, not in the transcript: it
@@ -420,11 +401,9 @@ fn record_in_conversation(store: &Store, conversation_id: &str, envelope: &Agent
     // instead of replaying it from text.
     //
     // Written together with the harness that minted it, because `resume_for`
-    // hands the id back only to that same harness and a row where the two
-    // disagree resumes nothing. The harness comes off the run rather than the
-    // conversation for exactly that reason: the run is what actually just
-    // spoke, and when it is not what the row expected, the row is the thing
-    // that is wrong.
+    // hands the id back only to that harness and a row where the two disagree
+    // resumes nothing. The harness comes off the run, because the run is what
+    // actually just spoke.
     if let AgentEvent::Started {
         session_id: Some(session),
         ..
@@ -479,15 +458,12 @@ const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// change to one silently retunes the other.
 const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// The cap on agents running at once, before an eighth agent takes a four-core
-/// box to a load of 60. `available_parallelism` unless `JOD_MAX_CONCURRENT_AGENTS`
-/// says otherwise — the same override shape [`crate::discovery::find_binary`]
-/// uses, so one environment variable can pin this on a box that wants a
-/// different number than its own core count.
+/// The cap on agents running at once, before an eighth takes a four-core box to
+/// a load of 60. `available_parallelism` unless `JOD_MAX_CONCURRENT_AGENTS`
+/// says otherwise.
 ///
-/// A box that cannot even ask how many cores it has gets 1, not 0 — a cap of
-/// zero would refuse every spawn forever, which is a worse failure than
-/// running one agent at a time on hardware nobody could size.
+/// A box that cannot ask how many cores it has gets 1, not 0 — a cap of zero
+/// would refuse every spawn for ever.
 pub fn default_max_concurrent_agents() -> usize {
     if let Ok(v) = std::env::var("JOD_MAX_CONCURRENT_AGENTS") {
         if let Ok(n) = v.parse::<usize>() {
@@ -593,11 +569,8 @@ impl Jod {
                     }
                     // The passive half of D2: a run launched without Jod's MCP
                     // server still puts its questions on the rail, lifted out
-                    // of what the harness prints. Cheap on the ordinary event —
-                    // `lift` matches a tool name and returns — and idempotent
-                    // through the card's dedupe key, so a harness that both
-                    // calls Jod's tool and prints its own question produces one
-                    // card rather than two.
+                    // of what the harness prints. Cheap on the ordinary event,
+                    // and idempotent through the card's dedupe key.
                     if let Err(e) =
                         crate::mcp::lift_into_cards(store, &envelope.agent_id, &envelope.event)
                     {
@@ -607,12 +580,10 @@ impl Jod {
                         eprintln!("[jod] could not raise a card from the stream: {e}");
                     }
                     // The stream half of E6.S3, here rather than on a tick
-                    // because immediacy is the entire reason this half exists:
-                    // a pull request URL is worth showing the moment it is
-                    // printed, and the poll that follows is what gives it a
-                    // state. Cheap on the ordinary event — no text, or text
-                    // with no `/pull/` in it, costs one scan — and idempotent
-                    // on the URL, so a replayed stream produces one row.
+                    // because immediacy is the reason this half exists: a PR
+                    // URL is worth showing the moment it is printed, and the
+                    // poll that follows gives it a state. Cheap and idempotent
+                    // on the URL.
                     if let Err(e) = crate::prs::note_from_stream(
                         store,
                         conversation.as_deref(),
@@ -664,38 +635,28 @@ impl Jod {
     /// every earlier agent vanishes from `agents()` even though its supervisor
     /// may still be running.
     ///
-    /// Calling it *again* is how a process learns about runs it did not launch.
-    /// Nothing crosses a process boundary here but the database: a run spawned
-    /// by `jod tui` publishes to that process's broadcast channel and nowhere
-    /// else, so a resident `jod-api` that only rehydrated at boot can never
-    /// list it and never stream it. Repeating the scan is what closes that gap —
-    /// see [`adopt_new_runs`](Self::adopt_new_runs), which is this on a timer.
-    /// Repeating is cheap on purpose: a run already held is skipped before its
-    /// events are read, so the steady state costs one indexed query.
+    /// Calling it *again* is how a process learns about runs it did not launch:
+    /// a run spawned by `jod tui` publishes to that process's channel and
+    /// nowhere else, so a resident `jod-api` that rehydrated only at boot could
+    /// never see it. Repeating is cheap — a run already held is skipped before
+    /// its events are read.
     ///
     /// Each run's summary is rebuilt by replaying its stored events, because a
     /// summary is only as fresh as the last process that serialised one.
     ///
-    /// The *status* then comes from the `runs` row, when that row records a
-    /// terminal one. The supervisor is the only process that saw the harness
-    /// exit, so it is the only one that can tell a clean finish from a signal —
-    /// and the replay cannot: a killed run's `Finished` event looks exactly
-    /// like a completed run's. Trusting the replay here reported every killed
-    /// run as `completed`.
+    /// The *status* comes from the `runs` row when that row records a terminal
+    /// one. The supervisor is the only process that saw the harness exit, and
+    /// the replay cannot tell a killed run's `Finished` from a completed one's
+    /// — trusting it here reported every killed run as `completed`.
     ///
-    /// A row still saying `running` is the case where nothing authoritative was
-    /// ever written, and that is where the process group is probed: a run
-    /// marked running with a dead group did not report a result, and becomes
-    /// *failed* rather than running forever.
+    /// A row still saying `running` is where nothing authoritative was written,
+    /// and that is where the process group is probed: a dead group means the
+    /// run did not report a result, and becomes *failed* rather than running
+    /// for ever.
     ///
-    /// A run that *is* still alive is picked back up: a follower starts on it,
-    /// so its remaining events reach this process's clients as they arrive.
-    /// That is what the file tailer could never do, because it had to be
-    /// started by whoever spawned the agent.
-    ///
-    /// It is also given its conversation back, so the transcript keeps growing
-    /// across the restart instead of stopping wherever the old process died.
-    /// Safe to do for a run another process may also be following, because
+    /// A run still alive is picked back up with a follower, so its remaining
+    /// events reach this process's clients. It is also given its conversation
+    /// back, which is safe for a run another process is following because
     /// [`record_in_conversation`] writes through an idempotent append.
     pub async fn rehydrate(&self, limit: usize) -> Result<usize> {
         let Some(store) = &self.store else {
@@ -800,30 +761,23 @@ impl Jod {
 
     /// Adopt runs other processes spawn, for as long as the caller lives.
     ///
-    /// Jod is not one process. `jod tui`, `jod run` and `jod-api` each build
-    /// their own [`Jod`] over the same SQLite file, and a run's events reach
-    /// only the broadcast channel of the process that launched it. So a
-    /// resident API that rehydrated once at boot is frozen: a run started from
-    /// the TUI a minute later is absent from `/v1/agents` and silent on
-    /// `/v1/events`, and the web HUD shows an idle fleet while a harness is
-    /// working. Nothing was dropped — the API was never told.
+    /// Jod is not one process, and a run's events reach only the channel of the
+    /// process that launched it. So a resident API that rehydrated once at boot
+    /// is frozen: a run started from the TUI a minute later is absent from
+    /// `/v1/agents` and silent on `/v1/events`. Nothing was dropped — the API
+    /// was never told.
     ///
-    /// This is the telling. Each pass is a [`rehydrate`](Self::rehydrate), which
-    /// skips what is already held and attaches a [`runner::follow`] to anything
-    /// new that is still alive; the follower polls the shared store, so it works
-    /// perfectly well for a run this process holds no handle to, and two
-    /// processes following one run is expected rather than a conflict.
+    /// This is the telling. Each pass is a [`rehydrate`](Self::rehydrate),
+    /// which skips what is held and attaches a follower to anything new that is
+    /// alive. The follower polls the shared store, so two processes following
+    /// one run is expected rather than a conflict.
     ///
     /// Polling, because SQLite has no way to say "a row appeared". `every`
-    /// therefore sets how late the fleet can be, and it is worth an interval
-    /// well under a human's patience: the follower already polls at 120 ms once
-    /// attached, so the discovery interval is the whole of the delay a person
-    /// sees between starting a run and watching it move.
+    /// therefore sets how late the fleet can be, and it is the whole of the
+    /// delay a person sees between starting a run and watching it move.
     ///
-    /// A failing pass is reported and the loop continues. The database being
-    /// briefly unreadable must not permanently stop the process from noticing
-    /// new work — that failure mode is exactly the one this method exists to
-    /// remove.
+    /// A failing pass is reported and the loop continues: a briefly unreadable
+    /// database must not permanently stop the process noticing new work.
     ///
     /// Never returns. Spawn it, and drop the handle to stop.
     pub async fn adopt_new_runs(self: Arc<Self>, limit: usize, every: Duration) {
@@ -842,16 +796,14 @@ impl Jod {
     }
 
     /// Events after `after` for one agent, oldest first. `None` means "I have
-    /// seen nothing", and returns the run from its very first event.
+    /// seen nothing", and returns the run from its first event.
     ///
-    /// Serves a reconnecting client the tail it missed rather than the whole
-    /// transcript. Falls back to the database when this process did not launch
-    /// the agent itself, so a client can reattach to a run started by an
-    /// earlier process.
+    /// Serves a reconnecting client the tail it missed. Falls back to the
+    /// database when this process did not launch the agent, so a client can
+    /// reattach to a run started by an earlier process.
     ///
-    /// The cursor is an `Option` because sequences start at 0: no integer can
-    /// mean "nothing yet", and taking `0` for it would silently drop the
-    /// `Started` event that carries the session id and model.
+    /// The cursor is an `Option` because sequences start at 0: taking `0` for
+    /// "nothing yet" would silently drop the `Started` event.
     pub async fn events_since(&self, id: &str, after: Option<u64>) -> Result<Vec<AgentEnvelope>> {
         let guard = self.state.read().await;
         if let Some(record) = guard.agents.get(id) {
@@ -897,15 +849,12 @@ impl Jod {
 
     /// The same list, having asked each harness whether it is signed in.
     ///
-    /// Kept apart from [`harnesses`](Jod::harnesses) because it costs a
-    /// process per installed harness. That is nothing at a prompt and too much
-    /// on an HTTP handler, so the caller chooses rather than paying by
-    /// accident.
+    /// Apart from [`harnesses`](Jod::harnesses) because it costs a process per
+    /// installed harness — nothing at a prompt, too much on an HTTP handler.
     ///
     /// This is the check that was missing when a run went out to a Claude Code
-    /// with no account behind it: the binary was there, the listing said the
-    /// harness was fine, and the failure did not arrive until money and a
-    /// minute had already been spent.
+    /// with no account behind it: the binary was there, the listing said fine,
+    /// and the failure did not arrive until money and a minute had been spent.
     pub fn harnesses_checked(&self) -> Vec<HarnessInfo> {
         HarnessKind::ALL
             .iter()
@@ -938,21 +887,18 @@ impl Jod {
     /// Launch an agent whose prompt was built from material Jod did not write.
     ///
     /// The only way to start a run from a GitHub payload, an email, a fetched
-    /// page — anything a stranger can put text into. It caps the tool grant to
-    /// what [`crate::store::Origin::Untrusted`] may ever reach, which is
-    /// reading and nothing else.
+    /// page. It caps the tool grant to what [`crate::store::Origin::Untrusted`]
+    /// may ever reach, which is reading and nothing else.
     ///
-    /// **This exists as its own method because the cap was written, tested and
-    /// applied nowhere.** `ToolAccess::capped_for` had two callers, both unit
-    /// tests, one of them named `untrusted_material_can_never_reach_more_than
-    /// _reading` — passing while nothing enforced it. A rule that depends on
-    /// every future call site remembering to apply it is not a rule; it is a
-    /// convention with a test pretending to be a guard.
+    /// **Its own method because the cap was written, tested and applied nowhere.**
+    /// `ToolAccess::capped_for` had two callers, both unit tests, one named
+    /// `untrusted_material_can_never_reach_more_than_reading` — passing while
+    /// nothing enforced it. A rule depending on every future call site
+    /// remembering it is a convention with a test pretending to be a guard.
     ///
-    /// The escalation it closes: a webhook rule names a schedule someone raised
-    /// to `orchestrate`, a stranger opens a pull request matching that rule, and
-    /// their text is steering an agent that can arm schedules. Each step is
-    /// reasonable on its own, which is what makes it the shape to worry about.
+    /// The escalation it closes: a webhook rule names a schedule raised to
+    /// `orchestrate`, a stranger opens a matching pull request, and their text
+    /// steers an agent that can arm schedules.
     pub async fn spawn_from_untrusted(&self, mut req: SpawnRequest) -> Result<AgentSummary> {
         req.tools = req
             .tools
@@ -963,16 +909,13 @@ impl Jod {
     /// Launch an agent, recording its turns in the conversation the caller
     /// names. Returns once its supervisor is running.
     ///
-    /// Requires a store. A run reports itself by writing to the database, so a
-    /// Jod without one would start an agent whose output goes nowhere — and
-    /// would then have to pretend that was a success.
+    /// Requires a store: a run reports itself by writing to the database, so a
+    /// Jod without one would start an agent whose output goes nowhere and then
+    /// pretend that was a success.
     ///
-    /// The binding says where the *transcript* goes; `req.resume` still says
-    /// what the harness is told, and the two are deliberately separate. A
-    /// conversation can outlive the harness session that produced it — that is
-    /// the entire reason Jod keeps its own graph — so a caller continuing a
-    /// thread on a different harness passes [`RunConversation::Existing`] with
-    /// a `resume` of its own choosing, or reads [`Store::resume_for`] first.
+    /// The binding says where the *transcript* goes; `req.resume` says what the
+    /// harness is told, and the two are deliberately separate. A conversation
+    /// can outlive the harness session that produced it.
     pub async fn spawn_agent_in(
         &self,
         mut req: SpawnRequest,
@@ -980,14 +923,13 @@ impl Jod {
     ) -> Result<AgentSummary> {
         let store = self.store.clone().ok_or(JodError::StoreRequired)?;
 
-        // Before anything is written down, because everything written down
+        // Before anything is written down, because everything written
         // afterwards records this directory: the conversation's `cwd`, the
         // run's row, and the plan the supervisor chdirs into.
         //
-        // And before the harness is located, so that "`tetris` is not one of
-        // your directories" is what a person is told rather than having it
-        // masked by whichever harness happens to be missing on this machine.
-        // Neither question depends on the other.
+        // And before the harness is located, so "`tetris` is not one of your
+        // directories" is not masked by whichever harness happens to be
+        // missing.
         settle_cwd(&store, &mut req, &conversation)?;
 
         let program = req
@@ -1010,19 +952,15 @@ impl Jod {
             prefer_conversation_settings(&mut req, open);
         }
 
-        // What Jod already knows about this, as framing rather than as a turn.
+        // What Jod already knows about this, as framing rather than a turn.
         //
         // Here — the one entry point every spawn funnels through — because a
-        // recall that only the chat box performed would be a Jod that learns
-        // from you when you are watching and forgets when a schedule fires. The
-        // whole point is the opposite.
+        // recall only the chat box performed would be a Jod that learns from
+        // you when you are watching and forgets when a schedule fires.
         //
-        // `Origin::Agent` is the trigger: this call is Jod acting, not the
-        // owner speaking, and `recall` uses that to decide how much it may
-        // lean on lower-trust material. Nothing marked `Untrusted` is ever
-        // injected, whatever the trigger — a preamble is the position from
-        // which an agent is steered, and material Jod merely *read* has no
-        // business there.
+        // `Origin::Agent` is the trigger: this is Jod acting, not the owner
+        // speaking. Nothing marked `Untrusted` is ever injected whatever the
+        // trigger — a preamble is the position from which an agent is steered.
         recall::augment(&store, &mut req, crate::store::Origin::Agent);
 
         let summary = AgentSummary {
@@ -1069,14 +1007,10 @@ impl Jod {
         }
 
         // Wait for a slot before starting a process, not before accepting the
-        // request — the request is already recorded above. This is the one
-        // seam every caller funnels through (the TUI calls this directly; the
-        // API's own pre-check at `max_concurrent_agents` runs before it ever
-        // gets here), so queueing here is what keeps an eighth agent on a
-        // four-core box from becoming an eighth process. `acquire_owned` is a
-        // fair FIFO wait, not a rejection: a queued caller's `spawn_agent_in`
-        // simply takes longer to return, which is the whole of "queue, don't
-        // reject."
+        // request, which is already recorded above. This is the seam every
+        // caller funnels through, so queueing here is what keeps an eighth
+        // agent on a four-core box from becoming an eighth process.
+        // `acquire_owned` is a fair FIFO wait, not a rejection.
         let permit = self
             .concurrency
             .clone()
@@ -1109,12 +1043,10 @@ impl Jod {
         };
 
         // Hand the permit to a watcher that holds it for the process's whole
-        // life and releases it the moment the process group is gone —
-        // however the run ends: it finishes, it is killed, or its supervisor
-        // dies without ever writing a `Finished` event. Tied to the process
-        // group rather than to the event stream on purpose: a slot the event
-        // stream forgot to free is a concurrency cap that silently stops
-        // admitting anyone, which is worse than the bug this fixes.
+        // life and releases it once the process group is gone — however the run
+        // ends. Tied to the process group rather than the event stream: a slot
+        // the event stream forgot to free is a cap that silently stops
+        // admitting anyone.
         {
             let pgid = launched.pgid;
             tokio::spawn(async move {
@@ -1143,14 +1075,13 @@ impl Jod {
         Ok(summary)
     }
 
-    /// The conversation a run's turns are being recorded in, if this process is
+    /// The conversation a run's turns are recorded in, if this process is
     /// recording them.
     ///
-    /// How a caller holding several turns of one thread keeps them in one
-    /// conversation: launch the first with [`RunConversation::New`], ask for the
-    /// id, and pass [`RunConversation::Existing`] from then on. Without it every
-    /// turn of a chat would mint a conversation of its own and the graph would
-    /// record a hundred one-message threads instead of one.
+    /// How a caller holding several turns of one thread keeps them together:
+    /// launch the first with [`RunConversation::New`], ask for the id, pass
+    /// [`RunConversation::Existing`] from then on. Without it a hundred one-
+    /// message threads.
     pub async fn conversation_of(&self, run_id: &str) -> Option<String> {
         self.state.read().await.conversations.get(run_id).cloned()
     }
@@ -1167,17 +1098,13 @@ impl Jod {
 
     /// The newest `limit` agents, and how many this process holds in total.
     ///
-    /// [`agents`] hands back launch order — oldest first — which is what a
-    /// board that renders every row wants, and every other caller depends on.
-    /// A terminal listing wants the opposite, for the same reason
-    /// [`history`](Self::history) is newest first: on a box that has
-    /// accumulated runs, the one still running is at the *new* end, and
-    /// oldest-first pushed the only row worth reading off the bottom of the
-    /// screen. The count comes back with the page so the caller can say how
-    /// many rows it hid rather than silently truncating.
+    /// [`agents`] hands back launch order, which a board rendering every row
+    /// wants. A terminal listing wants the opposite: on a box that has
+    /// accumulated runs the one still running is at the *new* end, and oldest-
+    /// first pushed the only row worth reading off the bottom. The count comes
+    /// back with the page so the caller can say how many rows it hid.
     ///
-    /// `limit` is a row cap, not a fetch cap: what this process knows about is
-    /// decided by [`rehydrate`](Self::rehydrate).
+    /// `limit` is a row cap, not a fetch cap.
     pub async fn recent_agents(&self, limit: usize) -> (Vec<AgentSummary>, usize) {
         let guard = self.state.read().await;
         // `order` can name a run whose record is gone, so the total has to be
@@ -1219,39 +1146,27 @@ impl Jod {
 
     /// Stop a run, and everything working underneath it.
     ///
-    /// Two reaches, and they are different mechanisms.
+    /// Two reaches, and different mechanisms.
     ///
-    /// **The run's own process group.** `SIGTERM` to the group, so the harness
-    /// and every command it forked — a `Bash` call, a compiler, a test run — go
-    /// with it. `SIGTERM` first, so the supervisor gets to record how the run
-    /// ended rather than disappearing and leaving it marked running for ever;
-    /// `SIGKILL` only for a group that ignores it. Works from any process,
-    /// including one that never launched this run: the process-group id is a
+    /// **The run's own process group.** `SIGTERM` to the group, so the harness and
+    /// every command it forked go with it. `SIGTERM` first, so the supervisor
+    /// records how the run ended rather than disappearing and leaving it marked
+    /// running for ever. Works from any process: the process-group id is a
     /// column, not a handle.
     ///
-    /// **Every run below it in the fleet.** A run this one delegated to is not
-    /// in that group and cannot be reached by that signal.
-    /// [`crate::runner::launch`] starts every supervisor through `setsid`, so
-    /// each run leads a session of its own — the property that lets a run
-    /// outlive the shell that started it. So the descendants are stopped by
-    /// walking to them and signalling each in turn, using the tree
-    /// `Server::record_handoff` already writes: the child's conversation hangs
-    /// under the parent's on every `delegate`. See
-    /// [`Jod::cascade_stop`] for the walk.
+    /// **Every run below it in the fleet.** A delegated run leads a session of its own
+    /// and cannot be reached by that signal, so descendants are stopped by
+    /// walking the tree `Server::record_handoff` writes. See
+    /// [`Jod::cascade_stop`].
     ///
-    /// The reason the second reach exists is that a fleet is a tree of
-    /// responsibility, not a pile of unrelated processes. A manager that has
-    /// been stopped has no one left to report to, review its workers or answer
-    /// their questions, so workers that keep going are working on something
-    /// nobody asked for any more and spending money to do it. Stopping the
-    /// branch is what the person who typed `jod kill` meant.
+    /// The second reach exists because a fleet is a tree of responsibility. A
+    /// stopped manager has nobody left to report to or review its workers, so
+    /// workers that keep going are spending money on something nobody asked
+    /// for.
     ///
-    /// **The main chat is the exception, and it is the only one.** Stopping the
-    /// pinned conversation stops that run alone and leaves every project
-    /// running. Main is not a manager of the work; it is the long-lived front
-    /// door that hands work out and is tied to no project of its own, so its
-    /// stop says nothing at all about whether the work below it should
-    /// continue. → [`Jod::cascade_stop`].
+    /// **The main chat is the only exception.** It is not a manager of the work but
+    /// the long-lived front door, so its stop says nothing about whether the
+    /// work below should continue.
     pub async fn kill_agent(&self, id: &str) -> Result<()> {
         // The named run is looked up in memory and fails loudly if it is not
         // there. That is the existing contract for the run a caller named, and
@@ -1298,18 +1213,13 @@ impl Jod {
         }
 
         // `Failed` counts, and this is the whole of it: the harness dies
-        // *because* of the signal above, and its own ending arrives — as a
-        // `Finished { is_error: true }`, folded in by `apply` — while
+        // *because* of the signal above, and its own ending arrives while
         // `terminate_group` is still waiting out the grace. So by the time this
-        // lock is taken the status may already say the run failed, written by
-        // the exit this call caused. The supervisor knows better and stores
-        // `killed`; without this the memory the TUI reads disagreed with the
-        // row `jod ls` reads, and a run the user stopped on purpose showed as a
-        // red failure until the next restart.
+        // lock is taken the status may already say failed, written by the exit
+        // this call caused. The supervisor knows better and stores `killed`.
         //
-        // `was_running` is what keeps that from relabelling somebody else's
-        // failure: only a run that was still going when this was asked can have
-        // been ended by it.
+        // `was_running` keeps that from relabelling somebody else's failure:
+        // only a run still going when this was asked can have been ended by it.
         let mut guard = self.state.write().await;
         match guard.agents.get_mut(id) {
             Some(record) => {
@@ -1342,31 +1252,22 @@ impl Jod {
     /// Stop every run below `id` in the fleet, and write down what was taken.
     ///
     /// The walk is over conversations, not processes, because that is where the
-    /// tree is written: `Server::record_handoff` hangs a delegated run's
-    /// conversation under the conversation that asked for it, and
-    /// `Store::descendant_conversations` follows those edges to the bottom.
+    /// tree is written: `record_handoff` hangs a delegated run's conversation
+    /// under the one that asked for it.
     ///
-    /// **Main is exempt.** If the stopped run belongs to the pinned
-    /// conversation this returns without walking anything. Main delegates for a
-    /// living and is tied to no project, so everything in the store hangs under
-    /// it eventually; cascading from there would turn "stop the chat I am
-    /// typing into" into "stop the entire machine", which is never what anyone
-    /// means. Every other conversation belongs to some piece of work, and
-    /// stopping it is a statement about that work.
+    /// **Main is exempt.** Everything in the store eventually hangs under the pinned
+    /// conversation, so cascading from there would turn "stop the chat I am
+    /// typing into" into "stop the entire machine".
     ///
-    /// **Each run is stopped before it is recorded, never after.** A crash
-    /// between the two leaves a stopped run that no resume will bring back,
-    /// which costs one worker somebody can restart by hand. The other order
-    /// leaves a *running* run recorded as taken down, and the next resume of
-    /// the parent would start a second copy of it — two agents on one piece of
-    /// work, editing the same files. A lost worker is a smaller wrong than a
-    /// duplicated one.
+    /// **Each run is stopped before it is recorded, never after.** A crash between the
+    /// two costs one worker somebody can restart by hand; the other order
+    /// leaves a
+    /// *running* run recorded as taken down, and the next resume would start a second
+    /// copy editing the same files.
     ///
-    /// Returns nothing and reports failures to stderr rather than to the
-    /// caller. The run the caller actually named has already been stopped by
-    /// the time this runs, and failing the whole call because one descendant
-    /// could not be signalled would tell them the stop did not happen when it
-    /// did.
+    /// Failures go to stderr rather than the caller: the run actually named has
+    /// already been stopped, and failing the whole call over one descendant
+    /// would say the stop did not happen when it did.
     async fn cascade_stop(&self, id: &str) {
         let Some(store) = &self.store else { return };
         let Ok(Some(conversation)) = store.conversation_for_run(id) else {
@@ -1411,33 +1312,24 @@ impl Jod {
 
     /// Bring back the runs that stopping this conversation took down.
     ///
-    /// The other half of [`Jod::cascade_stop`], and deliberately its mirror: a
-    /// stop that reaches a whole branch and a resume that reaches only the run
-    /// somebody named would leave a manager working alone, wondering where its
-    /// workers went. Called when a stopped conversation is continued.
+    /// The mirror of [`Jod::cascade_stop`]: a stop that reaches a whole branch
+    /// and a resume that reaches only the named run would leave a manager
+    /// working alone.
     ///
-    /// **Only what the cascade took.** A run that finished on its own, failed
-    /// on its own, or was stopped by name is not in `cascaded_stops` and does
-    /// not come back. `runs.status` cannot make that distinction — every one of
-    /// them reads `killed` or `failed` — which is why the cascade writes down
-    /// what it did at the time.
+    /// **Only what the cascade took.** A run that finished or failed on its own is not
+    /// in `cascaded_stops`. `runs.status` cannot make that distinction — every
+    /// one reads `killed` or `failed` — which is why the cascade writes down
+    /// what it did.
     ///
-    /// **Every depth, in one pass.** `cascade_stop` records the conversation
-    /// that was *stopped* against each run it reached, not each run's immediate
-    /// parent, so a three-level fleet has all three levels pointing at the
-    /// manager. Resuming the manager therefore brings the whole branch back
-    /// without walking anything, and a worker cannot be left behind because its
-    /// own parent came back in the wrong order.
+    /// **Every depth, in one pass.** `cascade_stop` records the conversation that was
+    /// *stopped* against each run it reached, so a three-level fleet has all three
+    /// pointing at the manager and no worker can be left behind by ordering.
     ///
-    /// **Read-only tools, whatever the run held before.** A resumed worker is
-    /// an unattended spawn — nobody typed it, the machinery decided — and
-    /// [`crate::harness::ToolAccess::unattended`] is what this system already
-    /// gives those, for the compounding reason set out there. A worker brought
-    /// back automatically that could delegate could rebuild a fleet nobody
-    /// asked for.
+    /// **Read-only tools, whatever the run held before.** A resumed worker is an
+    /// unattended spawn, and one that could delegate could rebuild a fleet
+    /// nobody asked for.
     ///
-    /// Returns the pairs it started, oldest stop first: the run that was taken
-    /// down, and the run now carrying on its work.
+    /// Returns the pairs it started, oldest stop first.
     pub async fn resume_cascade(&self, conversation_id: &str) -> Vec<CascadeResumed> {
         let Some(store) = self.store.clone() else {
             return Vec::new();
@@ -1541,25 +1433,20 @@ impl Jod {
 
     /// Stop a run a watchdog has judged dead, and make its status say so.
     ///
-    /// Distinct from [`Jod::kill_agent`] in two ways that matter.
+    /// Distinct from [`Jod::kill_agent`] in two ways.
     ///
-    /// **It ends `Failed`, not `Killed`.** `Killed` means a person decided to
-    /// stop this; `Failed` means it stopped working and something noticed.
-    /// Collapsing them would make "I stopped it" and "it wedged and was reaped"
-    /// the same row, which is the distinction anybody looking at the history is
-    /// there to make.
+    /// **It ends `Failed`, not `Killed`.** `Killed` means a person decided; `Failed`
+    /// means it stopped working and something noticed. Collapsing them loses
+    /// the distinction anybody looking at the history is there to make.
     ///
-    /// **It works from the store, not only from memory.** `kill_agent` reads
-    /// the pgid out of the in-memory map and fails with `UnknownAgent` if the
-    /// run is not there. A heartbeat sweep is exactly the caller that cannot
-    /// rely on that: it runs in a daemon that rehydrates a bounded number of
-    /// runs, so a long-running run started before the last few hundred others
-    /// is watched by a row it can still read and absent from the map. Falling
-    /// back to the stored pgid is what keeps "long-running" and "reapable" from
-    /// being mutually exclusive.
+    /// **It works from the store, not only from memory.** A heartbeat sweep runs in a
+    /// daemon that rehydrates a bounded number of runs, so a long-running run
+    /// can be watched by a row it can read and absent from the map. Falling
+    /// back to the stored pgid keeps "long-running" and "reapable" from being
+    /// exclusive.
     ///
-    /// `terminate` is false for a run whose process group is already gone —
-    /// signalling a recycled pgid would reach whatever now holds that number.
+    /// `terminate` is false for a run whose group is already gone — signalling
+    /// a recycled pgid would reach whatever now holds that number.
     pub async fn fail_agent(&self, id: &str, terminate: bool) -> Result<()> {
         let in_memory = self.state.read().await.agents.get(id).map(|r| r.summary.pgid);
         let pgid = match in_memory {
@@ -1692,11 +1579,10 @@ mod tests {
     /// The cap has to be applied by the *spawn path*, not by whoever remembers
     /// to call it. It previously had two callers, both unit tests, one named
     /// `untrusted_material_can_never_reach_more_than_reading` — green while
-    /// nothing enforced it anywhere a run could reach.
+    /// nothing enforced it.
     ///
-    /// This asserts the reduction the method performs, which is the part that
-    /// must not regress: a grant of `orchestrate` on an untrusted prompt comes
-    /// out as read-only.
+    /// This asserts the reduction: a grant of `orchestrate` on an untrusted
+    /// prompt comes out read-only.
     #[test]
     fn an_untrusted_spawn_is_capped_to_reading_whatever_it_was_granted() {
         use crate::harness::ToolAccess;
@@ -1991,19 +1877,15 @@ mod tests {
         store
     }
 
-    /// The wiring test for the stream half of E6.S3, and it is the *point* of
-    /// that half rather than a formality.
+    /// The wiring test for the stream half of E6.S3, and the *point* of that
+    /// half.
     ///
     /// Everything in `prs` was built, unit-tested and green while nothing
-    /// called any of it, which is a state unit tests cannot detect: a test on
-    /// an unreachable function passes for ever. So this one drives the real
-    /// event loop — `events_tx` is private, which is why the test has to live
-    /// here — and asserts the side effect. Delete the `note_from_stream` call
-    /// in `build` and this fails.
+    /// called any of it — a state unit tests cannot detect. So this drives the
+    /// real event loop and asserts the side effect: delete the
+    /// `note_from_stream` call and it fails.
     ///
-    /// The broadcast is the synchronisation point rather than a sleep: the loop
-    /// sends the envelope on only after the store side effects, so receiving it
-    /// back is proof they have happened.
+    /// The broadcast is the synchronisation point rather than a sleep.
     #[tokio::test]
     async fn a_pull_request_printed_by_a_run_is_recorded_as_the_event_goes_past() {
         let store = std::sync::Arc::new(Store::in_memory().unwrap());
@@ -2186,15 +2068,12 @@ mod tests {
 
     /// A run stopped on purpose must read `killed` *without* a restart.
     ///
-    /// The race this pins is the ordinary case, not a corner: `kill_agent`
-    /// signals the group and then waits out the grace, and the harness dies
-    /// during that wait. Its ending arrives as `Finished { is_error: true }` —
-    /// a process killed by a signal is an error to everything that only sees
-    /// the exit — and folds into the record while the kill is still waiting.
-    /// The supervisor, which saw the signal, stores `killed`. So the row said
-    /// `killed`, memory said `failed`, and the TUI reading memory showed a red
-    /// ✗ for a run the reader stopped themselves, until the next restart
-    /// silently changed its mind.
+    /// The ordinary case, not a corner: `kill_agent` signals the group and
+    /// waits out the grace, and the harness dies during that wait. Its ending
+    /// arrives as `Finished { is_error: true }` and folds into the record while
+    /// the kill is still waiting, while the supervisor stores `killed`. So the
+    /// row said `killed`, memory said `failed`, and the TUI showed a red ✗ for
+    /// a run the reader stopped.
     #[tokio::test]
     async fn a_run_stopped_on_purpose_reads_killed_before_any_restart() {
         let dir = std::env::temp_dir().join(format!("jod-kill-{}", std::process::id()));
@@ -2281,19 +2160,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A fleet of real, separately-grouped processes, wired together in the
-    /// store the way delegation wires real runs together.
+    /// A fleet of real, separately-grouped processes, wired together the way
+    /// delegation wires real runs.
     ///
-    /// Every run here is its own `spawn_detached`, which is the same call
-    /// `runner::launch` makes, so each leads a session of its own exactly as a
-    /// real run does. That is the whole reason a cascade has to exist: one
-    /// `kill(-pgid)` provably cannot reach any of the others, so the only way
-    /// down the tree is to walk it.
+    /// Every run is its own `spawn_detached`, the same call `runner::launch`
+    /// makes, so each leads a session of its own — which is the whole reason a
+    /// cascade exists: one `kill(-pgid)` provably cannot reach the others.
     ///
-    /// `names` are wired into a chain, each hanging under the one before it, so
-    /// `fleet(&["manager", "worker", "sub"])` builds three levels. Returns the
-    /// store, the live `Jod`, the process-group ids and the conversation ids,
-    /// all in the order given.
+    /// `names` are chained, each hanging under the one before, so
+    /// `fleet(&["manager", "worker", "sub"])` builds three levels.
     struct Fleet {
         dir: PathBuf,
         store: Arc<Store>,
