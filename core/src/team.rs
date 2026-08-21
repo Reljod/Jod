@@ -1,23 +1,17 @@
 //! Agent teams — several agents on one job, talking to each other.
 //!
-//! Every harness is growing a team feature of its own, and each one can only
-//! ever contain that harness: OpenCode's teammates are OpenCode sessions,
-//! AGY's subagents are AGY's. Jod owns the bus instead, which buys the thing
-//! none of them can do alone — **one team whose lead runs on Claude Code and
-//! whose teammates run on AGY and OpenCode**, coordinating through the same
-//! inbox. Cross-harness teams are only possible for something that sits above
-//! all the harnesses, which is the only thing Jod has ever been.
+//! Every harness is growing a team feature that can only ever contain that
+//! harness. Jod owns the bus instead, which buys the thing none of them can do
+//! alone: **one team whose lead runs on Claude Code and whose teammates run on
+//! AGY and OpenCode**.
 //!
-//! The state lives in [`crate::store`] with everything else, so a team survives
-//! the process, and the two contended operations — claiming a task and reading
-//! an inbox — are single statements rather than read-then-write. That is the
-//! same reasoning `claim_task` was already written with; teams reuse it rather
-//! than inventing a second answer.
+//! The state lives in [`crate::store`], so a team survives the process, and the
+//! two contended operations — claiming a task and reading an inbox — are single
+//! statements rather than read-then-write.
 //!
 //! Delivery is deliberately dumb: a message becomes a synthetic user turn in
-//! the recipient's next prompt ([`Message::as_prompt`]). Because every harness
-//! can resume a session by id, that works on all three without any harness
-//! knowing teams exist.
+//! the recipient's next prompt. Because every harness resumes a session by id,
+//! that works on all three without any harness knowing teams exist.
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -100,20 +94,18 @@ pub struct Message {
 }
 
 impl Message {
-    /// How a delivered message is handed to the receiving agent: as a synthetic
-    /// user turn, because that is the only input channel every harness has.
+    /// How a delivered message is handed to the receiving agent: a synthetic
+    /// user turn, the only input channel every harness has.
     ///
-    /// The sender is named in the text rather than trusted from anywhere else —
-    /// a teammate reading this is being told who claims to have sent it, which
-    /// is all Jod can honestly assert.
+    /// The sender is named in the text rather than trusted from elsewhere — a
+    /// teammate is being told who *claims* to have sent it, which is all Jod
+    /// can assert.
     ///
     /// **The id is not decoration.** It is the only thing a woken agent has to
     /// reply *into this thread* with: waking drains the inbox, so a follow-up
-    /// read comes back empty and there is nowhere else to learn it. Without it
-    /// the recipient can only send afresh, every answer starts a thread of its
-    /// own at depth zero, and the depth bound — the one that stops two polite
-    /// agents spending money in a loop — can never be reached. That was
-    /// observed live: a question and its answer landing in two threads.
+    /// read comes back empty. Without it every answer starts a thread of its
+    /// own at depth zero and the depth bound can never be reached — observed
+    /// live, a question and its answer landing in two threads.
     pub fn as_prompt(&self) -> String {
         format!(
             "[message from {} · message #{}]\n{}",
@@ -171,21 +163,20 @@ pub const REPLY_PROTOCOL: &str = "To answer any of the messages above, call \
 
 /// Decide whether a member should be woken, and with what.
 ///
-/// Separated from the spawning on purpose: *when to wake* is the part with the
-/// judgement in it, and keeping it pure means it can be tested without a
-/// supervisor, a harness binary, or a running agent.
+/// Separated from the spawning: *when to wake* holds the judgement, and keeping
+/// it pure means testing it without a supervisor or a running agent.
 ///
-/// Returns `None` — deliberately, in each case — when:
+/// Returns `None`, deliberately, when:
 ///
-/// - **There is nothing waiting.** Waking an agent to tell it nothing burns a
-///   turn and a context window.
-/// - **The member is not idle.** A busy member will read its inbox on its next
-///   turn anyway; resuming a conversation that is mid-turn would fork it.
-/// - **It is shutting down or has failed.** Waking it would undo the request.
-/// - **There is no session to resume.** This is the important one: spawning
-///   without a session id would silently start a *fresh* context, so the member
-///   would answer having forgotten everything. Staying asleep and visibly
-///   holding unread mail is better than answering with amnesia.
+/// - **Nothing is waiting.** Waking an agent to tell it nothing burns a turn.
+/// - **The member is not idle.** A busy member reads its inbox next turn
+///   anyway,
+/// and resuming mid-turn would fork it.
+/// - **It is shutting down or has failed.** Waking would undo the request.
+/// - **There is no session to resume** — the important one. Spawning without
+///   one
+/// starts a *fresh* context, so the member answers having forgotten everything.
+/// Staying asleep holding visible unread mail is better than amnesia.
 pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
     if pending.is_empty() || member.status != MemberStatus::Ready {
         return None;
@@ -200,15 +191,13 @@ pub fn wake_order(member: &Member, pending: &[Message]) -> Option<WakeOrder> {
     //
     // A woken session's framing is several turns back, and an agent does not
     // reliably reach for a tool it was told about once at the start. Measured:
-    // an answerer briefed at session start on how to use the bus was asked a
-    // question some turns later, answered **in prose**, and never touched the
-    // bus — so the asker waited, the answer existed, and nothing Jod could see
-    // had gone wrong. An agent that has forgotten a protocol is an agent
-    // behaving reasonably in the absence of one.
+    // an answerer briefed at session start was asked a question later, answered
+    // **in prose**, and never touched the bus — so the asker waited and nothing
+    // Jod could see had gone wrong.
     //
-    // After rather than before, so the reminder is the last thing read and the
-    // messages are not buried under instructions; once rather than per
-    // message, because ten copies of the same sentence is its own noise.
+    // After rather than before, so the messages are not buried under
+    // instructions; once rather than per message, because ten copies is its own
+    // noise.
     let prompt = format!("{prompt}\n\n{REPLY_PROTOCOL}");
     Some(WakeOrder {
         member: member.name.clone(),
@@ -281,14 +270,13 @@ impl Kind {
 
 /// Where a message got to.
 ///
-/// Richer than the `delivered` flag it sits beside, and the reason is A8: mail
-/// to an agent that cannot receive it has to become visible rather than
-/// silent. `Undeliverable` is a message that was never anybody's to read.
+/// Richer than the `delivered` flag beside it, per A8: mail to an agent that
+/// cannot receive it has to become visible rather than silent. `Undeliverable`
+/// is a message that was never anybody's to read.
 ///
 /// **The same type the card queue uses**, rather than a second enum spelling
-/// the same four words. `team_messages.state` and `pending_deliveries.state`
-/// are one vocabulary; they were briefly two, which is how a fifth word added
-/// to one of them would have quietly meant nothing to the other.
+/// the same four words — they were briefly two, which is how a fifth word added
+/// to one would quietly mean nothing to the other.
 pub use crate::delivery::State as MailState;
 
 impl MailState {
@@ -639,18 +627,14 @@ pub const WAKE_INTERVAL_MS: i64 = 60_000;
 
 /// What the person is called on the bus.
 ///
-/// A **reserved name**, not a convention. Two things turn on it and both are
-/// about identity: an agent must be able to address the human without guessing
-/// what to call them, and a message that says it came from the human must
+/// A **reserved name**, not a convention. An agent must be able to address the
+/// human without guessing, and a message claiming to come from the human must
 /// actually have. An agent's sender is derived from its run and cannot be
-/// argued with ([`Store::caller_for_run`]), so the only way to forge one is to
-/// *be called* `reljod` — which is why nothing else may take this name.
+/// argued with, so the only way to forge one is to *be called* `reljod`.
 ///
-/// Hard-coded rather than configured, in the same spirit as
-/// [`crate::delivery::Kind::Human`]'s "[message from Reljod]" and
-/// [`crate::store::Origin::Owner`]: this program has one owner, and a settings
-/// key for who he is would be a knob with one position and a way to get it
-/// wrong.
+/// Hard-coded rather than configured: this program has one owner, and a
+/// settings key for who he is would be a knob with one position and a way to
+/// get it wrong.
 pub const HUMAN: &str = "reljod";
 
 /// Whether this name is the person's.
@@ -675,20 +659,17 @@ const HUMAN_HARNESS: &str = "human";
 
 /// What the main chat is called on the bus.
 ///
-/// A **reserved name**, for the same reason [`HUMAN`] is one. A run that was
-/// started by the orchestrator has to be able to answer it without guessing
-/// what to call it, and a message claiming to come from the orchestrator must
-/// actually have come from the pinned chat. Sender identity is derived from the
-/// run ([`Store::caller_for_run`]), so the only way to forge it would be to *be
-/// called* `main` — which is why [`Store::join_scope`] and
-/// [`Store::enrol_session`] both refuse the name.
+/// A **reserved name**, for [`HUMAN`]'s reason: a run started by the
+/// orchestrator must be able to answer it without guessing, and a message
+/// claiming to come from the orchestrator must have. Sender identity is derived
+/// from the run, so the only way to forge it is to *be called* `main` — which
+/// is why [`Store::join_scope`] and [`Store::enrol_session`] both refuse the
+/// name.
 ///
-/// This was measured before it was written. A run started by `delegate` was
-/// asked to call `roster` and then `send_message` to `main`, and every bus tool
-/// answered `run ... is not a member of any team or work`. A session started by
-/// `open_work` got as far as the roster, saw only `reljod` on it, and its
-/// message to `main` was recorded undeliverable with `` `main` is not a member
-/// of this work ``. There was no return leg at all.
+/// Measured before it was written: a `delegate` run asked to call `roster` and
+/// `send_message` got `run ... is not a member of any team or work`, and an
+/// `open_work` session saw only `reljod` on the roster. There was no return leg
+/// at all.
 pub const MAIN: &str = "main";
 
 /// Whether this name is the main chat's.
@@ -879,17 +860,14 @@ impl Store {
 
     /// Every thread on this scope's bus, with its messages and its state.
     ///
-    /// **The screen's query, and it exists because the obvious way to build
-    /// that screen is quadratic.** Rendering a work's traffic means the
-    /// threads, each with its messages and whether it is paused — and asking
-    /// [`Store::thread_state`] per thread costs three queries *per thread* on
-    /// every repaint, because each one re-reads the bounds and recounts the
-    /// scope's whole traffic. This reads the traffic once, groups it in
-    /// memory, and asks for the bounds once.
+    /// **The screen's query, and it exists because the obvious way is
+    /// quadratic.** Asking [`Store::thread_state`] per thread costs three
+    /// queries *per thread* on every repaint, each re-reading the bounds and
+    /// recounting the scope's traffic. This reads the traffic once, groups it
+    /// in memory, and asks for the bounds once.
     ///
     /// Ordered the way it is read: threads by when they were last spoken in,
-    /// messages within a thread oldest first, so the newest thing is last in
-    /// both directions.
+    /// messages oldest first.
     pub fn threads(&self, scope: Scope, team: &str) -> Result<Vec<Thread>> {
         let bounds = self.bounds_for(scope, team)?;
         let used = self.messages_used(scope, team)?;
@@ -955,12 +933,12 @@ impl Store {
     ///
     /// One write for the whole decision — reading the parent, counting the
     /// traffic, checking the bounds and inserting — because a bound checked in
-    /// one transaction and enforced in another is a bound two agents can race
-    /// past together.
+    /// one transaction and enforced in another is one two agents can race past
+    /// together.
     ///
     /// Every ending is recorded. A refused message and a message to nobody both
-    /// leave a row, because the human reading the traffic afterwards needs to
-    /// see the attempt, and the sender needs an answer rather than silence.
+    /// leave a row, because the human reading the traffic needs to see the
+    /// attempt.
     pub fn post(&self, post: &Post) -> Result<Sent> {
         let bounds = self.bounds_for(post.scope, post.team)?;
         let at = now_ms();
@@ -1207,21 +1185,19 @@ impl Store {
 
     /// Put the person on this scope's roster.
     ///
-    /// The human is the one participant definitely present, and without this an
-    /// agent answering a question it had been asked was told ``reljod` is not a
-    /// member of this team` and its reply recorded undeliverable. Observed in a
-    /// real run: mail went *to* the agents and could not come back.
+    /// The human is the one participant definitely present. Without this an
+    /// agent answering a question was told ``reljod` is not a member of this
+    /// team` and its reply recorded undeliverable — observed in a real run:
+    /// mail went *to* the agents and could not come back.
     ///
     /// **A real row rather than a special case in the send path.**
     /// [`Store::post`] already refuses a non-member and [`Store::roster`]
     /// already lists members, so a row makes the person addressable through
-    /// code that exists, with no second notion of who is here. The alternative
-    /// is a branch in both, and a third in whatever asks next.
+    /// code that exists. The alternative is a branch in both, and a third in
+    /// whatever asks next.
     ///
-    /// What the row is not: something that can be woken. It holds no session
-    /// and no run, and every delivery path asks [`is_human`] first.
-    ///
-    /// Idempotent, and it never overwrites a session or a run onto the person.
+    /// What the row is not: something that can be woken. Every delivery path
+    /// asks [`is_human`] first.
     pub fn ensure_human_member(&self, scope: Scope, team: &str) -> Result<()> {
         let at = now_ms();
         self.write(|tx| insert_human_member_in(tx, scope, team, at))
@@ -1259,21 +1235,17 @@ impl Store {
 
     /// Put the main chat on this scope's roster.
     ///
-    /// The counterpart to [`Store::ensure_human_member`], and it exists for the
-    /// half of Reljod's ask that was missing: a run he delegated something to
-    /// should be able to come back and say what the answer is, or that it has
-    /// finished. Before this there was no address for that. A delegated run was
-    /// in no scope at all and every bus tool refused it; a work session had a
-    /// roster with the person on it and nothing else, so `send_message` to
-    /// `main` was written down as undeliverable.
+    /// The counterpart to [`Store::ensure_human_member`], for the half of the
+    /// ask that was missing: a delegated run should be able to come back and
+    /// say what the answer is. Before this a delegated run was in no scope at
+    /// all, and a work session's roster held the person and nothing else.
     ///
-    /// A real row rather than a special case in the send path, for the reason
-    /// [`Store::ensure_human_member`] gives.
+    /// A real row rather than a special case, for
+    /// [`Store::ensure_human_member`]'s reason.
     ///
-    /// Returns `false` when there is no main chat yet — a work opened from the
-    /// command line before anybody has ever typed into `jod main` — because a
-    /// roster entry for a conversation that does not exist would be an address
-    /// that silently goes nowhere.
+    /// Returns `false` when there is no main chat yet, because a roster entry
+    /// for a conversation that does not exist is an address that silently goes
+    /// nowhere.
     pub fn ensure_main_member(&self, scope: Scope, team: &str) -> Result<bool> {
         let Some(conversation) = self.pinned_conversation()? else {
             return Ok(false);
@@ -1290,16 +1262,12 @@ impl Store {
     /// Whether the member called `main` in this scope really is the main chat.
     ///
     /// The name is reserved from now on, but a database written before it was
-    /// cannot be. `jod team join crew main` was legal, and so was a work session
-    /// whose title slugged to `main`, so a roster somewhere may already hold an
-    /// ordinary teammate under that name. Deciding from the name alone would
-    /// divert that teammate's mail to the orchestrator and it would simply stop
-    /// receiving anything — the kind of fault that surfaces weeks later as an
-    /// unexplained silence.
+    /// cannot be: `jod team join crew main` was legal. Deciding from the name
+    /// alone would divert that teammate's mail to the orchestrator, and it
+    /// would simply stop receiving anything — a fault that surfaces weeks later
+    /// as unexplained silence.
     ///
-    /// So identity is the pinned conversation on the row, which only
-    /// [`insert_main_member_in`] ever writes, and never the spelling of the
-    /// name.
+    /// So identity is the pinned conversation on the row, never the spelling.
     pub fn is_main_chat_member(&self, scope: Scope, team: &str, name: &str) -> Result<bool> {
         if !is_main(name) {
             return Ok(false);
@@ -1337,25 +1305,20 @@ impl Store {
 
     /// Open a two-party bus between a delegated run and the main chat.
     ///
-    /// `delegate` starts a run that belongs to no work and therefore to no
-    /// addressing scope, which is why every bus tool used to refuse it outright.
-    /// This gives it one: a team named after the run itself, holding exactly the
-    /// run and `main`.
+    /// `delegate` starts a run belonging to no work and therefore no addressing
+    /// scope, which is why every bus tool used to refuse it. This gives it one:
+    /// a team named after the run, holding the run and `main`.
     ///
-    /// Named after the run rather than shared between all delegated runs on
-    /// purpose. One standing scope would put every one-shot Jod has ever started
-    /// on every other one's roster, and a `send_message` with no recipient — a
-    /// broadcast — would wake all of them. A private channel costs no more code
-    /// and cannot do that.
+    /// Named after the run rather than shared: one standing scope would put
+    /// every one-shot on every other's roster, and a broadcast would wake all
+    /// of them.
     ///
-    /// Bound by `agent_id` rather than by conversation, because at the moment
-    /// `delegate` returns the run has usually not written into a conversation
-    /// yet; the run id is the one identifier that certainly exists.
-    /// [`Store::caller_for_run`] reads the binding first, so the run resolves to
-    /// this member from its very first tool call.
+    /// Bound by `agent_id` rather than conversation, because when `delegate`
+    /// returns the run has usually written into no conversation yet — the run
+    /// id is the one identifier that certainly exists.
     ///
-    /// Returns the name the run answers to, or `None` when there is no main chat
-    /// to report to and a channel would therefore lead nowhere.
+    /// Returns the name the run answers to, or `None` when there is no main
+    /// chat and a channel would lead nowhere.
     pub fn open_return_channel(
         &self,
         run_id: &str,
@@ -1381,23 +1344,19 @@ impl Store {
 
     /// Take everything waiting for a member and queue it on a conversation.
     ///
-    /// The join between the two halves of the return leg. Mail is addressed to a
-    /// *member*; the main chat is a *conversation*, and the queue in
-    /// [`crate::delivery`] is the thing that already knows how to turn something
-    /// waiting for a conversation into a turn — it resolves the session, resumes
-    /// it, and batches whatever else arrived in the meantime into the same turn.
-    /// The module's own notes say a member that is a conversation "would fit
-    /// straight away", and the main chat is exactly that case: one pinned
-    /// conversation with a stable id that outlives every run.
+    /// The join between the two halves of the return leg. Mail is addressed to
+    /// a *member*; the main chat is a *conversation*, and [`crate::delivery`]
+    /// already knows how to turn something waiting for a conversation into a
+    /// turn. That module's own notes say a member that is a conversation "would
+    /// fit straight away", and the main chat is exactly that case.
     ///
-    /// So this is deliberately not a second delivery mechanism. It is the drain
-    /// [`crate::ticker::Ticker::tick_mail`] already does for a teammate, ending
-    /// in [`crate::delivery`]'s queue instead of in a fresh spawn.
+    /// So this is not a second delivery mechanism: it is the drain
+    /// [`crate::ticker::Ticker::tick_mail`] already does, ending in the queue
+    /// instead of a fresh spawn.
     ///
-    /// One transaction, because the two halves must not come apart: a drain that
-    /// committed without its queue rows would mark mail delivered that nobody
-    /// will ever be told about, and a queue written without the drain would
-    /// deliver the same message on every tick for ever.
+    /// One transaction, because the halves must not come apart: a drain without
+    /// its queue rows marks mail delivered that nobody will hear about, and a
+    /// queue without the drain delivers the same message every tick for ever.
     pub fn hand_mail_to_conversation(
         &self,
         team: &str,
@@ -1450,15 +1409,13 @@ impl Store {
 
     /// Make a session a member of its work, with no join step.
     ///
-    /// A work *is* an addressing scope — asking the sessions the orchestrator
+    /// A work *is* an addressing scope, so asking the sessions the orchestrator
     /// opened for one intent to join the thing they are already part of would
-    /// be a tax on every delegation. So this runs when a conversation is
-    /// attached to a work, and afterwards its siblings can address it by name.
+    /// tax every delegation.
     ///
-    /// The name is assigned once and never changes. A member that renames
-    /// itself when its conversation is retitled would be a message delivered to
-    /// the wrong agent — or to nobody — halfway through a thread, and that
-    /// failure is invisible from both ends.
+    /// The name is assigned once and never changes: a member that renamed
+    /// itself when its conversation was retitled would be a message delivered
+    /// to the wrong agent halfway through a thread, invisibly from both ends.
     pub fn enrol_session(
         &self,
         work_id: &str,
