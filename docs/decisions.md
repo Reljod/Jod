@@ -3086,6 +3086,54 @@ harnesses exactly as it does for main.
 The general shape: copying a pattern's shape is usually right, and copying its
 mechanism inherits its bugs.
 
+## A free engineer takes the next instruction, whatever it is about
+
+The manager's brief told it to look for "an agent already doing this" before
+starting a new one. That reads as a test about the *subject*, and a manager
+applying it does the wrong thing on the very next instruction: Reljod says
+something about the same repository that happens to be about something else,
+the check for "already doing this" comes back no, and the manager opens a cold
+session beside an engineer sitting idle three feet away.
+
+The engineer sitting idle is worth more than the topical match. It has the
+checkout in its head — the layout, the conventions, what it shipped an hour ago
+and why it made the calls it made. A fresh session has to buy all of that again
+from the files, it takes minutes to do it, and some of what it concludes will be
+worse than what the previous session had already settled. So the rule is
+availability: free engineer takes it, and a second session is for when everybody
+is busy, everybody is stalled, or there is nobody at all.
+
+`list_agents` now answers that outright rather than leaving it to be derived.
+Deriving it was a trap in two directions. `busy` is false for a *stalled* agent
+as well as for an idle one, so "not busy" would have routed instructions into a
+session that has stopped answering; and an agent that never reported a session
+id cannot be continued however idle it looks, because that is the thing
+`continue_agent` resumes. Both live in `AgentView::free`, the run ids are listed
+in `idle` newest first, and `reuse` says in one sentence which of the two tool
+calls this is. A manager reads a field instead of reasoning, which is the same
+move `settle_project` made for routing — see
+[a manager is found by its project](#a-manager-is-found-by-its-project-never-by-a-pinned-flag).
+
+## A row that echoes its instruction back reads as a dead row
+
+A run that has been handed an instruction and has not answered yet had exactly
+one thing under it in the transcript: the instruction. The fleet summarises a
+row with the newest message in it, so the row showed the prompt — indistinguishable
+from an agent that had been given something and was ignoring it.
+
+That is not a rare state. `claude --resume` loads the whole session transcript
+before it emits a token, and on a session that has been running for an hour that
+is megabytes and minutes. Measured on a real continuation: spawned at 23:50:30,
+first word at 23:53:18. For two minutes and forty-eight seconds the fleet showed
+a working engineer as a row that had said nothing, which is how a healthy session
+gets killed and restarted by hand.
+
+So `summarise` takes the role. When the newest message is the instruction, the
+row says `starting…` and keeps the instruction after it, so it still says what
+the agent is about to do. The stall badge is not the right tool for this — it
+fires on a threshold and means wedged, and a session three minutes into a resume
+is neither wedged nor silent by accident.
+
 ## A verb the fleet does not obey is a verb nobody believes
 
 Archiving a project already took it off the catalog, out of inference, and off
