@@ -3820,6 +3820,29 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
                     &format!("{} open · {} {}", node.cards, node.blocked, rail::BLOCKED),
                 ));
             }
+            // Where the work is, which is the first thing a person asks after
+            // "is it done". A work session reads the checkout and writes to a
+            // worktree it claimed, so an agent can truthfully report a file
+            // changed while the checkout on screen is untouched — and until
+            // this was drawn, nothing anywhere said which directory to look
+            // in. The branch comes first because it is the shorter answer and
+            // the one that survives being written down.
+            if let Some(branch) = &node.branch {
+                lines.push(detail("branch", branch));
+            }
+            if let Some(worktree) = &node.worktree {
+                // Cut from the left, like every other path on this screen: the
+                // end of a worktree path is the repository name and the slug,
+                // and the front of it is `$JOD_HOME/worktrees` on every row.
+                let shown = under_home(
+                    Path::new(worktree),
+                    std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+                );
+                lines.push(detail(
+                    "worktree",
+                    &fit_path(&shown, area.width.saturating_sub(14) as usize),
+                ));
+            }
             if !node.summary.is_empty() {
                 lines.push(Line::from(""));
                 for wrapped in wrap(&node.summary, area.width.saturating_sub(4) as usize, 2) {
@@ -11268,6 +11291,8 @@ mod tests {
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }

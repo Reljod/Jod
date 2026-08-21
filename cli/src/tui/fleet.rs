@@ -515,6 +515,8 @@ mod tests {
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }

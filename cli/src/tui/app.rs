@@ -3282,6 +3282,8 @@ mod tests {
             cards: 1,
             blocked: 1,
             colour: String::new(),
+            branch: None,
+            worktree: None,
             expanded: false,
             has_children: false,
         }
@@ -3409,6 +3411,8 @@ mod tests {
             cards: 0,
             blocked: 0,
             colour: String::new(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }

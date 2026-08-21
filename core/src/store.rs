@@ -1533,6 +1533,41 @@ const MIGRATIONS: &[(&str, &str)] = &[
        AND id IN (SELECT work_id FROM settled);
     "#,
     ),
+    (
+    "0024_an_existing_manager_reports_to_main",
+    r#"
+    -- The link that made a manager's card reach Reljod.
+    --
+    -- Cards cascade upward along `conversations.parent_conversation_id`. An
+    -- engineer is hung under its manager when its work is opened, but a
+    -- manager was created hanging under nothing — so the chain stopped one
+    -- link short of the person it exists to report to. `ask_manager` told
+    -- Reljod "It will raise a card on your rail" and the manager preamble told
+    -- the manager that a card "cascades up to his rail and is the only way
+    -- your answer reaches him", while main's rail read "nothing waiting".
+    --
+    -- `Store::manager_conversation` sets the parent now. This is the backfill
+    -- for the managers that already exist, which are exactly the ones on the
+    -- machines where the promise has been broken longest.
+    --
+    -- Safe despite everything then hanging under main, because
+    -- `Jod::cascade_stop` already exempts the pinned conversation by name:
+    -- stopping the chat you are typing into must not stop the machine.
+    --
+    -- Only rows with no parent are touched. A manager that somehow acquired
+    -- one is a fact somebody wrote, and overwriting it would move an existing
+    -- rail's cards to a different rail.
+    UPDATE conversations
+       SET parent_conversation_id = (
+             SELECT m.id FROM conversations m WHERE COALESCE(m.pinned, 0) = 1 LIMIT 1
+           )
+     WHERE parent_conversation_id IS NULL
+       AND COALESCE(pinned, 0) = 0
+       AND id IN (SELECT manager_conversation_id FROM projects
+                   WHERE manager_conversation_id IS NOT NULL)
+       AND EXISTS (SELECT 1 FROM conversations m WHERE COALESCE(m.pinned, 0) = 1);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
@@ -5226,6 +5261,92 @@ mod tests {
     fn an_in_memory_store_admits_it_has_no_path_to_share() {
         // A supervisor is a separate process; it cannot open this.
         assert_eq!(Store::in_memory().unwrap().path(), None);
+    }
+
+    /// The backfill for managers that already exist.
+    ///
+    /// A manager created before `manager_conversation` set the parent hangs
+    /// under nothing, so its cards never reach main's rail — and those are the
+    /// managers on the machines where the promise has been broken longest.
+    /// Driven through `cards` rather than by reading the column, because the
+    /// column being set is not the claim; the claim is that the card arrives.
+    #[test]
+    fn the_backfill_puts_an_existing_manager_under_the_main_chat() {
+        use crate::cards::{NewCard, Query};
+
+        let s = Store::in_memory().unwrap();
+        let main = s
+            .main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let dir = format!("/tmp/jod-backfill-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir))
+            .unwrap();
+        let (manager, _) = s
+            .manager_conversation(&project.id, crate::harness::HarnessKind::ClaudeCode)
+            .unwrap();
+
+        // Put it back the way the old code left it, which is the state on
+        // every machine that has used a manager before today.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET parent_conversation_id = NULL WHERE id = ?1",
+                params![manager],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        s.raise_card(NewCard {
+            conversation_id: manager.clone(),
+            title: "the edit is done".into(),
+            ..NewCard::default()
+        })
+        .unwrap();
+        let rail = |root: &str| {
+            s.cards(&Query {
+                subtree_of: Some(root.to_string()),
+                ..Query::default()
+            })
+            .unwrap()
+            .iter()
+            .map(|c| c.title.clone())
+            .collect::<Vec<_>>()
+        };
+        assert!(
+            !rail(&main).contains(&"the edit is done".to_string()),
+            "the bug, reproduced: main's rail cannot see it",
+        );
+
+        let (_, sql) = MIGRATIONS
+            .iter()
+            .find(|(name, _)| name.starts_with("0024"))
+            .expect("the backfill migration");
+        s.write(|tx| {
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            rail(&main).contains(&"the edit is done".to_string()),
+            "after the backfill it arrives: {:?}",
+            rail(&main),
+        );
+        // Main is not made its own parent, which would be a cycle the rail's
+        // recursive walk has to survive rather than a link anybody wanted.
+        let parent: Option<String> = {
+            let conn = s.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT parent_conversation_id FROM conversations WHERE id = ?1",
+                params![main],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(parent, None, "the main chat reports to nobody");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

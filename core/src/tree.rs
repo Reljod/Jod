@@ -130,6 +130,21 @@ pub struct Node {
     pub blocked: usize,
     /// The owning work's colour, for tinting the row.
     pub colour: String,
+    /// The branch the work's held worktree is on, if it has claimed one.
+    ///
+    /// A work session is launched in the checkout and reads it read-only; the
+    /// moment it needs to write it calls `claim_worktree`, and from then on its
+    /// edits land on a branch in a directory under `$JOD_HOME/worktrees` that
+    /// nothing on screen used to name. So an agent would report a file changed,
+    /// and the checkout the person was looking at was untouched. These two
+    /// fields are what lets a row say where its work actually is.
+    ///
+    /// Null on `Main`, `Project` and `Manager` rows, none of which do work, and
+    /// on a work that has not claimed one — which is the honest starting state,
+    /// not a missing value.
+    pub branch: Option<String>,
+    /// Where that branch is checked out.
+    pub worktree: Option<String>,
     pub expanded: bool,
     pub has_children: bool,
 }
@@ -244,6 +259,10 @@ fn push_runs(
             cards: 0,
             blocked: 0,
             colour: colour.to_string(),
+            // A run inherits nothing: the worktree belongs to the work
+            // above it, and the row that names it is the one that holds it.
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         });
@@ -275,7 +294,14 @@ fn push_work(
     from: &mut Flatten<'_>,
     base_depth: usize,
     parent: Option<NodeId>,
+    // The worktree this work holds, if it has claimed one. Given to the work
+    // row and to every session under it: a session inherits its work's lease
+    // rather than holding one of its own, and the session row is what the tree
+    // usually shows once `condense` has folded the work away.
+    lease: Option<&crate::leases::Lease>,
 ) -> (usize, usize, bool) {
+    let branch = lease.map(|l| l.branch.clone());
+    let worktree = lease.map(|l| l.worktree_path.to_string_lossy().into_owned());
     let own = from.sessions.remove(&work.id).unwrap_or_default();
     // A session whose parent is outside this work — the main chat is the usual
     // one — hangs from the work itself. Otherwise the whole subtree would be
@@ -309,6 +335,8 @@ fn push_work(
         cards: 0,
         blocked: 0,
         colour: work.colour.clone(),
+        branch: branch.clone(),
+        worktree: worktree.clone(),
         expanded: true,
         has_children: !own.is_empty(),
     });
@@ -360,6 +388,8 @@ fn push_work(
             cards: session.cards,
             blocked: session.blocked,
             colour: work.colour.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
             expanded: true,
             has_children,
         });
@@ -425,6 +455,10 @@ impl Store {
         // below. The alternative is a lookup per run node, on the screen most
         // likely to be open while forty runs are going.
         let stalled = self.stalled_runs()?;
+        // Same bargain as `stalled`: one read for the whole forest rather than
+        // a lookup per work, so the row can say where its agent is actually
+        // writing without costing a query per redraw.
+        let leases = self.held_leases_by_work()?;
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
@@ -612,6 +646,9 @@ impl Store {
                 cards: main_cards,
                 blocked: main_blocked,
                 colour: "cyan".to_string(),
+                // Jod routes; it does not check anything out.
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: holds_runs(&from, main),
             });
@@ -667,6 +704,9 @@ impl Store {
                 cards: 0,
                 blocked: 0,
                 colour: project.colour.clone(),
+                // A project row is the checkout itself, never a worktree of it.
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: true,
             });
@@ -703,6 +743,9 @@ impl Store {
                     cards: manager_cards,
                     blocked: manager_blocked,
                     colour: project.colour.clone(),
+                    // A manager decides; its engineers hold the worktrees.
+                    branch: None,
+                    worktree: None,
                     expanded: true,
                     has_children: holds_runs(&from, manager),
                 });
@@ -715,12 +758,14 @@ impl Store {
             }
 
             for work in by_project.remove(&project.id).unwrap_or_default() {
+                let held = leases.get(&work.id);
                 let (cards, blocked, running) = push_work(
                     &mut out,
                     &work,
                     &mut from,
                     1,
                     Some(NodeId::project(&project.id)),
+                    held,
                 );
                 project_cards += cards;
                 project_blocked += blocked;
@@ -732,7 +777,8 @@ impl Store {
         }
 
         for work in loose {
-            push_work(&mut out, &work, &mut from, 0, None);
+            let held = leases.get(&work.id);
+            push_work(&mut out, &work, &mut from, 0, None, held);
         }
 
         Ok(out)
@@ -1371,6 +1417,8 @@ mod tests {
                 cards: 2,
                 blocked: 1,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: true,
             },
@@ -1387,6 +1435,8 @@ mod tests {
                 cards: 0,
                 blocked: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: false,
             },
@@ -1811,6 +1861,10 @@ mod tests {
             cards: 0,
             blocked: 0,
             colour: "cyan".into(),
+            // A run inherits nothing: the worktree belongs to the work
+            // above it, and the row that names it is the one that holds it.
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }];
