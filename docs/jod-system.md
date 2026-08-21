@@ -364,7 +364,7 @@ Typing `/` opens a completion popup — `Tab` completes, `↑↓` choose — and
 arguments are completed too, so `/harness ` offers the three spellings rather
 than expecting them to be remembered.
 
-There are forty-seven of them, and one table in `cli/src/tui/command.rs` is both
+There are forty-five of them, and one table in `cli/src/tui/command.rs` is both
 the help text and the completion list, so the two cannot disagree.
 
 **The conversation itself**
@@ -848,7 +848,7 @@ status line are the same behaviour — ported from
 Rust ones assert, case for case.
 
 It is not the same *surface*, and the gap has widened. The phone carries twelve
-slash commands against the console's forty-seven, and it is the twelve that read
+slash commands against the console's forty-five, and it is the twelve that read
 or steer one conversation: harness, model, thinking, details, new, sessions,
 resume, agents, team, clear, help, exit. Everything the console grew since —
 schedules, goals, hooks, grants, roots, projects, dictation, the rail — either
