@@ -1,43 +1,37 @@
 //! Conversations as a DAG: list, resume, fork, branch, revert, compact.
 //!
-//! Owned by the conversation track. Schema is migration `0006_conversations`
-//! in [`crate::store`].
+//! Schema is migration `0006_conversations` in [`crate::store`].
 //!
 //! # Why Jod owns a graph the harnesses do not
 //!
-//! `research/session-model-2026/PRIOR-ART.md` found exactly two ways anybody
-//! represents a branched conversation, and they are not interchangeable:
+//! `research/session-model-2026/PRIOR-ART.md` found two ways anybody represents
+//! a branched conversation, and they are not interchangeable:
 //!
-//! - **Copy a prefix into a new container.** Claude Code writes a new
-//!   `.jsonl`; OpenCode's `fork` deep-copies rows with fresh ids. Cheap to
-//!   read, and it records no parent edge — branch topology survives only as an
-//!   id coincidence between two files. You cannot render "‹ 2/3 ›" from it,
-//!   because nothing knows the two branches are siblings.
+//! - **Copy a prefix into a new container.** Claude Code writes a new `.jsonl`;
+//! OpenCode's `fork` deep-copies rows. Cheap to read, and it records no parent
+//! edge — you cannot render "‹ 2/3 ›" from it, because nothing knows the two
+//! branches are siblings.
 //! - **One shared DAG with a moving head pointer.** ChatGPT's `current_node`,
-//!   LangGraph's `checkpoint_id`, git's `HEAD`. Every reader must linearise by
-//!   walking parents, and in exchange nothing is lost.
+//! git's `HEAD`. Every reader must linearise by walking parents, and in
+//! exchange nothing is lost.
 //!
-//! This module implements the second. A fork here mints a *conversation row*
-//! whose head points at an existing message; it copies no messages at all. The
-//! prefix is shared by ancestry, so both branches walk through the same nodes
-//! and a sibling pager is a one-line query rather than an impossibility.
+//! This implements the second. A fork mints a *conversation row* whose head
+//! points at an existing message and copies nothing, so a sibling pager is a
+//! one-line query.
 //!
-//! The consequence to keep in mind: [`Message::conversation_id`] records which
-//! conversation *minted* a message, not which conversations can see it. A
-//! fork's [`Store::thread`] runs straight through its parent's messages. Any
-//! query that means "the messages of this thread" must walk `parent_id`;
-//! filtering on `conversation_id` gives you only the ones added since the fork.
+//! The consequence: [`Message::conversation_id`] records which conversation
+//! *minted* a message, not which can see it. Any query meaning "the messages of
+//! this thread" must walk `parent_id`.
 //!
 //! # Why nothing here deletes
 //!
-//! Revert moves the head backwards and stops. The abandoned tail keeps its
-//! rows, keeps its parent edge, and stays reachable through [`Store::tips`].
-//! Compaction sets `active = 0` and stops; the text stays in `messages_fts`.
+//! Revert moves the head backwards and stops; the abandoned tail stays
+//! reachable through [`Store::tips`]. Compaction sets `active = 0`; the text
+//! stays in `messages_fts`.
 //!
-//! Both follow the same finding: git's `reflog` is why a bad `reset` is
-//! survivable, and OpenCode's `revert()` deletes zero rows so that `unrevert()`
-//! can exist. Destroying on revert buys nothing — the rows are small — and it
-//! is the one mistake a user cannot undo.
+//! Git's `reflog` is why a bad `reset` is survivable, and OpenCode's `revert()`
+//! deletes zero rows so `unrevert()` can exist. Destroying buys nothing — the
+//! rows are small — and it is the one mistake a user cannot undo.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -111,15 +105,13 @@ pub struct Message {
     pub tool_name: Option<String>,
     /// The structured payload, kept whole.
     ///
-    /// For a `ToolCall` this is the call's arguments. Whole, not summarised:
-    /// the event stream carries a truncated `summary`, which is enough to
-    /// *watch* a run and not enough to replay one into a different harness —
-    /// and replay is the entire reason Jod stores transcripts.
+    /// For a `ToolCall`, the call's arguments. Whole, not summarised: the event
+    /// stream carries a truncated `summary`, which is enough to *watch* a run
+    /// and not enough to replay one into a different harness.
     ///
-    /// For a `ToolResult` it carries the result's structured metadata
-    /// (`{"is_error": true}`), because `0006_conversations` has no column for
-    /// it and dropping the error flag would make a failed tool call
-    /// indistinguishable from a successful one on replay.
+    /// For a `ToolResult`, the structured metadata — `0006_conversations` has
+    /// no column for it, and dropping the error flag would make a failed tool
+    /// call indistinguishable from a successful one on replay.
     pub tool_input: Option<serde_json::Value>,
     /// The run that produced this message, when a run did.
     pub run_id: Option<String>,
@@ -182,29 +174,26 @@ impl NewMessage {
         self
     }
 
-    /// Project one normalised event into a message, or `None` when the event
-    /// is not a turn.
+    /// Project one normalised event into a message, or `None` when the event is
+    /// not a turn.
     ///
     /// **Keep this pure and cheap.** It doubles as a predicate, so a store
-    /// lookup here would land on every event of every run — including each
-    /// `Raw` line, of which a chatty harness emits many.
+    /// lookup here would land on every event of every run.
     ///
     /// Five kinds deliberately produce nothing:
     ///
-    /// - `Progress` is a contentless liveness tick. It belongs in a status
-    ///   line, never in a transcript replayed into another harness.
+    /// - `Progress` is a contentless liveness tick, belonging in a status line.
     /// - `Delta` is a fragment of a block that reappears complete as the
-    ///   `Message`/`ToolCall` this function already maps. Keeping both would
-    ///   replay the first harness's streaming pace into the second.
+    /// `Message`/`ToolCall` this already maps — keeping both would replay the
+    /// first harness's streaming pace into the second.
     /// - `Started` is metadata: the session id and model belong on the
-    ///   conversation row — see [`Store::set_conversation_session`].
-    /// - `Finished.text` is always a repeat of the last `Message`, so
-    ///   appending it would double the final assistant turn.
-    /// - `Raw` is an unclassified line. The event log keeps it so a harness
-    ///   upgrade degrades to "shown verbatim", but a transcript meant for
-    ///   another harness is the one place it does not belong.
-    /// - `ToolResult`/`ToolCall` do map — listed only to say they are not
-    ///   exclusions.
+    ///   conversation
+    /// row.
+    /// - `Finished.text` is always a repeat of the last `Message`.
+    /// - `Raw` is unclassified. The event log keeps it so a harness upgrade
+    ///   degrades
+    /// to "shown verbatim", but a transcript meant for another harness is the
+    /// one place it does not belong.
     pub fn from_event(event: &AgentEvent) -> Option<NewMessage> {
         match event {
             AgentEvent::Message { text } => Some(NewMessage::new(Role::Assistant, text.clone())),
@@ -237,16 +226,14 @@ impl NewMessage {
             // A run that died mid-way must say so in the transcript, or the
             // thread reads as though the agent simply stopped talking.
             AgentEvent::Error { message } => Some(NewMessage::new(Role::System, message.clone())),
-            // `Progress` and `Delta` join them: a liveness tick with no
-            // content, and a fragment whose complete form is handled above —
-            // neither belongs in a transcript replayed into another harness.
+            // `Progress` and `Delta` join them: a contentless tick, and a
+            // fragment whose complete form is handled above.
             //
-            // `SessionLost` too, and it is the clearest case of the three: it
-            // is a fact about Jod's bookkeeping, not about the conversation.
-            // The thread it interrupts is *about* to be replayed into a fresh
-            // session, and telling that session its predecessor could not be
-            // found would put Jod's plumbing into the model's context as though
-            // somebody had said it.
+            // `SessionLost` too, and it is the clearest case: it is a fact
+            // about Jod's bookkeeping. The thread it interrupts is *about* to
+            // be replayed into a fresh session, and telling that session its
+            // predecessor could not be found would put Jod's plumbing into the
+            // model's context as though somebody had said it.
             AgentEvent::Started { .. }
             | AgentEvent::Finished { .. }
             | AgentEvent::Raw { .. }
@@ -366,14 +353,12 @@ pub struct Compaction {
 
 /// A transcript entry stripped of everything Jod-specific.
 ///
-/// No ids, no conversation, no parent. That is the point: a handle into Jod's
-/// database means nothing to Claude Code, and a Claude Code session id means
-/// nothing to OpenCode. What crosses the seam is roles, text and whole tool
-/// payloads — the vocabulary all three harnesses share.
+/// No ids, no conversation, no parent: a handle into Jod's database means
+/// nothing to Claude Code, and a Claude Code session id means nothing to
+/// OpenCode. What crosses the seam is roles, text and whole tool payloads.
 ///
-/// `role` is a string rather than [`Role`] for the same reason: a wire shape
-/// that forces its reader to know Jod's closed enum is not harness-neutral. It
-/// carries every [`Role::as_str`] value plus `"summary"` for a compaction.
+/// `role` is a string rather than [`Role`] for the same reason, and carries
+/// every [`Role::as_str`] value plus `"summary"` for a compaction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortableMessage {
     pub role: String,
@@ -429,18 +414,14 @@ impl Store {
 
     /// The conversation a run wrote into, if it wrote anything.
     ///
-    /// The inverse of [`Message::run_id`]: a run id is what every client
-    /// already holds, and "show me the thread this produced" is the next
-    /// question after "show me this run".
+    /// The inverse of [`Message::run_id`]: "show me the thread this produced"
+    /// is the next question after "show me this run".
     ///
     /// `None` covers two situations that look alike — a run that minted no
-    /// message, and a run nobody wired to a conversation — and both mean "there
-    /// is no thread to show".
+    /// message, and a run nobody wired to a conversation.
     ///
     /// Reads the *first* message the run minted, so the answer does not change
-    /// as the run goes on. It scans: `messages` is indexed on
-    /// `(conversation_id, id)` and `parent_id`, not `run_id`. Fine at one
-    /// machine's history; worth an index if it ever lands in a hot path.
+    /// as the run goes on. It scans, which is fine at one machine's history.
     pub fn conversation_for_run(&self, run_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         Ok(conn
@@ -496,18 +477,19 @@ impl Store {
     /// Remove a conversation and everything hanging off it.
     ///
     /// Exists for the throwaway titler: a one-turn conversation that names a
-    /// work and is then gone. Deliberately narrow — nothing else needs it.
+    /// work and is then gone. Deliberately narrow.
     ///
     /// Two refusals, neither of which may be widened into a flag:
     ///
-    /// - **The pinned main chat**, the desk instructions arrive at. Deleting it
-    ///   frees nothing and loses the thread every other was opened from.
+    /// - **The pinned main chat.** Deleting it frees nothing and loses the
+    ///   thread
+    /// every other was opened from.
     /// - **Any conversation belonging to a work.** Deleting the *work* is the
-    ///   only sanctioned route, so a session cannot be cut out of a tree that
-    ///   still points at it.
+    ///   only
+    /// sanctioned route, so a session cannot be cut out of a tree pointing at
+    /// it.
     ///
-    /// Messages, cards, roots, delegations and queued deliveries all cascade
-    /// from the row, so one statement takes the lot.
+    /// Messages, cards, roots, delegations and queued deliveries all cascade.
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         self.write(|tx| {
             let found: Option<(i64, Option<String>)> = tx
@@ -563,14 +545,13 @@ impl Store {
     /// Record the session a run just minted, and the harness that minted it, as
     /// one write.
     ///
-    /// The pair moves together or not at all. A session id is the *harness's*
-    /// handle, so a row holding one harness's id under another's name is not a
-    /// stale field — it is an id destined for a program guaranteed to reject
-    /// it. See [`Store::resume_for`] for the failure this caused.
+    /// The pair moves together or not at all: a row holding one harness's id
+    /// under another's name is an id destined for a program guaranteed to
+    /// reject it. See [`Store::resume_for`] for the failure this caused.
     ///
-    /// So the harness is written from the run that reported the session rather
-    /// than left as whatever the row said. A thread whose harness changed under
-    /// it starts fresh once and accumulates normally from the next turn.
+    /// The harness is written from the run that reported the session, so a
+    /// thread whose harness changed starts fresh once and accumulates from the
+    /// next turn.
     pub fn record_session(&self, id: &str, on: HarnessKind, session_id: &str) -> Result<bool> {
         self.write(|tx| {
             Ok(tx.execute(
@@ -581,18 +562,12 @@ impl Store {
         })
     }
 
-    /// Choose the model this conversation runs on from now on, or hand the
-    /// choice back to the caller with `None`.
+    /// Choose the model this conversation runs on, or hand the choice back with
+    /// `None`.
     ///
     /// The write half of [`Conversation::model`]. `/model` in a UI is this
     /// call, not a field on the next spawn: a request's model lasts one turn,
-    /// and the complaint that motivated this was that resuming a conversation
-    /// came back on whatever the client happened to default to.
-    ///
-    /// Unvalidated on purpose. Model names are the harness's vocabulary and
-    /// they change faster than Jod ships — an allow-list here would reject a
-    /// model released last week, which is worse than passing through a typo the
-    /// harness itself will reject with a better message.
+    /// and resuming came back on whatever the client defaulted to.
     pub fn set_conversation_model(&self, id: &str, model: Option<&str>) -> Result<bool> {
         self.write(|tx| {
             Ok(tx.execute(
@@ -624,22 +599,17 @@ impl Store {
 
     /// How to relaunch this conversation on `on`.
     ///
-    /// A conversation Jod has a session id for resumes it; one without starts
-    /// fresh and is replayed from [`Store::transcript`]. There is no `Last`
-    /// here on purpose — "the most recent conversation in this directory" is
-    /// the harness's guess, and once Jod owns the graph it does not need to
-    /// guess.
+    /// One Jod has a session id for resumes it; one without starts fresh and is
+    /// replayed from [`Store::transcript`]. No `Last` on purpose — that is the
+    /// harness's guess, and once Jod owns the graph it need not guess.
     ///
     /// **`on` is not decoration.** Asking how to resume a Claude Code thread
-    /// *on AGY* has one honest answer — start fresh, and replay the transcript
-    /// into it. Answering with the id anyway is how the main chat broke: an old
-    /// `/harness` switch left the pin naming `agy` while the console ran Claude
-    /// Code, so `claude --resume <agy-session>` failed in a second, every turn,
-    /// invisibly, because nothing compared the two.
+    /// *on AGY* has one honest answer: start fresh and replay. Answering with
+    /// the id anyway is how the main chat broke — an old `/harness` switch left
+    /// the pin naming `agy` while the console ran Claude Code, so every turn
+    /// failed in a second, invisibly, because nothing compared the two.
     ///
-    /// An unrecognised harness reads as a mismatch and starts fresh, which is
-    /// the safe direction: an id Jod cannot attribute must not be handed to a
-    /// program that might reject it.
+    /// An unrecognised harness reads as a mismatch and starts fresh.
     pub fn resume_for(&self, conversation_id: &str, on: HarnessKind) -> Result<Resume> {
         let Some(conversation) = self.conversation(conversation_id)? else {
             return Ok(Resume::Fresh);
@@ -672,20 +642,17 @@ impl Store {
     /// Record the question a run was launched to answer, once.
     ///
     /// No harness reports its own prompt back, so nothing in the event stream
-    /// carries it and [`NewMessage::from_event`] never produces a `User`
-    /// message. Without this a transcript reads as an agent talking to itself,
-    /// and a replay hands the next harness an answer to a question nobody
-    /// asked.
+    /// carries it. Without this a transcript reads as an agent talking to
+    /// itself, and a replay hands the next harness an answer to a question
+    /// nobody asked.
     ///
-    /// Idempotent on the run, like everything else a run writes: the prompt
-    /// takes [`PROMPT_SEQ`], so `(run_id, run_seq)` covers a run's whole
-    /// contribution rather than all of it except the question. Returns `None`
-    /// when this run's prompt is already recorded.
+    /// Idempotent on the run: the prompt takes [`PROMPT_SEQ`], so `(run_id,
+    /// run_seq)` covers a run's whole contribution. Returns `None` when already
+    /// recorded.
     ///
-    /// Note what this deliberately does *not* deduplicate. Every spawn mints a
-    /// fresh run id, so asking the same thing twice records two turns — which
-    /// is right, because "do it again" is a second question, not a replay of
-    /// the first.
+    /// It deliberately does *not* deduplicate across runs — every spawn mints a
+    /// fresh id, so asking the same thing twice records two turns, because "do
+    /// it again" is a second question.
     pub fn append_prompt(
         &self,
         conversation_id: &str,
@@ -709,23 +676,19 @@ impl Store {
         })
     }
 
-    /// Append a run's envelopes as one transaction, skipping what is not a
-    /// turn and what has already been recorded. Returns the ids of the
-    /// messages actually written — empty on a pure replay.
+    /// Append a run's envelopes as one transaction, skipping what is not a turn
+    /// and what is already recorded. Returns the ids actually written — empty
+    /// on a pure replay.
     ///
-    /// **This is the one to use on the run path.** Idempotent, because each
-    /// message carries the `seq` it came from and `ux_messages_run_seq` is
-    /// unique over `(run_id, run_seq)`. Replay is *normal* there rather than
-    /// exceptional — [`crate::runner::follow`] restarts from a caller-held
-    /// cursor, and a client reconnecting with `after: None` legitimately
-    /// receives the whole run again — so the guard has to be in the write, not
-    /// in the discipline of whoever calls it. Two followers of the same run
-    /// may both append; the second one writes nothing.
+    /// **The one to use on the run path.** Idempotent, because each message
+    /// carries the `seq` it came from and `ux_messages_run_seq` is unique over
+    /// `(run_id, run_seq)`. Replay is *normal* there — a follower restarts from
+    /// a caller-held cursor — so the guard has to be in the write rather than
+    /// in the discipline of whoever calls it.
     ///
-    /// An envelope already recorded still moves the local head onto the
-    /// message it produced, so a partial replay — the first half seen, the
-    /// second half new — parents the new half onto the right node instead of
-    /// grafting it wherever the head happened to be.
+    /// An envelope already recorded still moves the local head onto the message
+    /// it produced, so a partial replay parents the new half onto the right
+    /// node.
     pub fn append_envelopes(
         &self,
         conversation_id: &str,
@@ -796,19 +759,16 @@ impl Store {
 
     /// Move the head back to an earlier message, and destroy nothing.
     ///
-    /// Everything after `message_id` keeps its rows and its parent edges. It
-    /// drops off [`Store::thread`] only because the thread is defined as "walk
-    /// back from the head", and it comes straight back the moment the head
-    /// moves forward again — [`Store::tips`] lists the abandoned leaves so a UI
-    /// can offer exactly that.
+    /// Everything after `message_id` keeps its rows and parent edges. It drops
+    /// off [`Store::thread`] only because a thread is "walk back from the
+    /// head", and comes back the moment the head moves forward —
+    /// [`Store::tips`] lists the abandoned leaves so a UI can offer exactly
+    /// that.
     ///
-    /// Non-destructive because both the systems that have lived with this
-    /// decision landed there. Git keeps a reflog — 90 days of where every ref
-    /// has been — and that log, not the branch, is what makes a bad `reset`
-    /// survivable; Pro Git singles out `reset --hard` as one of the very few
-    /// ways Git will actually destroy data. OpenCode deletes no rows on
-    /// `revert()` either, and ships `unrevert()` because of it. The rows are
-    /// bytes; the mistake is unrecoverable. That trade only goes one way.
+    /// Non-destructive because both systems that have lived with this decision
+    /// landed there: git's reflog is what makes a bad `reset` survivable, and
+    /// OpenCode ships `unrevert()` because `revert()` deletes no rows. The rows
+    /// are bytes; the mistake is unrecoverable.
     pub fn revert_to(&self, conversation_id: &str, message_id: i64) -> Result<()> {
         let at = now_ms();
         self.write(|tx| {
@@ -825,18 +785,15 @@ impl Store {
     }
 
     /// Put the head on any message in this conversation's graph — forwards,
-    /// backwards, or onto a branch that was abandoned.
+    /// backwards, or onto an abandoned branch.
     ///
-    /// [`Store::revert_to`] only goes backwards, because a revert that went
-    /// forwards would not be one. This is the other half, and it is what makes
-    /// the non-destructive promise redeemable: OpenCode's `unrevert` restores
-    /// the messages a revert hid, and git's reflog exists so a ref can be put
-    /// back somewhere it no longer points. Both are this operation.
+    /// [`Store::revert_to`] only goes backwards. This is what makes the non-
+    /// destructive promise redeemable: OpenCode's `unrevert` and git's reflog
+    /// are both this operation.
     ///
     /// The check is that the target shares a root with the current head, not
-    /// that it is an ancestor of it. A branch abandoned two reverts ago is
-    /// neither ancestor nor descendant of where the head sits now — it is a
-    /// cousin — and it is exactly the thing a user asks to get back.
+    /// that it is an ancestor. A branch abandoned two reverts ago is a cousin,
+    /// and it is exactly the thing a user asks to get back.
     pub fn move_head(&self, conversation_id: &str, message_id: i64) -> Result<()> {
         let at = now_ms();
         self.write(|tx| {
@@ -872,23 +829,19 @@ impl Store {
     /// Fork a conversation at a message.
     ///
     /// Copies nothing. The new conversation's head points at `at_message_id`,
-    /// which still belongs to the original, and everything before it is shared
-    /// by ancestry — so the two threads walk through the same rows and diverge
-    /// only where they actually differ. This is the whole reason Jod keeps its
-    /// own graph: Claude Code forks by writing a second `.jsonl` with the
-    /// prefix copied verbatim and *no* forked-from metadata, and OpenCode
-    /// deep-copies rows with fresh ids and a null `parent_id`. Neither can
-    /// answer "what else came out of this point".
+    /// which still belongs to the original, so the two threads walk the same
+    /// rows and diverge only where they differ. This is why Jod keeps its own
+    /// graph: Claude Code forks by copying the prefix with *no* forked-from
+    /// metadata, and OpenCode deep-copies rows with a null `parent_id`. Neither
+    /// can answer "what else came out of this point".
     ///
-    /// `session_id` is deliberately not inherited. A harness session id names a
-    /// transcript the harness owns; two conversations pointed at the same one
-    /// would write into each other. The fork resumes by replay
-    /// ([`Store::transcript`]) until it earns a session of its own.
+    /// `session_id` is deliberately not inherited: two conversations pointed at
+    /// one harness transcript would write into each other. The fork resumes by
+    /// replay until it earns a session of its own.
     ///
-    /// Caveat worth knowing: `messages.conversation_id` cascades on delete, so
-    /// dropping the *original* conversation takes the shared prefix with it and
-    /// strands the fork's head. Deleting a conversation that has forks needs to
-    /// reparent them first; this module deliberately offers no delete.
+    /// Caveat: `messages.conversation_id` cascades on delete, so dropping the
+    /// *original* takes the shared prefix and strands the fork's head. This
+    /// module offers no delete.
     pub fn fork_conversation(
         &self,
         conversation_id: &str,
@@ -985,17 +938,16 @@ impl Store {
     }
 
     /// Every message sharing a parent with this one, oldest first — including
-    /// the message itself, so a `‹ 2/3 ›` pager is `position(id) / len()`.
+    /// itself, so a `‹ 2/3 ›` pager is `position(id) / len()`.
     ///
-    /// A caveat the transcript reading turned up: siblings arise routinely from
-    /// **parallel tool results**, not only from branching. "Has siblings" is
-    /// not "was branched", and a pager rendered on that assumption will appear
-    /// on turns nobody edited. [`Store::sibling_pager`] returns `None` for the
-    /// lone-child case; deciding whether two real siblings are a branch or a
-    /// parallel fan-out is the caller's, from the roles involved.
+    /// Siblings arise routinely from **parallel tool results**, not only
+    /// branching. "Has siblings" is not "was branched", and a pager rendered on
+    /// that assumption appears on turns nobody edited. [`Store::sibling_pager`]
+    /// returns `None` for the lone-child case; telling a branch from a fan-out
+    /// is the caller's job.
     ///
-    /// Roots have no parent and therefore no siblings here, which is right:
-    /// two roots in the same conversation are two conversations.
+    /// Roots have no parent and so no siblings, which is right: two roots in
+    /// one conversation are two conversations.
     pub fn siblings(&self, message_id: i64) -> Result<Vec<Message>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let Some(msg) = read_message(&conn, message_id)? else {
