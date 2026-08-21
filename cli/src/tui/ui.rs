@@ -2897,7 +2897,7 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         // takes. See `on_which_key`.
         rows.push(("j".into(), "jobs        background shells".into()));
         rows.push(("u".into(), "unread      the oldest thing unread".into()));
-        rows.push(("l".into(), "clear       empty the transcript".into()));
+        rows.push(("l".into(), "clear       empty the screen only".into()));
         rows.push(("d".into(), "projects    show or hide the catalog".into()));
         rows.push(("/".into(), "search      every transcript".into()));
         rows.push(("?".into(), "keys        the whole keymap".into()));

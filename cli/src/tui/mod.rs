@@ -112,6 +112,20 @@ pub enum Action {
     /// It is also how you leave the main chat: entering it binds, and this
     /// unbinds, so `/new` is the way back to an ordinary thread.
     NewThread,
+    /// Forget the context of the conversation the chat box is bound to, while
+    /// staying in it.
+    ///
+    /// The half of `/clear` that needs the database. Everything else it does is
+    /// app state — the screen, the resume cursor, the running cost — but the
+    /// main chat takes its resume from the *store* rather than from
+    /// `App::resume` (see `hand_to_orchestrator`, which reads
+    /// `Store::resume_for`). So clearing at the desk without this wrote nothing
+    /// down, and the next message picked the whole history back up.
+    ///
+    /// Bound to `Thread::conversation` and deliberately not to whatever run is
+    /// being watched: `/clear` typed while looking at somebody else's agent
+    /// stops looking, and must not reach into that agent's session.
+    Clear,
     /// Put the chat box into the main chat.
     ///
     /// The pinned conversation is one of several the TUI can be in, and this is
@@ -1270,6 +1284,17 @@ async fn perform(
         Action::NewThread => {
             thread.conversation = None;
             thread.carried = None;
+        }
+        Action::Clear => {
+            // No database means there is nothing stored to forget, and the app
+            // half of `/clear` has already happened. An ordinary thread is
+            // finished either way: it resumes from `app.resume`, which
+            // `apply_slash` has just put back to `Fresh`.
+            if let Some(store) = jod.store() {
+                if let Some(said) = forget_bound_session(store.as_ref(), thread) {
+                    app.push(said);
+                }
+            }
         }
         // The transcript already says the turn ended — `on_chat_key` said so on
         // the keypress. All that is left is ending the process, and a failure
@@ -5071,7 +5096,24 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Attach(which) => return resolve_agent(app, &which).map(Action::Attach),
         Slash::Todo(title) => return Some(Action::AddTask(title)),
         Slash::Done(id) => return Some(Action::FinishTask(id)),
-        Slash::Clear => go_home(app),
+        Slash::Clear => {
+            // The same three fields `/new` resets, for the same reason: they
+            // are what an ordinary turn resumes from, and a cleared screen in
+            // front of a live session is the lie this command was reported for.
+            // What `/clear` does *not* do is drop the binding — that is `/new`,
+            // and it means "leave", not "start over here".
+            app.resume = Resume::Fresh;
+            app.session = None;
+            app.cost_usd = 0.0;
+            go_home(app);
+            // A hint and not a notice, for the reason `/new`'s line gives: the
+            // splash is drawn over hints, and this command's whole purpose is
+            // to land you back on it.
+            app.push(Entry::Hint(
+                "cleared — the next message starts with no context behind it".into(),
+            ));
+            return Some(Action::Clear);
+        }
         Slash::Update { check } => return Some(Action::Update { check }),
         Slash::Upgrade { check } => return Some(Action::Upgrade { check }),
         Slash::Jobs => app.overlay = Overlay::Jobs,
@@ -5111,6 +5153,52 @@ fn go_home(app: &mut App) {
     app.scroll_to_bottom();
     // Takes the overlay and the back stack with it, which is the rest of home.
     app.go(Workspace::Chat);
+}
+
+/// Drop the harness session behind the conversation the chat box is bound to,
+/// and answer with whatever the user should be told about it.
+///
+/// This is the half of `/clear` that has to reach the database. An ordinary
+/// thread carries its resume cursor on the app, so emptying `App::resume` is
+/// the whole job there; the main chat carries its cursor on the conversation
+/// row, and `hand_to_orchestrator` reads it back through `Store::resume_for`
+/// every turn. Clearing without this wrote nothing down, so the screen went
+/// blank and the very next message resumed the history that had just left it.
+///
+/// The session id is the only thing holding a model's context window, so
+/// dropping it is the entire reset. Jod's transcript is deliberately kept, for
+/// the reason Telegram's `/new` gives: Jod owns the record, and a reset that
+/// destroyed it would make the main chat unauditable from whichever surface
+/// reset it last.
+///
+/// It reads `Thread::conversation` and never `current_conversation`. The
+/// difference matters exactly once, and it is the case that would be a bug:
+/// `current_conversation` falls back to the conversation of the run *being
+/// watched*, so `/clear` typed while looking at somebody else's agent would
+/// reach in and forget that agent's session. `/clear` stops looking. It does
+/// not touch what it was looking at.
+fn forget_bound_session(store: &Store, thread: &Thread) -> Option<Entry> {
+    let id = thread.conversation.as_deref()?;
+    match store.set_conversation_session(id, None) {
+        // Said for the main chat and nowhere else, because only there is it
+        // news. The desk, `jod main` and the phone are one conversation, so
+        // clearing at any of them clears it at all of them — the consequence
+        // Telegram's own reply spells out, and not something the user should
+        // have to discover from the other end.
+        Ok(_) if thread.in_main(Some(store)) => Some(Entry::Hint(
+            "the main chat is one chat — every surface starts fresh with it".into(),
+        )),
+        Ok(_) => None,
+        // Reported rather than undone: the screen is already empty and
+        // `App::resume` is already `Fresh`, and putting the user back into a
+        // conversation they asked to leave would be the worse of the two. What
+        // must not happen is silence — a main chat that quietly resumes a
+        // session the user was told had been dropped is the exact fault this
+        // function exists to end.
+        Err(e) => Some(Entry::Notice(format!(
+            "the screen is clear, but the stored session could not be dropped: {e}"
+        ))),
+    }
 }
 
 /// Put the directory picker on screen, walking from `base`.
@@ -7046,6 +7134,141 @@ mod tests {
                 "{slash:?} leaves nothing but hints, which is what the splash needs"
             );
         }
+    }
+
+    /// The fault this command was reported for: it emptied the screen and left
+    /// the session alone, so the next message picked up the whole conversation
+    /// the user had just watched disappear.
+    ///
+    /// These three fields are what an ordinary turn resumes from, and clearing
+    /// them is the entire reset outside the main chat — `send_turn` hands
+    /// `app.resume` to `spawn` and the harness is given nothing to continue.
+    #[test]
+    fn clearing_starts_the_next_turn_with_no_context() {
+        let mut app = App::new(HarnessKind::ClaudeCode, None, Resume::Session("s-1".into()));
+        app.session = Some("s-1".into());
+        app.cost_usd = 1.25;
+
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::Clear),
+            Some(Action::Clear),
+            "the database half of the same command"
+        );
+
+        assert_eq!(app.resume, Resume::Fresh, "nothing to continue");
+        assert_eq!(app.session, None);
+        assert_eq!(app.cost_usd, 0.0, "a fresh context costs nothing yet");
+    }
+
+    /// `/clear` does not mean `/new`. It starts the conversation over where you
+    /// are standing, so the binding survives it — otherwise clearing the main
+    /// chat would quietly walk you out of it and the next line you typed would
+    /// land in a conversation of its own.
+    #[test]
+    fn clearing_keeps_you_where_you_are_standing() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_ne!(
+            apply_slash(&mut app, command::Slash::Clear),
+            Some(Action::NewThread),
+            "leaving the conversation is what /new is for"
+        );
+    }
+
+    /// The main chat keeps its resume cursor in the database rather than on the
+    /// app, so clearing at the desk has to be a write. Without one the screen
+    /// went blank and `hand_to_orchestrator` read the same session id straight
+    /// back off the row on the very next message.
+    ///
+    /// What it drops is the harness session, which is the only thing carrying a
+    /// model's context window. Jod's own transcript stays: Jod owns the record,
+    /// and a reset that destroyed it would leave the main chat unauditable from
+    /// whichever surface reset it last.
+    #[test]
+    fn clearing_the_main_chat_drops_its_session_and_keeps_its_transcript() {
+        use jod_core::conversation::{NewMessage, Role};
+        let s = store();
+        let id = s
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        s.set_conversation_session(&id, Some("sess-9")).unwrap();
+        s.append_message(&id, NewMessage::new(Role::User, "count them"))
+            .unwrap();
+
+        let inside = Thread {
+            conversation: Some(id.clone()),
+            ..Thread::default()
+        };
+        let said = forget_bound_session(&s, &inside);
+
+        assert_eq!(
+            s.resume_for(&id, HarnessKind::ClaudeCode).unwrap(),
+            Resume::Fresh,
+            "the next turn in the main chat starts with nothing behind it"
+        );
+        assert_eq!(
+            s.live_window(&id).unwrap().len(),
+            1,
+            "Jod keeps what was said"
+        );
+        // The main chat is shared with `jod main` and the phone, so clearing it
+        // here clears it there. The user hears that rather than discovering it.
+        assert!(
+            matches!(said, Some(Entry::Hint(line)) if line.contains("every surface")),
+            "the shared chat says so"
+        );
+    }
+
+    /// An ordinary conversation is cleared just as thoroughly and says nothing
+    /// about it, because there is no second surface for the news to be about.
+    #[test]
+    fn clearing_an_ordinary_conversation_is_quiet_about_it() {
+        let s = store();
+        let other = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_session(&other.id, Some("sess-9"))
+            .unwrap();
+
+        let elsewhere = Thread {
+            conversation: Some(other.id.clone()),
+            ..Thread::default()
+        };
+        assert!(
+            forget_bound_session(&s, &elsewhere).is_none(),
+            "nothing worth a line"
+        );
+        assert_eq!(
+            s.resume_for(&other.id, HarnessKind::ClaudeCode).unwrap(),
+            Resume::Fresh
+        );
+    }
+
+    /// `/clear` stops looking; it does not touch what it was looking at.
+    ///
+    /// An unbound thread watching somebody else's run is the case that made
+    /// this worth its own function. Resolving the conversation the way the rest
+    /// of the file does — `current_conversation`, which falls back to the
+    /// watched run — would have reached into that agent and forgotten *its*
+    /// session, ending a run the user only meant to stop reading.
+    #[test]
+    fn clearing_never_reaches_into_the_run_it_was_watching() {
+        let s = store();
+        let theirs = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_session(&theirs.id, Some("sess-9"))
+            .unwrap();
+
+        assert!(forget_bound_session(&s, &Thread::default()).is_none());
+        assert_eq!(
+            s.conversation(&theirs.id)
+                .unwrap()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("sess-9"),
+            "the agent on screen carries on with the session it had"
+        );
     }
 
     /// Entering the chat has to *show* it, or the pinned row is a move to a

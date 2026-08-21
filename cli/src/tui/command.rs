@@ -110,7 +110,18 @@ pub enum Slash {
     Todo(String),
     /// Mark one of those tasks finished.
     Done(String),
-    /// Clear the transcript on screen. The conversation is untouched.
+    /// Start over: empty the screen and drop the context the next message
+    /// would have carried. Jod's own transcript is kept.
+    ///
+    /// It used to mean the first half only, and that was the bug. Typed in the
+    /// main chat it emptied the screen while the pinned conversation kept its
+    /// harness session, so the next message resumed the whole history the user
+    /// had just watched disappear. Telegram's `/clear` has always meant "drop
+    /// the context window, keep the transcript", and the main chat is one chat
+    /// across every surface — so the desk now means what the phone means.
+    ///
+    /// Distinct from [`Slash::New`], which drops the context *and* leaves the
+    /// conversation. `/clear` keeps you where you are standing.
     Clear,
     /// The background shells this console started, running and finished.
     Jobs,
@@ -679,7 +690,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("/team", "the team panel (Ctrl-G w)"),
     ("/todo <title>", "put a task on the team's board"),
     ("/done <task-id>", "mark one of those tasks finished"),
-    ("/clear", "clear the transcript on screen"),
+    (
+        "/clear",
+        "empty the screen and start the next message with no context behind it",
+    ),
     ("/jobs", "background shells — what is building (Ctrl-G j)"),
     (
         "/reload",

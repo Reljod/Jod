@@ -2943,3 +2943,31 @@ waits for a code cannot run on a screen Jod is drawing over. With no argument it
 means the harness that conversation is on rather than all three, because the
 console is already showing which one that is and asking somebody to retype it is
 asking for the wrong name.
+
+## `/clear` means the same thing at the desk as it does on the phone
+
+`/clear` in the console emptied the screen and nothing else. Typed in the main
+chat that made it a lie: the pinned conversation keeps its resume cursor in the
+database, `hand_to_orchestrator` reads it back through `Store::resume_for` on
+every turn, and so the next message picked up the entire history the user had
+just watched disappear. Telegram's `/clear` has meant "drop the harness session,
+keep the transcript" since the main chat became one chat across every surface,
+and its reply says so out loud. Two surfaces, one conversation, one word, two
+meanings — and only one of them was the one people typed the word for.
+
+So the console now means what the phone means. `/clear` empties the screen,
+resets the resume cursor on the app, and drops the session id stored on the
+conversation the chat box is bound to. The session id is the only thing carrying
+a model's context window, so dropping it is the whole reset; Jod's own transcript
+stays, because Jod owns the record and a reset that destroyed it would leave the
+main chat unauditable from whichever surface reset it last.
+
+Three things it deliberately does not do. It does not drop the binding — that is
+`/new`, which means "leave", while `/clear` means "start over where I am
+standing", and a clear that walked you out of the main chat would send the next
+line you typed somewhere else. It does not resolve the conversation the way the
+rest of the file does, through `current_conversation`, because that falls back
+to the run being *watched*: `/clear` while reading somebody else's agent would
+have reached in and forgotten that agent's session. And it does not take the
+screen-only behaviour away — `Ctrl-G l` still empties the transcript and touches
+nothing, which is what that key was always for.
