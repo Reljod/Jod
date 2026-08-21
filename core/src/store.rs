@@ -1609,6 +1609,43 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
        AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
     "#,
     ),
+    (
+    "0026_the_rail_follows_the_main_chat_it_compacted_from",
+    r#"
+    -- The other half of `0025`, and the one with teeth.
+    --
+    -- Cards cascade upward along `conversations.parent_conversation_id`, and
+    -- the rail asks for the subtree of the conversation being viewed. A project
+    -- manager is hung under main when it is created — which is what makes its
+    -- answers reach Reljod at all. Compaction opens a fresh main and moves the
+    -- pin, and every one of those edges stayed on the thread that was compacted
+    -- away, so the managers went on reporting upward into a conversation nobody
+    -- opens.
+    --
+    -- Seen as a fleet showing `alpha [3 cards]` and `gamma [8 cards]` beside a
+    -- rail reading "nothing waiting — no agent has asked anything". It needs
+    -- nobody to do anything: main compacts itself when its context fills.
+    --
+    -- Only edges on the pinned chat's own ancestry move, by the same reasoning
+    -- as `0025`: `forked_from` records where each thread came from, so walking
+    -- it back from the pinned row names exactly the conversations that used to
+    -- be main. A conversation parented anywhere else is somebody's child and
+    -- must stay there.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE conversations
+       SET parent_conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE parent_conversation_id IN (SELECT id FROM main_chain)
+       AND parent_conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.

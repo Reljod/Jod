@@ -2415,6 +2415,136 @@ mod tests {
             std::fs::remove_dir_all(format!("{dir}-2")).ok();
         }
 
+        /// A manager's card still reaches Reljod after main compacts itself.
+        ///
+        /// Cards cascade along `parent_conversation_id`, a manager is hung
+        /// under main when it is created, and compaction opens a *fresh* main.
+        /// The edges stayed on the thread that was compacted away, so the
+        /// managers went on reporting upward into a conversation nobody opens —
+        /// which silently undid the link that makes a manager's answer reach
+        /// Reljod at all.
+        ///
+        /// Observed as a fleet showing `alpha [3 cards]` and `gamma [8 cards]`
+        /// beside a rail reading "nothing waiting — no agent has asked
+        /// anything". Nobody has to do anything for it: main compacts itself.
+        ///
+        /// Driven through `cards` rather than by reading the column, because
+        /// the column being right is not the claim — the claim is that the card
+        /// arrives.
+        #[test]
+        fn a_managers_card_still_reaches_main_after_it_compacts() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-compact", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            for turn in 0..3 {
+                s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+            }
+
+            // What happens on its own when a context fills.
+            s.continue_as_new(&main, "so far", "full").unwrap();
+            let now = s.pinned_conversation().unwrap().unwrap();
+            assert_ne!(now, main, "the pin moved, which is the premise");
+
+            s.raise_card(NewCard {
+                conversation_id: manager,
+                title: "the README edit is done".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+            let rail = s
+                .cards(&Query {
+                    subtree_of: Some(now),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert!(
+                rail.iter().any(|c| c.title == "the README edit is done"),
+                "the manager still reports to whichever conversation is main: {:?}",
+                rail.iter().map(|c| &c.title).collect::<Vec<_>>(),
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// The backfill, for the consoles that have already compacted.
+        ///
+        /// `carry_forward` moves these edges now, but main compacts itself on a
+        /// timer, so any console that has been up a while is already carrying
+        /// managers parented to a thread nobody opens — and a rail that has
+        /// been quietly empty ever since.
+        #[test]
+        fn the_backfill_reattaches_managers_left_on_an_old_main_chat() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-reattach", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            for turn in 0..3 {
+                s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+            }
+            s.continue_as_new(&main, "so far", "full").unwrap();
+            let now = s.pinned_conversation().unwrap().unwrap();
+
+            // Put it back the way the old code left it.
+            s.write(|tx| {
+                tx.execute(
+                    "UPDATE conversations SET parent_conversation_id = ?2 WHERE id = ?1",
+                    rusqlite::params![manager, main],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            s.raise_card(NewCard {
+                conversation_id: manager.clone(),
+                title: "the README edit is done".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+            let rail = |root: &str| {
+                s.cards(&Query {
+                    subtree_of: Some(root.to_string()),
+                    ..Query::default()
+                })
+                .unwrap()
+                .iter()
+                .map(|c| c.title.clone())
+                .collect::<Vec<_>>()
+            };
+            assert!(
+                rail(&now).is_empty(),
+                "the bug, reproduced: the rail is empty while the work is done",
+            );
+
+            let (_, sql) = crate::store::MIGRATIONS
+                .iter()
+                .find(|(name, _)| name.starts_with("0026"))
+                .expect("the backfill migration");
+            s.write(|tx| {
+                tx.execute_batch(sql)?;
+                Ok(())
+            })
+            .unwrap();
+
+            assert!(
+                rail(&now).contains(&"the README edit is done".to_string()),
+                "after the backfill it arrives: {:?}",
+                rail(&now),
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
         /// A manager handed to another harness stays that project's manager.
         ///
         /// A manager is found through `projects.manager_conversation_id`, and

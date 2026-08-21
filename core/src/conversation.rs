@@ -1617,6 +1617,29 @@ impl Store {
                     "UPDATE conversations SET pinned = 1, title = 'main' WHERE id = ?1",
                     params![new_id],
                 )?;
+                // Everything hanging under the old chat hangs under this one.
+                //
+                // Cards cascade upward along `parent_conversation_id`, and the
+                // rail asks for the subtree of the conversation being viewed.
+                // A project manager is hung under main when it is created, so
+                // leaving those edges on the compacted-away thread empties
+                // Reljod's rail — the managers still report, upward, to a
+                // conversation nobody opens.
+                //
+                // Observed: a fleet showing `alpha [3 cards]` and
+                // `gamma [8 cards]` beside a rail reading "nothing waiting — no
+                // agent has asked anything". Main compacts itself, so this
+                // undid the link on its own, on a timer, without anybody doing
+                // anything.
+                //
+                // The new row's own parent is null and stays that way — main
+                // reports to nobody — and the guard keeps it that way even if
+                // that ever changes.
+                tx.execute(
+                    "UPDATE conversations SET parent_conversation_id = ?2
+                      WHERE parent_conversation_id = ?1 AND id <> ?2",
+                    params![conversation_id, new_id],
+                )?;
                 // Every bus that has a `main` on its roster follows the pin.
                 //
                 // `Store::is_main_chat_member` decides whether mail addressed
