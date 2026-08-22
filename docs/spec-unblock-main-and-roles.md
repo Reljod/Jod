@@ -1,5 +1,17 @@
 # SPEC — main only delegates, an assistant does the routing, and scratch work cleans up after itself
 
+> **Shipped.** Kept because one code comment cites `SPEC B4` and because the
+> numbered checks below are the names the tests still carry. It is a record of
+> what was built, not work to pick up.
+>
+> It arrived here from the branch `feat/unblock-main-and-roles`, where it sat as
+> a root `SPEC.md`. Everything below is as written **except** the four places
+> building it proved the spec wrong, each corrected in place and marked: C3 (the
+> whole section — the thinking spike overturned its premises), B4 (the loose pane
+> is runs, not tree nodes), check 18 (the stalled rule rests on run status, not
+> on the mark surviving), and check 29. Two checks are **not run**: 31 and 32
+> need a person at a terminal.
+
 Three changes that share one story. Main stops holding its own conversation
 while work happens, non-project work gets a lane of its own that tidies itself
 away, and which harness and model each layer of the chain uses becomes something

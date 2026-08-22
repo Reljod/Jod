@@ -4893,8 +4893,9 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
     }
     // `k` in the pane below the tree, where the rows are scratch sessions: keep
     // this one, or let it go. Answered before the cursor keys because it takes a
-    // letter one of them already has, and the collision is deliberate — SPEC B4
-    // asks for `k keep`, and the pane is three rows tall with `↑` and `↓` right
+    // letter one of them already has, and the collision is deliberate — B4 of
+    // `docs/spec-unblock-main-and-roles.md` asks for `k keep`, and the pane is
+    // three rows tall with `↑` and `↓` right
     // there. `j` still steps down and both arrows still work; what a person
     // loses is `k`-as-up in a box small enough to cross with one arrow.
     if app.loose_selected().is_some() && key.code == KeyCode::Char('k') {
