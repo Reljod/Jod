@@ -475,8 +475,35 @@ pub fn apply_role(store: &Store, req: &mut SpawnRequest) {
         }
     }
 
+    // The model, but only if this run is actually going to the harness the row
+    // names. A model id belongs to exactly one harness — `claude-opus-5` is
+    // Claude Code's, `opencode/claude-opus-5` is OpenCode's,
+    // `claude-opus-4-6-thinking` is AGY's — so a row saying `agy` and
+    // `claude-opus-4-6-thinking` describes one setting in two columns.
+    //
+    // They come apart on a resumed run. The harness above is left alone when
+    // the session is being resumed, because a session id belongs to the harness
+    // that minted it, and taking the model on its own would then hand AGY's
+    // name to Claude Code and fail the turn — with the harness's own opaque
+    // error, which names neither the model nor the reason. Refused out loud
+    // instead, for the reason the effort level below is: no setting beats the
+    // wrong one.
     if req.model.is_none() {
-        req.model = row.model.clone();
+        match row.harness.as_deref().and_then(HarnessKind::from_id) {
+            Some(named) if named != req.harness => {
+                if row.model.is_some() {
+                    eprintln!(
+                        "[jod] the `{}` role's model is {}'s and this run is resuming on {} — \
+                         leaving the model to the harness rather than handing over a name it \
+                         does not have",
+                        role.as_str(),
+                        named.label(),
+                        req.harness.label()
+                    );
+                }
+            }
+            _ => req.model = row.model.clone(),
+        }
     }
 
     if req.effort.is_none() {
@@ -4231,6 +4258,75 @@ mod tests {
         apply_role(&store, &mut req);
         assert_eq!(req.harness, HarnessKind::OpenCode);
         assert_eq!(req.model.as_deref(), Some("gpt-5"));
+    }
+
+    /// The configuration the roles panel was reported broken with, read at the
+    /// seam it decides: a row saying `agy` and one of AGY's own model names
+    /// spawns AGY with that name. The panel offered Claude Code's names here,
+    /// so what got stored was a name AGY has never heard of.
+    #[test]
+    fn a_row_naming_agy_spawns_agy_with_agys_own_model() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Harness, Some("agy"))
+            .unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("claude-opus-4-6-thinking"))
+            .unwrap();
+
+        let mut req = scratch_request();
+        apply_role(&store, &mut req);
+        assert_eq!(req.harness, HarnessKind::Agy);
+        assert_eq!(req.model.as_deref(), Some("claude-opus-4-6-thinking"));
+    }
+
+    /// The two columns are one setting, and a resumed run is where they came
+    /// apart. The harness is deliberately left alone when a session is being
+    /// resumed — the id belongs to the harness that minted it — and the model
+    /// used to be taken anyway, which handed AGY's spelling to Claude Code and
+    /// failed the turn on an error naming neither.
+    #[test]
+    fn a_resumed_run_does_not_take_a_model_belonging_to_another_harness() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Harness, Some("agy"))
+            .unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("claude-opus-4-6-thinking"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            resume: Resume::Session("a-claude-code-session".into()),
+            ..scratch_request()
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(
+            req.harness,
+            HarnessKind::ClaudeCode,
+            "a resumed session stays on the harness that minted its id"
+        );
+        assert_eq!(
+            req.model, None,
+            "and no model at all beats AGY's name on a Claude Code run"
+        );
+    }
+
+    /// A row that names no harness is deliberately harness-agnostic, so its
+    /// model is still whatever it says. Only a row naming a *different*
+    /// harness than the run is actually going to is refused.
+    #[test]
+    fn a_row_naming_no_harness_still_supplies_its_model_to_a_resumed_run() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("haiku"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            resume: Resume::Session("a-claude-code-session".into()),
+            ..scratch_request()
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(req.model.as_deref(), Some("haiku"));
     }
 
     /// SPEC check 27. The rung above the role wins: a `delegate` call that

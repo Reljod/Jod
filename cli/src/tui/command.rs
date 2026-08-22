@@ -775,7 +775,7 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
                 ));
             }
             out.extend(
-                app.models
+                app.models()
                     .iter()
                     .filter(|m| m.id.to_ascii_lowercase().contains(&typed))
                     .map(|m| Completion::new(format!("/{name} {}", m.id), m.label.clone())),
@@ -841,7 +841,7 @@ fn config_completions(command: &str, typed: &str, app: &crate::tui::App) -> Vec<
             // different command, so it behaves the same way.
             if pref == config::Pref::Model {
                 out.extend(
-                    app.models
+                    app.models()
                         .iter()
                         .filter(|m| m.id.to_ascii_lowercase().contains(&value))
                         .map(|m| {
@@ -915,14 +915,15 @@ mod tests {
     /// An app carrying a model list, the way the loader leaves one.
     fn with_models(ids: &[(&str, &str)]) -> crate::tui::App {
         let mut app = fleet(&[]);
-        app.models = ids
-            .iter()
-            .map(|(id, label)| jod_core::Model {
-                id: (*id).to_string(),
-                label: (*label).to_string(),
-            })
-            .collect();
-        app.models_for = Some(HarnessKind::ClaudeCode);
+        app.note_models(
+            HarnessKind::ClaudeCode,
+            ids.iter()
+                .map(|(id, label)| jod_core::Model {
+                    id: (*id).to_string(),
+                    label: (*label).to_string(),
+                })
+                .collect(),
+        );
         app
     }
 

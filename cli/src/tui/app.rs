@@ -490,15 +490,22 @@ pub struct App {
     /// feed back into a spawn, because a name one harness reports (say
     /// `claude-sonnet-4-5`) is not a name another harness accepts.
     pub reported_model: Option<String>,
-    /// What `/model` offers, in the current harness's own spelling. Loaded off
-    /// the render path — asking OpenCode or AGY costs a subprocess, and AGY
-    /// asks the network — so it is a field rather than a call.
-    pub models: Vec<Model>,
-    /// Which harness `models` belongs to, or `None` while nothing has been
-    /// loaded. A list is only correct for the harness that produced it, so the
-    /// loader compares this against `harness` rather than assuming: `/harness`
-    /// mid-session makes the list on screen the wrong one.
-    pub models_for: Option<HarnessKind>,
+    /// What each harness said it accepts, one list per harness. Loaded off the
+    /// render path — asking OpenCode or AGY costs a subprocess, and AGY asks
+    /// the network — so it is a field rather than a call.
+    ///
+    /// Keyed by harness rather than kept as a single list, because two screens
+    /// ask this question about two different harnesses at once: `/model` asks
+    /// about the harness the chat box is on, and the roles panel asks about
+    /// whichever harness each *row* names. With one slot the second question
+    /// could not be answered at all, so the panel answered the first one
+    /// instead and offered Claude Code's names on a row that said `agy`.
+    ///
+    /// A missing key is a harness nobody has asked yet. A key holding an empty
+    /// list is one that was asked and could not answer — no binary, a failed
+    /// subcommand, a timeout. The difference matters to the roles panel, which
+    /// says which of the two happened rather than showing an empty list.
+    pub model_lists: HashMap<HarnessKind, Vec<Model>>,
     pub session: Option<String>,
     pub resume: Resume,
     pub cost_usd: f64,
@@ -1375,8 +1382,7 @@ impl App {
             harness,
             model,
             reported_model: None,
-            models: Vec::new(),
-            models_for: None,
+            model_lists: HashMap::new(),
             session: None,
             resume,
             cost_usd: 0.0,
@@ -2116,6 +2122,70 @@ impl App {
         format!("mode: {}{when}", self.mode.label())
     }
 
+    /// What the harness this console is on said it accepts, or nothing while
+    /// it has not been asked. This is the list `/model` completes against.
+    pub fn models(&self) -> &[Model] {
+        self.models_of(self.harness).unwrap_or(&[])
+    }
+
+    /// What one harness said it accepts. `None` is "nobody has asked it yet",
+    /// which is not the same as an empty list — see [`App::model_lists`].
+    pub fn models_of(&self, kind: HarnessKind) -> Option<&[Model]> {
+        self.model_lists.get(&kind).map(Vec::as_slice)
+    }
+
+    /// File a harness's answer, whatever it was. An empty answer is recorded
+    /// as an answer, so the panel can say "could not be read" rather than
+    /// waiting forever on a harness that is never going to reply.
+    pub fn note_models(&mut self, kind: HarnessKind, models: Vec<Model>) {
+        self.model_lists.insert(kind, models);
+    }
+
+    /// The models a roles row may be offered, and — when it may be offered
+    /// none — why not.
+    ///
+    /// This is the fix for the bug the panel was reported with: choosing `agy`
+    /// in the harness column and then opening the model list showed Claude
+    /// Code's names, because the list came from the console session rather than
+    /// from the row. A model id belongs to exactly one harness — Claude Code
+    /// says `claude-opus-5`, OpenCode says `opencode/claude-opus-5`, AGY says
+    /// `claude-opus-4-6-thinking` — so a list from the wrong harness is a list
+    /// of names that fail the run.
+    ///
+    /// **A row that names no harness is offered the console's own list.** It
+    /// cannot be answered exactly: a row inheriting its harness runs on
+    /// whatever the caller, the conversation, or the console hands it, and that
+    /// is not knowable until the spawn. The console's harness is the best
+    /// available guess — it is what a run started from this console inherits —
+    /// and [`super::roles::Models::Inherited`] makes the guess visible on the
+    /// screen instead of passing it off as the row's own vocabulary.
+    pub fn role_models(&self, harness: Option<HarnessKind>) -> super::roles::Models {
+        let Some(kind) = harness else {
+            return super::roles::Models::Inherited {
+                kind: self.harness,
+                models: self.models().to_vec(),
+            };
+        };
+        // Claude Code has no `models` subcommand and its list is a constant
+        // this build carries, so there is nothing to wait for and no way for it
+        // to fail. Answering it here rather than out of the cache means the
+        // Claude Code rows are right on the first keypress of a session.
+        if kind == HarnessKind::ClaudeCode {
+            return super::roles::Models::Named {
+                kind,
+                models: kind.models(),
+            };
+        }
+        match self.models_of(kind) {
+            Some([]) => super::roles::Models::Unreadable(kind),
+            Some(models) => super::roles::Models::Named {
+                kind,
+                models: models.to_vec(),
+            },
+            None => super::roles::Models::Waiting(kind),
+        }
+    }
+
     /// Why this model name will not work here, when the harness's own list is
     /// able to say so.
     ///
@@ -2134,14 +2204,15 @@ impl App {
     /// "what's the weather today" and got that, twice, with no way to tell from
     /// the screen that a model name set some days earlier was the reason.
     pub fn model_objection(&self, name: &str) -> Option<String> {
-        if self.models_for != Some(self.harness) || self.models.is_empty() {
+        let list = self.models();
+        if list.is_empty() {
             return None;
         }
-        if jod_core::harness::models::accepts(name, &self.models) {
+        if jod_core::harness::models::accepts(name, list) {
             return None;
         }
         let harness = self.harness.label();
-        let near = jod_core::harness::models::nearest(name, &self.models);
+        let near = jod_core::harness::models::nearest(name, list);
         Some(match near.as_slice() {
             // Nothing close enough to name. All that is left is to point at
             // the list and at the way out of choosing altogether.
@@ -4608,11 +4679,13 @@ mod tests {
             model.map(str::to_string),
             Resume::Fresh,
         );
-        a.models = jod_core::harness::models::parse(
+        a.note_models(
             HarnessKind::OpenCode,
-            "opencode/claude-opus-5\nopencode/hy3-free\n",
+            jod_core::harness::models::parse(
+                HarnessKind::OpenCode,
+                "opencode/claude-opus-5\nopencode/hy3-free\n",
+            ),
         );
-        a.models_for = Some(HarnessKind::OpenCode);
         a
     }
 
@@ -4644,18 +4717,23 @@ mod tests {
     #[test]
     fn a_list_that_never_loaded_convicts_nothing() {
         let mut a = opencode(None);
-        a.models.clear();
+        a.note_models(HarnessKind::OpenCode, Vec::new());
         assert_eq!(a.model_objection("claude-opus-5"), None);
     }
 
-    /// `/harness` mid-session leaves the previous harness's list in place until
+    /// `/harness` mid-session leaves the previous harness's list on hand until
     /// the new one answers. Checking a name against it would judge it by the
-    /// wrong harness, which is exactly the confusion being fixed.
+    /// wrong harness, which is exactly the confusion being fixed — so the
+    /// lists are kept apart by harness and only the current one is read.
     #[test]
     fn a_list_belonging_to_another_harness_convicts_nothing() {
-        let mut a = opencode(None);
-        a.models_for = Some(HarnessKind::ClaudeCode);
-        assert_eq!(a.model_objection("claude-opus-5"), None);
+        let mut a = App::new(HarnessKind::OpenCode, None, Resume::Fresh);
+        a.note_models(HarnessKind::ClaudeCode, HarnessKind::ClaudeCode.models());
+        assert_eq!(
+            a.model_objection("claude-opus-5"),
+            None,
+            "the only list on hand is Claude Code's, and this session is not on Claude Code"
+        );
     }
 
     /// The transcript keeps the harness's own words and adds the reason under
