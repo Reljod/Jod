@@ -584,11 +584,14 @@ pub enum ToolAccess {
     /// Cannot spawn, cannot schedule, cannot write memory.
     #[default]
     ReadOnly,
-    /// Everything read-only allows, plus delegating to and stopping agents.
+    /// Everything read-only allows, plus delegating to and stopping agents,
+    /// and writing memory. The line a run started by a person or by the main
+    /// chat sits on, and the highest level anything built from outside may
+    /// reach — see [`ToolAccess::capped_for`], which does not let it reach even
+    /// this far.
     Delegate,
-    /// The full set, including creating schedules and goals and writing
-    /// memory. What the main chat gets, and what nothing reached from outside
-    /// should.
+    /// The full set, including creating schedules and goals. What the main chat
+    /// gets, and what nothing reached from outside should.
     Orchestrate,
 }
 
@@ -606,11 +609,16 @@ impl ToolAccess {
         matches!(self, ToolAccess::Delegate | ToolAccess::Orchestrate)
     }
 
-    /// Whether this level may create schedules and goals, or write memory.
+    /// Whether this level may create schedules and goals.
     ///
     /// The distinction that matters: delegating spends money now and is
     /// visible; scheduling spends it every night at 2am whether or not anyone
     /// is watching, and a goal spends it until something stops it.
+    ///
+    /// Writing memory used to be on this side of the line too, and it does not
+    /// belong here: a fact spends nothing and wakes nobody, so it fails the
+    /// test the paragraph above states. It is `delegate` now, and the reasoning
+    /// lives beside the tool in [`crate::mcp`]'s `remember`.
     pub fn may_orchestrate(&self) -> bool {
         matches!(self, ToolAccess::Orchestrate)
     }

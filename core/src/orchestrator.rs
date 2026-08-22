@@ -565,7 +565,13 @@ pub async fn hand_to_manager(
                 // true through a field that has no empty value.
                 role: kind.is_none().then_some(Role::Manager),
                 prompt: instruction.to_string(),
-                system: Some(manager_preamble(&project.name)),
+                // Read here rather than defaulted in the preamble, because a
+                // manager told a number that is not the one `open_work`
+                // enforces plans against a budget it does not have.
+                system: Some(manager_preamble(
+                    &project.name,
+                    store.max_engineers_per_project()?,
+                )),
                 cwd: project.path.clone(),
                 model: None,
                 // The same floor main runs under, and for the same reason: a
@@ -624,7 +630,35 @@ pub async fn hand_to_manager(
 /// Takes the project's name because a manager that has to work out which
 /// repository it owns can get that wrong, and everything it does afterwards
 /// inherits the mistake.
-pub fn manager_preamble(project: &str) -> String {
+///
+/// **And it takes the engineer cap as a number, not as a word.** A preamble
+/// that says "a few at once" is one every manager interprets differently, and
+/// the interpretation shows up as either an idle laptop or a machine running
+/// nine harnesses. The number is `Store::max_engineers_per_project`, and `0`
+/// means no cap — the same spelling the other settings-backed knobs use for
+/// their escape hatch.
+///
+/// The `list_agents`-first rule above is not reopened by any of the planning
+/// text below it. It is upstream of all of this: the manager still decides who
+/// is free before it decides what to give them, and the cap is counted from the
+/// same call.
+pub fn manager_preamble(project: &str, max_engineers: usize) -> String {
+    // Spelled once, because it is stated twice — as the budget and as the
+    // reason not to spend it.
+    let cap = if max_engineers == 0 {
+        "There is **no cap** on how many engineers this project may run at once: \
+         the limit is set to 0, which means unlimited."
+            .to_string()
+    } else {
+        format!(
+            "**You may run up to {max_engineers} engineers at once on this project**, and \
+             `open_work` is refused when that many are already live. Count what is running \
+             before you plan rather than after — the `list_agents` call you already make first \
+             is where the count comes from, so this costs you nothing extra. A stalled \
+             engineer counts too: it is still a process holding a worktree, and the refusal \
+             names it separately so you can see that stopping it is the way forward."
+        )
+    };
     format!(
         "You are the project manager for **{project}**. You own this repository \
          and everything happening in it. Reljod's main chat routes anything \
@@ -668,13 +702,90 @@ pub fn manager_preamble(project: &str) -> String {
          Two work streams that genuinely have to run at the same time are a \
          reason to open a second session. Two instructions arriving one after \
          the other are not.\n\n\
+         **Write the plan before you hand anything out.** An engineer takes one \
+         task, does it, reports to you and stops — the thinking about what the \
+         tasks are is yours. Call `plan_work` once with the whole breakdown, \
+         giving every task the files only that engineer will touch. The call is \
+         **refused** if two tasks claim the same file, and it names both of \
+         them, so a plan that would have had two engineers editing one file \
+         costs you an error rather than a merge conflict somebody discovers \
+         three hours later. An instruction that is one task for one engineer is \
+         still one task: call `plan_work` with a single task and hand it out.\n\n\
+         **Ask first whether it splits at all.** Most instructions do not, and \
+         a one-task plan is the right answer for those. Splitting something \
+         indivisible costs a cold session that has to read the repository from \
+         scratch and buys nothing. Two tasks may run at once only when **both** \
+         are true: they touch no file in common, and neither one needs the \
+         other's output. Miss the first and `plan_work` refuses you; miss the \
+         second and it does not, and you get two engineers where the later one \
+         sits waiting on work that has not happened yet. Where one task's \
+         output is another's input, write them in that order and hand out only \
+         the first — the plan is the whole breakdown, and handing it out is a \
+         separate thing paced by what has finished.\n\n\
+         **The order you write the tasks in is the order the pull requests \
+         stack in.** `stack_pull_requests` ranks them by their position in the \
+         plan, so writing the breakdown in dependency order is not bookkeeping \
+         — it is what makes the stack come out with the right bases. A plan \
+         written in the order things occurred to you produces a stack whose \
+         bases are wrong and which looks fine.\n\n\
+         {cap}\n\n\
+         **Being under the cap is not a reason to reach it.** Two engineers who \
+         each spend their first turn reading the same three files have cost more \
+         than one engineer reading them once. Split when the pieces are \
+         genuinely independent and each is worth a whole session, not to use the \
+         budget up.\n\n\
+         **Decide where each engineer writes, and say why.** `open_work` takes \
+         a placement and it is your call, not the engineer's:\n\
+         - `explore` — read-only. No branch, no worktree, no pull request. This \
+           is the right answer for anything that only looks: a review, a \
+           search, a question about how something works. It is the default, \
+           because reading is the reversible one.\n\
+         - `worktree` — a branch and worktree of the engineer's own, cut before \
+           its session starts. Anything that writes gets this.\n\
+         - `share` — join the worktree another work already holds, named by \
+           that work's id. Two engineers in one directory, kept apart by the \
+           files your plan gave each of them.\n\
+         - `direct` — write in Reljod's real checkout. Gated on three facts \
+           you do not get to overrule: no git remote, no other work on this \
+           project, and nothing uncommitted in the tree. Ask for it when any of \
+           those is false and you are refused with every failing reason at \
+           once.\n\n\
+         **A worktree that finished its task opens a pull request, and you are \
+         the one who has to ask for it.** Where the project has a git remote, \
+         tell every engineer you place on a worktree to open a **draft** pull \
+         request from its branch through the `create-pr` skill before it \
+         reports — one per worktree. An engineer placed as `explore` opens \
+         none, because it has no branch to open one from. Nobody runs \
+         `gh pr create` by hand: a pull request opened without the session that \
+         did the work is a pull request with no evidence in it, which is what \
+         the skill exists to prevent. Once they are open, \
+         `stack_pull_requests` gives you the order and the command that links \
+         them. **Merging is never yours and never an agent's** — it is \
+         `merge_pr.sh` and a person.\n\n\
+         **You are the one who tells main it is finished.** Read `work_board`. \
+         While any task on it is open the job is not done, and a card saying it \
+         is would be false — an engineer reporting its own task complete is not \
+         the job being complete. When the board is empty, raise one card saying \
+         what the whole job produced, in your own words. Not a relay of each \
+         engineer's report: Reljod asked for one thing and wants to be told \
+         about one thing.\n\n\
          Your tools:\n\
          - `list_agents`, scoped to {project}, before anything else.\n\
+         - `plan_work` to write the whole breakdown down, once, with the files \
+           each task owns.\n\
+         - `work_board` to read that board back — who owns what, what is still \
+           open, what is done.\n\
          - `continue_agent` for anything a free engineer can take, which is \
            most things. Read `reuse` in the `list_agents` answer — it names the \
-           run to continue when there is one.\n\
+           run to continue when there is one. It is also how you get around the \
+           engineer cap honestly: reusing a free engineer adds no process, so \
+           it is never refused.\n\
          - `open_work` when nobody is free, or nobody exists. Unlike main you \
-           may call it, but it is the second answer, not the first.\n\
+           may call it, but it is the second answer, not the first. It is where \
+           the placement is chosen.\n\
+         - `stack_pull_requests` once the engineers on one job have opened \
+           theirs. It returns the order and the command; it does not push \
+           anything itself, and merging is still `merge_pr.sh` and a person.\n\
          - `delegate` for a one-shot that needs no board — a lookup, a check, \
            a script.\n\
          - `stop_agent` for something you started that should not be running.\n\
@@ -686,7 +797,9 @@ pub fn manager_preamble(project: &str) -> String {
          who has it now, in one or two sentences. Reljod is looking at the main \
          chat, not at this transcript — a card cascades up to his rail and is \
          the only way your answer reaches him. A routing decision nobody can \
-         see is one nobody can correct.\n\n\
+         see is one nobody can correct. Where you handed a job out rather than \
+         answering it, the card that says it is **finished** waits for the board \
+         to be empty.\n\n\
          Then say the same one or two sentences as your reply."
     )
 }
@@ -718,6 +831,61 @@ pub fn delegated_preamble() -> &'static str {
 
 // ---- what a worker is told ------------------------------------------------
 
+/// One task, handed to one engineer, with the files only it may change.
+///
+/// This is the whole of what makes a session an *engineer* rather than a
+/// worker: a worker is given an instruction and works out the rest, and an
+/// engineer is given a task its manager already broke out of a larger job and
+/// is told which files belong to it. The difference matters because engineers
+/// run beside each other. Two of them editing one file is a merge conflict
+/// neither can see coming, and the plan that placed them is the only thing that
+/// keeps them apart.
+///
+/// Carried on the [`Brief`] rather than read from the board, for the reason the
+/// rest of the brief is: the preamble has to be renderable without a database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    pub task_id: String,
+    pub title: String,
+    /// Repository-relative path prefixes. Empty is ordinary and means the task
+    /// claims no files, which is the honest state for anything exploratory.
+    pub paths: Vec<String>,
+    /// What to call to report. Always `complete_task`.
+    ///
+    /// A field rather than a literal in the prose because the preamble is
+    /// checked against the tool catalogue by name, and a verb spelled out in
+    /// two places is a verb that gets renamed in one of them. Build it with
+    /// [`Assignment::new`] and the right value is the only one it can have.
+    pub manager: String,
+}
+
+/// The tool an engineer reports through.
+///
+/// **This is not the only place the name is spelled, and pretending otherwise
+/// would be worse than having no constant at all.** The catalogue in
+/// [`crate::mcp`] spells `complete_task` again, as a literal, in another file —
+/// a constant that *looks* like a single source of truth while there are two
+/// stops the next person from going to check. What holds the two together is
+/// `the_tool_an_engineer_reports_through_is_one_it_can_actually_call`, which
+/// asserts this value names a registered tool at a level every engineer can
+/// reach. Rename either spelling and that test says so.
+pub const REPORTING_TOOL: &str = "complete_task";
+
+impl Assignment {
+    pub fn new(
+        task_id: impl Into<String>,
+        title: impl Into<String>,
+        paths: Vec<String>,
+    ) -> Assignment {
+        Assignment {
+            task_id: task_id.into(),
+            title: title.into(),
+            paths,
+            manager: REPORTING_TOOL.to_string(),
+        }
+    }
+}
+
 /// Everything a worker session needs to know at spawn that is true of *it*
 /// rather than of Jod.
 ///
@@ -739,6 +907,24 @@ pub struct Brief<'a> {
     /// Jod's MCP server at all, which changes what it can be told to do — see
     /// [`preamble_lines`].
     pub tools: Option<ToolAccess>,
+    /// The task this session exists to do, and the files it owns.
+    ///
+    /// `None` is every session nobody planned — a `delegate`, a scheduled run,
+    /// a work opened straight from an instruction. Those get exactly the
+    /// preamble they got before this field existed, byte for byte.
+    pub assignment: Option<Assignment>,
+    /// How the manager placed it.
+    ///
+    /// **`None` is not [`Placement::Explore`], and collapsing the two would be
+    /// a real loss.** `None` means nobody decided: the session starts on a
+    /// read-only checkout and claims a worktree of its own the moment it needs
+    /// to write, which is what every session has done since D5 and what
+    /// `continue_agent` still does. `Some(Placement::Explore)` means a manager
+    /// decided this one is here to read and must *not* write — it is a
+    /// prohibition, and the brief says so. Rendering the unplaced case as
+    /// `Explore` would silently strip the claim instruction from every existing
+    /// spawn and tell an ordinary worker it had been sent to look.
+    pub placement: Option<crate::leases::Placement>,
 }
 
 /// One line of a worker's brief, and who gets it.
@@ -801,6 +987,7 @@ pub fn preamble_lines(brief: &Brief) -> Vec<PreambleLine> {
          reach him and what you may touch.\n",
     )];
 
+    out.extend(assignment_lines(brief));
     out.extend(roots_lines(brief));
     out.extend(secrets_lines(brief));
     out.extend(rail_lines(brief));
@@ -824,6 +1011,103 @@ pub fn preamble_lines(brief: &Brief) -> Vec<PreambleLine> {
     out
 }
 
+/// What an engineer is told about the one task it was given.
+///
+/// Empty for every session that has no assignment, which is what keeps the
+/// preamble byte-identical for every caller that existed before this section
+/// did. Every line is [`PreambleLine::shared`]: nothing here is a fact about a
+/// harness, so nothing here may differ by one.
+fn assignment_lines(brief: &Brief) -> Vec<PreambleLine> {
+    let Some(task) = &brief.assignment else {
+        return Vec::new();
+    };
+    let mut out = vec![
+        PreambleLine::shared("\n## Your one task\n"),
+        PreambleLine::shared(format!(
+            "Your manager broke a larger job into tasks and gave you this one:\n\n\
+             > **{}**\n\n\
+             It is task `{}` on that job's board.",
+            task.title.trim(),
+            task.task_id
+        )),
+    ];
+    out.push(PreambleLine::shared(match task.paths.as_slice() {
+        [] => "\nThis task claims no files, which is the ordinary state for anything \
+               exploratory. Read what you need and change nothing: somebody else on this \
+               job owns every file you can see."
+            .to_string(),
+        paths => format!(
+            "\n**The files you own: {}.** Nothing else in this repository is yours to change, \
+             even when you can see it needs changing. Somebody else may be holding it right \
+             now, and a change outside your paths is a merge conflict with a colleague you \
+             cannot see and were never introduced to.",
+            paths
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }));
+    out.push(PreambleLine::shared(
+        "\n**Something outside your paths needs changing?** Say so in your report and stop. \
+         Do not do it, and do not ask another engineer to do it. Your manager is the one who \
+         can widen the plan; you are not, and neither is the engineer you would be asking.",
+    ));
+    // Written after an engineer hit this for real. The first one to add a field
+    // to `TeamTask` had to touch two files in `cli/src/tui/` that nobody owned,
+    // because their test literals stopped compiling — and a rule with no
+    // carve-out would have told it to stop and report with the workspace
+    // broken, which is worse for every other engineer on the job than the
+    // twelve lines it actually wrote. The plan cannot see this coming either:
+    // the paths it refuses on are the ones the manager named, and which
+    // literals a struct change breaks is not knowable when the plan is written.
+    out.push(PreambleLine::shared(
+        "\n**One carve-out, and it is narrow: mechanical fallout from your own change.** \
+         Adding a field to a shared struct breaks every literal that constructs it, often in \
+         files nobody planned for. Fixing those is allowed and expected — you caused them, \
+         they are not judgement calls, and leaving the tree uncompilable blocks every other \
+         engineer on this job. It stops at the mechanical: adding the field, updating the \
+         callers of a signature you changed, fixing an import. The moment a fix requires you \
+         to decide what the right *value* or the right *behaviour* is, it is a change, it is \
+         outside your paths, and it goes in your report instead.",
+    ));
+    // Both remaining lines name verbs, so both have to be honest about a
+    // session that was launched without Jod's MCP server at all. That shape is
+    // not hypothetical — `rail_lines` and `bus_lines` below each carry the same
+    // branch — and telling such a session to report through a tool it does not
+    // have would be the exact failure the tool-existence sweep exists to catch.
+    match brief.tools {
+        Some(_) => {
+            out.push(PreambleLine::shared(format!(
+                "\n**Report with `{}` when you are done, and only then.** Your report goes to \
+                 your manager and to nobody above it. Reljod is not reading this transcript \
+                 and does not see your prose — the report is the whole of what he will be \
+                 told you did, so write it as the account of the work rather than as a note \
+                 that it happened.",
+                task.manager
+            )));
+            out.push(PreambleLine::shared(
+                "\n**You are still blocked the ordinary way.** `ask_question` and \
+                 `request_secret` still go to Reljod, because a manager that is not running \
+                 cannot answer them and a question routed to a sleeping manager is a question \
+                 nobody answers. Blocked is still a successful ending.\n",
+            ));
+        }
+        None => {
+            out.push(PreambleLine::shared(
+                "\n**Say your report in your final answer.** This session holds none of Jod's \
+                 tools, so there is no way for you to file one yourself — Jod reads your \
+                 output and carries it to your manager. Write it as the account of the work \
+                 rather than as a note that the work happened, because it is the whole of \
+                 what anybody will be told you did.\n\n\
+                 Anything you are blocked on goes in the same answer, in the same words you \
+                 would have asked Reljod. Blocked is still a successful ending.\n",
+            ));
+        }
+    }
+    out
+}
+
 fn roots_lines(brief: &Brief) -> Vec<PreambleLine> {
     let mut out = vec![PreambleLine::shared("## Where you may work\n")];
     if brief.roots.is_empty() {
@@ -833,39 +1117,25 @@ fn roots_lines(brief: &Brief) -> Vec<PreambleLine> {
         ));
         return out;
     }
+    let direct = matches!(brief.placement, Some(crate::leases::Placement::Direct));
     for root in brief.roots {
         out.push(PreambleLine::shared(format!(
             "- `{}` — {}",
             root.path.display(),
-            if root.writable {
-                "**writable**, a worktree claimed for this work"
-            } else {
-                "**read-only**"
+            match (root.writable, direct) {
+                // The one placement where the writable root is not a worktree.
+                // Describing Reljod's own checkout as "a worktree claimed for
+                // this work" would be the single most expensive sentence in the
+                // preamble to get wrong.
+                (true, true) => "**writable**, and it is Reljod's own checkout",
+                (true, false) => "**writable**, a worktree claimed for this work",
+                (false, _) => "**read-only**",
             }
         )));
     }
-    // D5, stated as the rule it is rather than as a description of the flags —
-    // and naming the verb, because a brief that says "claim a worktree" without
-    // saying what to call is an instruction an agent cannot act on. That is not
-    // hypothetical: `claim_lease` existed, was tested, and had no caller
-    // outside its own tests for as long as nothing named it.
-    out.push(PreambleLine::shared(match brief.tools {
-        Some(_) => "\nA read-only root is Reljod's real checkout, and he may be editing it \
-             while you read it. **Before you change, create, move or delete anything, call \
-             `claim_worktree`.** It cuts a branch of your own and makes that your one writable \
-             root; the checkout stays beside it, readable, so you can still diff against what \
-             he is doing. A sibling already working on the same repository in this work is \
-             offered its worktree instead of a second branch being cut — the answer says which \
-             happened, and if you are sharing one, read what is there before you change it. \
-             `release_worktree` gives it back when you are done; a tree with uncommitted work \
-             in it is kept rather than removed.",
-        // Honest about a session that has no way to obey. Telling it to claim
-        // would be telling it to call something it does not have.
-        None => "\nA read-only root is Reljod's real checkout, and he may be editing it while \
-             you read it. This session holds none of Jod's tools, so it has **no way to claim \
-             a worktree** — which means it has nowhere it may write. Do what the job needs \
-             read-only, and say plainly that you are blocked rather than changing anything in \
-             a root you were told not to change.",
+    out.push(PreambleLine::shared(match &brief.placement {
+        None => unplaced_claim(brief.tools).to_string(),
+        Some(placement) => placed_claim(placement, brief.tools),
     }));
     out.push(PreambleLine::shared(
         "This is a convention, not a sandbox. Nothing here stops you writing outside your \
@@ -897,6 +1167,164 @@ fn roots_lines(brief: &Brief) -> Vec<PreambleLine> {
          ones.",
     ));
     out
+}
+
+/// What a session nobody placed is told about writing. Today's paragraph,
+/// unchanged, and it is the one every existing caller still renders.
+///
+/// D5, stated as the rule it is rather than as a description of the flags — and
+/// naming the verb, because a brief that says "claim a worktree" without saying
+/// what to call is an instruction an agent cannot act on. That is not
+/// hypothetical: `claim_lease` existed, was tested, and had no caller outside
+/// its own tests for as long as nothing named it.
+fn unplaced_claim(tools: Option<ToolAccess>) -> &'static str {
+    match tools {
+        Some(tools) if tools.may_delegate() => {
+            "\nA read-only root is Reljod's real checkout, and he may be editing it \
+             while you read it. **Before you change, create, move or delete anything, call \
+             `claim_worktree`.** It cuts a branch of your own and makes that your one writable \
+             root; the checkout stays beside it, readable, so you can still diff against what \
+             he is doing. A sibling already working on the same repository in this work is \
+             offered its worktree instead of a second branch being cut — the answer says which \
+             happened, and if you are sharing one, read what is there before you change it. \
+             `release_worktree` gives it back when you are done; a tree with uncommitted work \
+             in it is kept rather than removed."
+        }
+        // Honest about a session that holds Jod's tools and not *that* one.
+        // `claim_worktree` cuts a branch and `release_worktree` removes a
+        // directory, so both sit on `delegate`'s line — see [`crate::mcp`] —
+        // and a read-only session is filtered out of them before it ever sees
+        // the catalogue. It is the level `ToolAccess::unattended` hands a
+        // scheduled run and the level `capped_for` clamps anything built from
+        // outside down to, so this is not a rare shape. Naming the verb here
+        // anyway would send exactly those runs looking for a tool they were
+        // deliberately not given.
+        Some(_) => {
+            "\nA read-only root is Reljod's real checkout, and he may be editing it while you \
+             read it. This session was given read-only access to Jod, and cutting a worktree \
+             is not on that side of the line — so there is **no way for you to claim one**, \
+             and nowhere you may write. Do what the job needs read-only, and say plainly that \
+             you are blocked rather than changing anything in a root you were told not to \
+             change."
+        }
+        // The same again for a session that holds no Jod tools at all. Telling
+        // it to claim would be telling it to call something it does not have.
+        None => {
+            "\nA read-only root is Reljod's real checkout, and he may be editing it while \
+             you read it. This session holds none of Jod's tools, so it has **no way to claim \
+             a worktree** — which means it has nowhere it may write. Do what the job needs \
+             read-only, and say plainly that you are blocked rather than changing anything in \
+             a root you were told not to change."
+        }
+    }
+}
+
+/// What a session its manager *placed* is told about writing.
+///
+/// Two axes, and they are not the same question. The placement says what this
+/// engineer is here to do; the access level says which verbs it actually holds.
+/// A manager can place an engineer on a worktree and give it read-only access
+/// to Jod in the same call, and the brief has to be true about both — so every
+/// arm below that would otherwise name `claim_worktree` or `release_worktree`
+/// checks `may_delegate` first and says the honest thing instead. Naming a verb
+/// the server filters out of the catalogue costs the session a turn and reads
+/// to it as Jod being broken; that is the bug
+/// `a_read_only_session_is_not_told_to_claim_a_worktree_it_cannot_claim` was
+/// written for, and the placement split composes with it rather than replacing
+/// it.
+fn placed_claim(placement: &crate::leases::Placement, tools: Option<ToolAccess>) -> String {
+    use crate::leases::Placement;
+    let may_claim = matches!(tools, Some(t) if t.may_delegate());
+    match placement {
+        // Never names the verb, whatever the access level. `explore` is a
+        // prohibition rather than a starting position: a session that reads the
+        // word "claim" here promotes itself to a writer nobody planned a file
+        // for, which is exactly what the placement exists to stop.
+        Placement::Explore => {
+            let mut said = String::from(
+                "\nYour manager placed this session as **explore**: you are here to read, and \
+                 you hold no writable root by design. No branch was cut for you and none will \
+                 be.",
+            );
+            if may_claim {
+                said.push_str(
+                    " Needing to write is something to **report and stop on**, not something \
+                     to fix by cutting a worktree of your own. The manager chose this \
+                     placement knowing what the task was; if it was wrong, it is the manager \
+                     who gets to change it.",
+                );
+            } else {
+                said.push_str(
+                    " This session was given read-only access to Jod as well, so there is no \
+                     way for you to claim one in any case. Needing to write is something to \
+                     report and stop on.",
+                );
+            }
+            said.push_str(
+                " Reljod may be editing the checkout you are reading, so what you see is a \
+                 snapshot rather than a settled state.",
+            );
+            said
+        }
+        Placement::Worktree => {
+            let mut said = String::from(
+                "\nThe writable root above is a worktree on a branch of its own, cut for you \
+                 before this session started — your manager placed you as **worktree** because \
+                 this task writes, so you did not have to ask and there is nothing to claim. \
+                 Reljod's checkout stays beside it, read-only, so you can still diff against \
+                 what he is doing.",
+            );
+            if may_claim {
+                said.push_str(
+                    " **Do not call `claim_worktree`; you already have one.** \
+                     `release_worktree` gives it back when the task is finished — a tree with \
+                     uncommitted work in it is kept rather than removed.",
+                );
+            } else {
+                // The combination a manager can produce in one call: placed to
+                // write, and handed read-only access to Jod. Both halves are
+                // true and the brief says both.
+                said.push_str(
+                    " This session holds read-only access to Jod, so claiming and releasing a \
+                     worktree are not verbs you have — which costs you nothing here, because \
+                     the worktree was already cut and it stays until somebody else gives it \
+                     back.",
+                );
+            }
+            said
+        }
+        Placement::Share { work_id } => {
+            let mut said = format!(
+                "\nThe writable root above is a worktree **somebody else is already working \
+                 in**. Your manager placed you as **share** so the two of you are in one \
+                 directory rather than on two branches, and work `{work_id}` is the one that \
+                 holds it. The other engineer owns files in this tree that are not yours; \
+                 yours are the ones named above and nothing else."
+            );
+            if tools.is_some() {
+                said.push_str(
+                    " `work_board` on that work says which files it owns, and reading it is \
+                     cheaper than finding out by conflict.",
+                );
+            }
+            said.push_str(
+                " Read what is there before you change anything, and **never rebase, reset or \
+                 force-push a branch you are sharing** — the other engineer's commits are on \
+                 it, it is working from the same files on disk, and neither of those is \
+                 recoverable from your side.",
+            );
+            said
+        }
+        Placement::Direct => String::from(
+            "\nYou are writing in **Reljod's own checkout**. Your manager placed you as \
+             **direct**, which is only allowed on a repository with no remote, no other work \
+             in flight and nothing uncommitted — so the tree was clean when you started and \
+             everything that appears in it from now on is yours. There is no branch between \
+             you and his working tree and no worktree to throw away, so a mistake here is a \
+             mistake in the real thing. Commit what the task asked for and nothing else, and \
+             leave anything you are unsure about uncommitted and in your report.",
+        ),
+    }
 }
 
 fn secrets_lines(brief: &Brief) -> Vec<PreambleLine> {
@@ -1353,6 +1781,33 @@ pub struct Opening {
     /// argument outranks the row, and [`SpawnRequest::harness`] has no way to
     /// say whether anybody named it.
     pub role: Option<Role>,
+    /// Where the manager decided this engineer is allowed to write.
+    ///
+    /// `None` — the default, and what every caller that predates placement
+    /// passes — is *unplaced*: the checkout arrives read-only, nothing is cut,
+    /// and the session claims a worktree for itself when it needs one. That is
+    /// today's behaviour exactly, which is what lets this land without changing
+    /// a single existing spawn.
+    ///
+    /// `Some(..)` is a decision somebody made, and [`prepare_work`] acts on it
+    /// before the session's brief is written: `Worktree` claims a lease,
+    /// `Share` joins another work's, `Direct` makes the checkout itself
+    /// writable, and `Explore` deliberately does none of those. It has to
+    /// happen here rather than at the tool boundary because the conversation
+    /// a lease binds its roots to does not exist until this function creates
+    /// it.
+    ///
+    /// **`Direct` is not gated here.** `leases::direct_is_allowed` is the gate
+    /// and it lives at the tool boundary, where the refusal can name every
+    /// failing condition at once and point at `worktree` instead. By the time
+    /// a placement reaches this struct somebody has already decided.
+    pub placement: Option<crate::leases::Placement>,
+    /// The task this engineer was spawned onto, when a manager planned one.
+    ///
+    /// Carried straight through to the session's [`Brief`], which is the only
+    /// thing that reads it. Writing `conversations.task_id` is the tool
+    /// boundary's job, not this one's.
+    pub assignment: Option<Assignment>,
 }
 
 impl Opening {
@@ -1370,7 +1825,21 @@ impl Opening {
             parent: None,
             tools: ToolAccess::Delegate,
             role: Some(Role::Engineer),
+            placement: None,
+            assignment: None,
         }
+    }
+
+    /// Place this engineer where its manager decided it writes.
+    pub fn placed(mut self, placement: crate::leases::Placement) -> Opening {
+        self.placement = Some(placement);
+        self
+    }
+
+    /// Give it the one task it exists to do, and the files that come with it.
+    pub fn assigned(mut self, assignment: Assignment) -> Opening {
+        self.assignment = Some(assignment);
+        self
     }
 
     pub fn on(mut self, harness: HarnessKind) -> Opening {
@@ -1407,6 +1876,14 @@ pub struct Opened {
     /// work keeps the title it opened with — its instruction's first words —
     /// which is a worse name and not a failure.
     pub titler: Option<String>,
+    /// The worktree the placement claimed, when it claimed one.
+    ///
+    /// `None` for an unplaced session, for `Explore` and for `Direct` — none of
+    /// which takes a lease. Returned rather than left for the caller to look up
+    /// because the caller is the one that has to tell the manager where its
+    /// engineer is writing, and a tool answer that says "worktree" without
+    /// saying which directory is one the manager cannot check.
+    pub claim: Option<crate::leases::Claim>,
 }
 
 /// Everything opening a work does before a process exists.
@@ -1416,6 +1893,9 @@ pub struct Prepared {
     pub name: String,
     /// The first session's launch, preamble and all.
     pub request: SpawnRequest,
+    /// What the placement claimed, when it claimed anything. See
+    /// [`Opened::claim`].
+    pub claim: Option<crate::leases::Claim>,
 }
 
 /// Open the work, put a session in it, and point that session at the checkout.
@@ -1481,7 +1961,22 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
             None => crate::works::Origin::Orchestrator,
         },
     )?;
-    store.add_root(&conversation.id, NewRoot::reading(&checkout))?;
+    store.add_root(
+        &conversation.id,
+        match opening.placement {
+            // The one placement whose writable root is the checkout itself.
+            // Added writable from the start rather than added read-only and
+            // promoted, because `add_root` resolves a conflict in favour of the
+            // *incoming* write and a reader that arrived first would look like
+            // it had been demoted when it never was.
+            Some(crate::leases::Placement::Direct) => NewRoot {
+                path: checkout.clone(),
+                writable: true,
+                origin: crate::roots::Origin::Human,
+            },
+            _ => NewRoot::reading(&checkout),
+        },
+    )?;
 
     // The session inherits the project, so everything it starts does too and
     // nothing below it has to guess. `How::Inferred` because the checkout said
@@ -1499,6 +1994,26 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
             eprintln!("[jod] could not record the work's project: {e}");
         }
     }
+
+    // Whatever the manager decided, done *before* the roots are read — the
+    // brief describes them, and a brief that says "the writable root above is a
+    // worktree cut for you" above a list holding only a read-only checkout is
+    // the kind of lie that costs the session its first turn.
+    //
+    // Nothing here for `Explore`, which is the point of it, and nothing for
+    // `Direct`, which was handled by the root above. `None` is every caller
+    // that predates placement and behaves exactly as it did.
+    let claim = match &opening.placement {
+        Some(crate::leases::Placement::Worktree) => {
+            Some(store.claim_lease(&work.id, &conversation.id, &checkout)?)
+        }
+        Some(crate::leases::Placement::Share { work_id }) => {
+            Some(store.share_lease(&work.id, &conversation.id, work_id, &checkout)?)
+        }
+        None | Some(crate::leases::Placement::Explore) | Some(crate::leases::Placement::Direct) => {
+            None
+        }
+    };
 
     let roots = store.roots(&conversation.id)?;
     let secrets = store.secrets_for(Some(&conversation.id), Some(&work.id))?;
@@ -1518,6 +2033,8 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
             secrets: &secrets,
             peers: &peers,
             tools: Some(opening.tools),
+            assignment: opening.assignment.clone(),
+            placement: opening.placement.clone(),
         })),
         cwd: checkout,
         model: opening.model.clone(),
@@ -1552,6 +2069,7 @@ pub fn prepare_work(store: &Store, opening: &Opening) -> Result<Prepared> {
         conversation_id: conversation.id,
         name: session.name,
         request,
+        claim,
     })
 }
 
@@ -1580,6 +2098,7 @@ pub async fn open_work(jod: &std::sync::Arc<Jod>, opening: Opening) -> Result<Op
         conversation_id: prepared.conversation_id,
         name: prepared.name,
         agent,
+        claim: prepared.claim,
     })
 }
 
@@ -2112,6 +2631,11 @@ mod tests {
             secrets,
             peers,
             tools: Some(ToolAccess::Delegate),
+            // Unplaced and unassigned, which is what every caller that predates
+            // D4 passes and therefore what the regression guards below have to
+            // be measuring.
+            assignment: None,
+            placement: None,
         }
     }
 
@@ -2201,18 +2725,61 @@ mod tests {
         assert!(said.contains("**blocked** ending"));
     }
 
-    /// **Every verb the brief names has to exist.** A preamble that tells an
-    /// agent to call something the catalogue does not advertise costs it a turn
-    /// discovering that, and reads to it as Jod being broken — and there is no
-    /// compiler and no test that would otherwise notice, because a prompt is a
-    /// string. This is the check that would have caught `claim_worktree` being
-    /// described and never registered.
+    /// **Every verb the brief names has to exist, and has to be one the run it
+    /// is given to can actually call.** A preamble that tells an agent to call
+    /// something the catalogue does not advertise costs it a turn discovering
+    /// that, and reads to it as Jod being broken — and there is no compiler and
+    /// no test that would otherwise notice, because a prompt is a string. This
+    /// is the check that would have caught `claim_worktree` being described and
+    /// never registered.
+    ///
+    /// The access half was added after the same bug turned up one layer over.
+    /// Checking a name against the *whole* catalogue asks the wrong question,
+    /// because no run ever sees the whole catalogue: [`crate::mcp`] filters it
+    /// per run by what that run's [`ToolAccess`] allows, so a tool that exists
+    /// and is above the run's level reaches the model exactly as a misspelling
+    /// does — as something that is not there. That is how every project manager
+    /// came to be told that memory was most of why it was worth having while
+    /// `remember` sat a level above it, and how a read-only worker came to be
+    /// told to claim a worktree it had no verb for.
+    ///
+    /// So each preamble is checked against the level its runs are really
+    /// spawned with: a manager at [`ToolAccess::Delegate`] (see
+    /// [`hand_to_manager`]), main at [`ToolAccess::Orchestrate`] (see
+    /// [`hand_to_orchestrator`]), a delegated run at `Delegate` or better
+    /// because that is the only case that gets the preamble at all, and a
+    /// worker at whatever `open_work` was asked for, which is every level.
+    ///
+    /// **The assignment and the placement are swept too, and they have to be.**
+    /// A worker brief rendered only with `assignment: None` never renders the
+    /// engineer section at all, so the verb an engineer reports through would
+    /// sit outside this check entirely — proved present by a `contains` call
+    /// somewhere else, which says a string is in the prose and nothing about
+    /// whether a tool answers to it. The same argument covers the placement
+    /// arms: each one is a different paragraph and only one of them renders on
+    /// any given session.
+    ///
+    /// **The swept task owns paths with slashes in them, on purpose.**
+    /// [`tools_named_in`] treats any backticked span of lower case and
+    /// underscores as a tool name, and the engineer section prints each owned
+    /// path in backticks. A task owning `my_module` would fail here with "says
+    /// to call `my_module`, which no tool is registered under" — a real false
+    /// positive with a baffling message. A slash rules the span out, so do not
+    /// simplify [`task`]'s paths to bare words.
     #[test]
     fn every_tool_the_preamble_tells_an_agent_to_call_is_one_that_exists() {
         let roots = [root("/repo", false), root("/repo-worktree", true)];
         let secrets = [secret("STRIPE_API_KEY", "the live key")];
         let peers = ["scout".to_string()];
-        let registered: Vec<&str> = crate::mcp::catalogue().iter().map(|t| t.name).collect();
+        let placements = [
+            None,
+            Some(crate::leases::Placement::Explore),
+            Some(crate::leases::Placement::Worktree),
+            Some(crate::leases::Placement::Share {
+                work_id: "w-first".into(),
+            }),
+            Some(crate::leases::Placement::Direct),
+        ];
 
         for harness in [HarnessKind::ClaudeCode, HarnessKind::OpenCode, HarnessKind::Agy] {
             for tools in [
@@ -2221,20 +2788,23 @@ mod tests {
                 Some(ToolAccess::Orchestrate),
                 None,
             ] {
-                let said = worker_preamble(&Brief {
-                    harness,
-                    roots: &roots,
-                    secrets: &secrets,
-                    peers: &peers,
-                    tools,
-                });
-                for span in tools_named_in(said.as_str()) {
-                    assert!(
-                        registered.contains(&span),
-                        "the brief tells a {} session to call `{span}`, which no tool is \
-                         registered under",
-                        harness.label()
-                    );
+                for assignment in [None, Some(task())] {
+                    for placement in &placements {
+                        let said = worker_preamble(&Brief {
+                            harness,
+                            roots: &roots,
+                            secrets: &secrets,
+                            peers: &peers,
+                            tools,
+                            assignment: assignment.clone(),
+                            placement: placement.clone(),
+                        });
+                        every_named_tool_is_callable(
+                            &said,
+                            tools,
+                            &format!("the brief for a {} worker", harness.label()),
+                        );
+                    }
                 }
             }
         }
@@ -2244,37 +2814,285 @@ mod tests {
         // is while naming no tool that opens one. A misspelling in it fails the
         // same way a misspelling in a worker's brief does: silently, as a model
         // reaching for something that is not there.
-        for span in tools_named_in(orchestrator_preamble()) {
+        every_named_tool_is_callable(
+            orchestrator_preamble(),
+            Some(ToolAccess::Orchestrate),
+            "the orchestrator's preamble",
+        );
+        // Both arms of the cap sentence, because they are two different
+        // strings and only one of them is rendered on any given machine.
+        for max_engineers in [0, 3] {
+            every_named_tool_is_callable(
+                &manager_preamble("tetris", max_engineers),
+                Some(ToolAccess::Delegate),
+                "a project manager's preamble",
+            );
+        }
+        // Only ever handed to a run that may delegate — `Server::delegate`
+        // makes the system prompt conditional on `may_delegate`, because
+        // telling a read-only run to report back would be telling it to call a
+        // tool it has not been given.
+        every_named_tool_is_callable(
+            delegated_preamble(),
+            Some(ToolAccess::Delegate),
+            "a delegated run's preamble",
+        );
+    }
+
+    /// A project manager is spawned by [`hand_to_manager`] with
+    /// [`ToolAccess::Delegate`] and never anything else, so its brief is the one
+    /// preamble whose reachable set is fixed. Stated on its own, and not only as
+    /// one arm of the sweep above, because this is the sentence that was untrue
+    /// for as long as `remember` needed `Orchestrate`: a manager was told memory
+    /// was most of why it was worth having, and handed no way to write any.
+    #[test]
+    fn every_tool_a_manager_is_told_to_use_is_one_a_manager_can_reach() {
+        every_named_tool_is_callable(
+            &manager_preamble("tetris", 3),
+            Some(ToolAccess::Delegate),
+            "a project manager's preamble",
+        );
+    }
+
+    /// The assistant is where most of main's verbs went, so it names more tools
+    /// than anything else and is the brief most exposed to this failing
+    /// quietly. [`hand_to_assistant`] spawns it at [`ToolAccess::Delegate`],
+    /// which is what it is checked against.
+    ///
+    /// Checked here at a call site rather than inside
+    /// [`every_named_tool_is_callable`], where a merge briefly put it: that
+    /// helper is handed one preamble and asked about that one, so a second
+    /// preamble wired into its body would be re-checked on every call and would
+    /// report failures against whichever brief happened to be passed.
+    #[test]
+    fn every_tool_the_assistant_is_told_to_use_is_one_it_can_reach() {
+        every_named_tool_is_callable(
+            assistant_preamble(),
+            Some(ToolAccess::Delegate),
+            "the assistant's preamble",
+        );
+    }
+
+    // ---- what a manager is told about planning ----
+
+    /// **Check 26.** A manager that is told to break work down and handed no
+    /// verb for writing the breakdown down is in exactly the trap `claim_lease`
+    /// sat in before `claim_worktree` named it: an instruction it cannot
+    /// follow. All three verbs are named, and `list_agents` still comes first,
+    /// because deciding who is free is upstream of deciding what to give them.
+    #[test]
+    fn a_manager_is_given_the_verbs_for_planning_the_board_and_the_stack() {
+        let said = manager_preamble("tetris", 3);
+        for verb in ["`plan_work`", "`work_board`", "`stack_pull_requests`"] {
+            assert!(said.contains(verb), "{verb} is not named to the manager: {said}");
+        }
+        let first = said.find("`list_agents`").expect("the existing rule is still there");
+        for later in ["`plan_work`", "`work_board`", "`stack_pull_requests`"] {
             assert!(
-                registered.contains(&span),
-                "the orchestrator is told to call `{span}`, which no tool is registered under"
+                first < said.find(later).expect("named above"),
+                "{later} is offered before `list_agents`, so planning reads as the first \
+                 thing to do and deciding who is free reads as an afterthought"
+            );
+        }
+        // The refusal, said out loud rather than left to be discovered. A
+        // manager that learns the constraint from an error has spent a turn.
+        assert!(said.contains("**refused** if two tasks claim the same file"), "{said}");
+        // And the four placements, which is the other decision that is its own.
+        for placement in crate::leases::PLACEMENT_IDS {
+            assert!(
+                said.contains(&format!("`{placement}`")),
+                "the placement `{placement}` is not offered to the manager: {said}"
+            );
+        }
+    }
+
+    /// **Check 37.** A preamble that says "a few at once" is one every manager
+    /// reads differently, and the difference shows up as either an idle laptop
+    /// or nine harnesses on one machine. The number is stated, and so are both
+    /// halves of the test for running two engineers side by side — disjoint
+    /// files *and* neither waiting on the other. Dropping either half is how
+    /// you get two engineers where the second one sits idle waiting for work
+    /// that has not happened yet.
+    #[test]
+    fn a_manager_is_told_the_cap_as_a_number_and_both_tests_for_running_two_at_once() {
+        let said = manager_preamble("tetris", 4);
+        assert!(said.contains("up to 4 engineers at once"), "{said}");
+        assert!(said.contains("no file in common"), "{said}");
+        assert!(said.contains("neither one needs the other's output"), "{said}");
+        assert!(
+            said.contains("**both**"),
+            "the two conditions are listed without saying both are required: {said}"
+        );
+        // Reuse is the honest way around the cap, and it is the behaviour the
+        // preamble already asks for first — the two rules push the same way.
+        assert!(said.contains("reusing a free engineer adds no process"), "{said}");
+        // A wedged session must be readable out of the refusal, or a manager at
+        // the cap because of one has no path forward at all.
+        assert!(said.contains("A stalled engineer counts too"), "{said}");
+        // And the restraint, which is the half a budget does not imply.
+        assert!(said.contains("not a reason to reach it"), "{said}");
+        assert!(said.contains("Ask first whether it splits at all"), "{said}");
+    }
+
+    /// `0` is the escape hatch, spelled the way the other settings-backed knobs
+    /// spell theirs. A manager told "up to 0 engineers" would open none.
+    #[test]
+    fn a_project_with_no_cap_is_told_it_has_none_rather_than_told_zero() {
+        let said = manager_preamble("tetris", 0);
+        assert!(said.contains("**no cap**"), "{said}");
+        assert!(
+            !said.contains("up to 0 engineers"),
+            "a manager was told its budget was nought: {said}"
+        );
+    }
+
+    /// **Nothing opens a pull request unless the manager asks for one.**
+    ///
+    /// The spec covers *stacking* pull requests and never says who opens them,
+    /// which reads as a gap in the plan and is one. The automatic ask engineer
+    /// C is wiring is opt-in and off by default, so on a machine where nobody
+    /// turned it on the manager is the only thing that would ever cause a pull
+    /// request to exist — and `stack_pull_requests` on a work with none is a
+    /// refusal rather than a stack. Both ends are asserted: that the manager is
+    /// told to ask for the draft, and that merging is still not its call.
+    #[test]
+    fn a_manager_is_told_who_opens_the_pull_requests_before_it_stacks_them() {
+        let said = manager_preamble("tetris", 3);
+        assert!(said.contains("opens a pull request"), "{said}");
+        assert!(said.contains("**draft**"), "a pull request that is not a draft: {said}");
+        assert!(
+            said.contains("`create-pr` skill"),
+            "the manager is told to ask for a pull request and not what opens one: {said}"
+        );
+        assert!(
+            said.contains("An engineer placed as `explore` opens \nnone")
+                || said.contains("An engineer placed as `explore` opens none"),
+            "a read-only engineer has no branch, and the preamble has to say so: {said}"
+        );
+        assert!(
+            said.contains("Nobody runs `gh pr create` by hand"),
+            "shelling out to `gh` is how an evidence-free pull request gets opened: {said}"
+        );
+        assert!(
+            said.contains("**Merging is never yours and never an agent's**"),
+            "{said}"
+        );
+        assert!(said.contains("`merge_pr.sh` and a person"), "{said}");
+    }
+
+    /// **Check 38.** The one thing that falls out of D5.2 and has to be said
+    /// out loud, because nothing about writing a plan suggests it: the order
+    /// the manager writes the tasks in is the order the pull requests stack in.
+    /// A plan written in the order things occurred to it produces a stack whose
+    /// bases are wrong and which looks fine from the outside.
+    #[test]
+    fn a_manager_is_told_the_order_it_plans_in_is_the_order_the_stack_comes_out_in() {
+        let said = manager_preamble("tetris", 3);
+        assert!(
+            said.contains("The order you write the tasks in is the order the pull requests \
+                           stack in."),
+            "{said}"
+        );
+        assert!(said.contains("dependency order"), "{said}");
+        assert!(
+            said.contains("bases are wrong"),
+            "the consequence is left out, so the rule reads as bookkeeping: {said}"
+        );
+    }
+
+    /// The manager is the only voice main hears about a project, and the card
+    /// that says a job is finished has to wait for the board rather than for
+    /// the first engineer that reports.
+    #[test]
+    fn a_manager_is_told_it_decides_when_a_job_is_finished_by_reading_the_board() {
+        let said = manager_preamble("tetris", 3);
+        assert!(said.contains("You are the one who tells main it is finished."), "{said}");
+        assert!(said.contains("While any task on it is open the job is not done"), "{said}");
+        assert!(
+            said.contains("Not a relay of each engineer's report"),
+            "{said}"
+        );
+        // Nothing above this was reopened: the reuse-first rule is still there,
+        // in the same words, and so is the card at the end.
+        assert!(
+            said.contains("Call `list_agents` with `project: \"tetris\"` first, every"),
+            "{said}"
+        );
+        assert!(said.contains("**Finish by raising a card.**"), "{said}");
+    }
+
+    /// Assert that everything `said` names both exists and is within reach of a
+    /// run holding `access`.
+    ///
+    /// Two passes, because the two halves cannot be asked the same way round.
+    /// *Existence* has to start from the prose and guess which backticked spans
+    /// were meant as tools, since a misspelling is by definition not in the
+    /// catalogue and nothing but the shape of the word gives it away. *Reach*
+    /// starts from the catalogue instead and looks for each real tool's name in
+    /// backticks, which is both exact and the only way to see the tools the
+    /// shape heuristic misses: `remember`, `recall`, `delegate`, `roster` and
+    /// `reply` carry no underscore and are indistinguishable from ordinary
+    /// English by spelling alone. That gap is not hypothetical — it is why
+    /// `remember` sat a level above every manager that was told to call it for
+    /// as long as it did.
+    ///
+    /// The failure reads the same either way, which is the point: whether the
+    /// name is wrong or merely out of reach, the model looks for it in its tool
+    /// list, does not find it, and spends the turn concluding Jod is broken.
+    fn every_named_tool_is_callable(said: &str, access: Option<ToolAccess>, whose: &str) {
+        let catalogue = crate::mcp::catalogue();
+        for span in tools_named_in(said) {
+            assert!(
+                catalogue.iter().any(|t| t.name == span),
+                "{whose} says to call `{span}`, which no tool is registered under"
+            );
+        }
+        for tool in catalogue
+            .iter()
+            .filter(|t| backticked(said).any(|span| span == t.name))
+        {
+            let Some(access) = access else {
+                panic!(
+                    "{whose} says to call `{}`, and that run holds none of Jod's tools at all",
+                    tool.name
+                );
+            };
+            assert!(
+                crate::mcp::allows(access, tool.needs),
+                "{whose} says to call `{}`, which needs `{}` access — and that run is spawned \
+                 with `{}`, so the tool is filtered out of its catalogue before it ever sees it",
+                tool.name,
+                tool.needs.as_str(),
+                access.as_str(),
             );
         }
 
-        // And the assistant's, which is where most of the verbs went. It names
-        // more tools than main does now, so it is the one most exposed to this
-        // failing quietly.
-        for span in tools_named_in(assistant_preamble()) {
-            assert!(
-                registered.contains(&span),
-                "the assistant is told to call `{span}`, which no tool is registered under"
-            );
-        }
     }
 
     /// Anything in backticks that looks like a tool name: lower case,
     /// underscores, no path separators or spaces.
     fn tools_named_in(said: &str) -> Vec<&str> {
-        said.split('`')
-            .skip(1)
-            .step_by(2)
+        backticked(said)
             .filter(|span| {
-                !span.is_empty()
-                    && span.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                span.chars().all(|c| c.is_ascii_lowercase() || c == '_')
                     && span.contains('_')
+                    && !ANSWER_FIELDS.contains(span)
             })
             .collect()
     }
+
+    /// Every span between a pair of backticks.
+    fn backticked(said: &str) -> impl Iterator<Item = &str> {
+        said.split('`').skip(1).step_by(2).filter(|s| !s.is_empty())
+    }
+
+    /// Fields of a tool's *answer* that are spelled exactly like a tool name.
+    /// The manager's brief quotes `stalled_for_ms` out of what `list_agents`
+    /// returns, in the same backticks it uses for the verbs, and the shape
+    /// heuristic cannot tell a field from a verb. Listing the few that exist
+    /// keeps the check strict; loosening the heuristic instead would quietly
+    /// stop it noticing whole classes of misspelling.
+    const ANSWER_FIELDS: &[&str] = &["stalled_for_ms"];
 
     #[test]
     fn a_worker_is_told_the_card_tools_and_when_each_one_is_right() {
@@ -2295,6 +3113,8 @@ mod tests {
             secrets: &[],
             peers: &[],
             tools: None,
+            assignment: None,
+            placement: None,
         });
         assert!(!said.contains("record_decision"), "{said}");
         assert!(said.contains("lifts your questions"));
@@ -2324,10 +3144,37 @@ mod tests {
             secrets: &[],
             peers: &peers,
             tools: Some(ToolAccess::ReadOnly),
+            assignment: None,
+            placement: None,
         });
         assert!(said.contains("you cannot send"), "{said}");
         assert!(!said.contains("`send_message`"));
         assert!(said.contains("read_messages"), "reading is still worth doing");
+    }
+
+    /// The same mistake in the other half of the brief. `claim_worktree` sits on
+    /// `delegate`'s line because it cuts a branch, so a read-only session is
+    /// filtered out of it — and read-only is what a scheduled run gets and what
+    /// anything built from outside is clamped to, which makes this the common
+    /// case rather than an odd one. The brief has to say it has nowhere to
+    /// write, not hand it a verb the server will refuse.
+    #[test]
+    fn a_read_only_session_is_not_told_to_claim_a_worktree_it_cannot_claim() {
+        let roots = [root("/repo", false)];
+        let said = worker_preamble(&Brief {
+            harness: HarnessKind::ClaudeCode,
+            roots: &roots,
+            secrets: &[],
+            peers: &[],
+            tools: Some(ToolAccess::ReadOnly),
+            assignment: None,
+            placement: None,
+        });
+        assert!(said.contains("no way for you to claim one"), "{said}");
+        assert!(!said.contains("`claim_worktree`"), "{said}");
+        assert!(!said.contains("`release_worktree`"), "{said}");
+        // Still told what to do instead, which is the whole point of saying it.
+        assert!(said.contains("blocked"), "{said}");
     }
 
     #[test]
@@ -2349,6 +3196,400 @@ mod tests {
     fn a_session_nobody_gave_a_directory_is_told_to_say_so_rather_than_guess() {
         let said = worker_preamble(&brief(HarnessKind::ClaudeCode, &[], &[], &[]));
         assert!(said.contains("Nobody has given this session a directory"), "{said}");
+    }
+
+    // ---- what an engineer is told about its one task ----
+
+    /// The same brief the helper above builds, plus a task and a placement.
+    ///
+    /// Both are threaded through one constructor so a test that means to change
+    /// one of them cannot change the other by accident, which is exactly the
+    /// mistake the regression guards below exist to catch.
+    fn engineer<'a>(
+        roots: &'a [Root],
+        tools: Option<ToolAccess>,
+        assignment: Option<Assignment>,
+        placement: Option<crate::leases::Placement>,
+    ) -> Brief<'a> {
+        Brief {
+            harness: HarnessKind::ClaudeCode,
+            roots,
+            secrets: &[],
+            peers: &[],
+            tools,
+            assignment,
+            placement,
+        }
+    }
+
+    /// **Both paths have a slash in them and that is load-bearing.** The
+    /// engineer section prints each owned path in backticks, and
+    /// [`tools_named_in`] reads any backticked span of lower case and
+    /// underscores as a tool name. A task owning `my_module` would fail
+    /// [`every_tool_the_preamble_tells_an_agent_to_call_is_one_that_exists`]
+    /// with "says to call `my_module`, which no tool is registered under",
+    /// which is a false positive with a message nobody would understand.
+    /// Simplifying these to bare words would reintroduce it.
+    fn task() -> Assignment {
+        Assignment::new(
+            "5d9c7f02-1f1c-4a2f-9f3a-0b1c2d3e4f50",
+            "Teach the board which files a task owns",
+            vec!["core/src/works.rs".into(), "core/src/team.rs".into()],
+        )
+    }
+
+    /// **The one thing a constant in this file cannot promise on its own.**
+    ///
+    /// [`REPORTING_TOOL`] is what the engineer section tells a session to call,
+    /// and the tool it names is registered by a literal in another file with no
+    /// compiler relationship to this one. So the constant is a single spelling
+    /// of the name only as long as something checks the two against each other,
+    /// and this is that something.
+    ///
+    /// The reach half matters as much as the existence half. An engineer is
+    /// spawned at whatever access `open_work` was asked for, and the lowest of
+    /// those is [`ToolAccess::ReadOnly`] — the level a scheduled run gets and
+    /// the level anything built from outside is clamped to. A reporting tool
+    /// above that line would leave exactly those engineers told to report and
+    /// unable to, which is the state this whole change exists to remove.
+    #[test]
+    fn the_tool_an_engineer_reports_through_is_one_it_can_actually_call() {
+        let catalogue = crate::mcp::catalogue();
+        let tool = catalogue
+            .iter()
+            .find(|t| t.name == REPORTING_TOOL)
+            .unwrap_or_else(|| {
+                panic!(
+                    "engineers are told to report with `{REPORTING_TOOL}`, and no tool is \
+                     registered under that name"
+                )
+            });
+        assert!(
+            crate::mcp::allows(ToolAccess::ReadOnly, tool.needs),
+            "`{REPORTING_TOOL}` needs `{}` access, so an engineer spawned read-only is told \
+             to report and handed no way to do it",
+            tool.needs.as_str()
+        );
+    }
+
+    /// **Check 22, and the regression guard that lets this land at all.**
+    ///
+    /// Every caller that existed before engineers did passes no assignment, and
+    /// what those sessions are told must not have moved by one character. The
+    /// assertion is that the section is purely *additive*: strip the lines
+    /// `assignment_lines` produced out of an engineer's preamble and what is
+    /// left is exactly the preamble an unassigned session gets, in the same
+    /// order. Nothing else in `preamble_lines` may read the field.
+    ///
+    /// Written this way rather than against a checked-in copy of the old string
+    /// on purpose. A frozen copy would fail on every later edit to the worker
+    /// prose, and the failure would say nothing about whether assignments had
+    /// leaked into it — which is the only thing this test is for. The wording
+    /// itself is pinned by the tests above, which were not touched.
+    #[test]
+    fn a_brief_with_no_assignment_renders_exactly_the_preamble_it_did_before() {
+        let roots = [root("/repo", false), root("/repo-worktree", true)];
+        let plain = engineer(&roots, Some(ToolAccess::Delegate), None, None);
+        let assigned = engineer(&roots, Some(ToolAccess::Delegate), Some(task()), None);
+
+        assert!(
+            assignment_lines(&plain).is_empty(),
+            "a session with no task was still told about one"
+        );
+
+        let section = assignment_lines(&assigned);
+        assert!(!section.is_empty(), "an assigned session was told nothing about its task");
+        let stripped: Vec<PreambleLine> = preamble_lines(&assigned)
+            .into_iter()
+            .filter(|line| !section.contains(line))
+            .collect();
+        assert_eq!(
+            stripped,
+            preamble_lines(&plain),
+            "the engineer section did not only add lines — it changed one"
+        );
+
+        // And the plain rendering names none of it, which is the cheap version
+        // of the same claim and the one that reads in a failure message.
+        let said = worker_preamble(&plain);
+        assert!(!said.contains("Your one task"), "{said}");
+        assert!(!said.contains(REPORTING_TOOL), "{said}");
+    }
+
+    /// **Check 23.** The three things an engineer cannot do its job without:
+    /// what the task is, which files are its own, and how to report.
+    #[test]
+    fn an_engineer_is_told_its_task_every_path_it_owns_and_how_to_report() {
+        let roots = [root("/repo", false)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            Some(task()),
+            None,
+        ));
+        assert!(said.contains("Teach the board which files a task owns"), "{said}");
+        assert!(said.contains("5d9c7f02-1f1c-4a2f-9f3a-0b1c2d3e4f50"), "{said}");
+        for path in ["core/src/works.rs", "core/src/team.rs"] {
+            assert!(said.contains(path), "`{path}` is not named as a file it owns: {said}");
+        }
+        // The verb by the name it is registered under, not a paraphrase.
+        assert!(said.contains("`complete_task`"), "{said}");
+        // And the two rules that make owning files mean anything.
+        assert!(said.contains("Nothing else in this repository is yours to change"), "{said}");
+        assert!(said.contains("Say so in your report and stop"), "{said}");
+        // Escalation is not the manager's to swallow — see D4.4.
+        assert!(said.contains("`ask_question`") && said.contains("`request_secret`"), "{said}");
+    }
+
+    /// A task that claims no files still has to say so, or an engineer reads
+    /// the absence as permission.
+    #[test]
+    fn an_engineer_whose_task_claims_no_files_is_told_that_it_claims_none() {
+        let roots = [root("/repo", false)];
+        let assignment = Assignment::new("t-1", "Find out why the poller is quiet", Vec::new());
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            Some(assignment),
+            None,
+        ));
+        assert!(said.contains("This task claims no files"), "{said}");
+        assert!(said.contains("change nothing"), "{said}");
+    }
+
+    /// **The carve-out, and it is the one bullet here that was found by running
+    /// the spec rather than by writing it.**
+    ///
+    /// The first engineer to add a field to `TeamTask` had to touch two files
+    /// under `cli/src/tui/` that nobody owned, because their test literals
+    /// stopped compiling. A path rule with no carve-out would have told it to
+    /// stop and report with the workspace uncompilable, which blocks every
+    /// other engineer on the job. Both halves are asserted: that the mechanical
+    /// fix is allowed, and that the line where it stops is stated — otherwise
+    /// the carve-out reads as a general licence to fix what it finds.
+    #[test]
+    fn an_engineer_may_repair_the_mechanical_fallout_of_its_own_change_and_no_more() {
+        let roots = [root("/repo", false)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            Some(task()),
+            None,
+        ));
+        assert!(said.contains("mechanical fallout from your own change"), "{said}");
+        assert!(said.contains("every literal that constructs it"), "{said}");
+        assert!(
+            said.contains("leaving the tree uncompilable blocks every other"),
+            "the carve-out is stated without the reason it exists: {said}"
+        );
+        assert!(
+            said.contains("what the right *value* or the right *behaviour* is"),
+            "the carve-out has no edge, so it reads as a licence to fix anything: {said}"
+        );
+    }
+
+    /// **An engineer with none of Jod's tools is told the truth about how to
+    /// report, and this was a live bug until the tool sweep was widened.**
+    ///
+    /// A run launched without Jod's MCP server holds no `complete_task`, no
+    /// `ask_question` and no `request_secret`, and the section was naming all
+    /// three of them to it. `rail_lines` and `bus_lines` beside it already
+    /// carry this branch; the engineer section did not, because every arm of
+    /// `every_tool_the_preamble_tells_an_agent_to_call_is_one_that_exists`
+    /// passed `assignment: None` and so never rendered it. Nothing has to be
+    /// lost — Jod reads the session's output and carries it — but the session
+    /// has to be told that is how it works rather than sent after three tools
+    /// it does not have.
+    #[test]
+    fn an_engineer_without_jods_tools_is_told_to_report_in_its_final_answer() {
+        let roots = [root("/repo", false)];
+        let said = worker_preamble(&engineer(&roots, None, Some(task()), None));
+        assert!(said.contains("Say your report in your final answer"), "{said}");
+        assert!(said.contains("no way for you to file one yourself"), "{said}");
+        assert!(said.contains("Blocked is still a successful ending"), "{said}");
+        for absent in ["`complete_task`", "`ask_question`", "`request_secret`"] {
+            assert!(
+                !said.contains(absent),
+                "a session holding none of Jod's tools was sent after {absent}: {said}"
+            );
+        }
+        // It still owns its files and still stops at their edge. Losing the
+        // tools does not widen what it may change.
+        assert!(said.contains("core/src/works.rs"), "{said}");
+        assert!(said.contains("Say so in your report and stop"), "{said}");
+    }
+
+    /// **Check 24.** Nothing in the engineer section is a fact about a harness,
+    /// so nothing in it may differ by one — which is also what keeps
+    /// [`the_body_of_the_preamble_is_identical_on_every_harness`] passing now
+    /// that the section exists.
+    #[test]
+    fn the_engineer_section_is_shared_so_every_harness_is_told_the_same_thing() {
+        let roots = [root("/repo", false)];
+        let assigned = engineer(&roots, Some(ToolAccess::Delegate), Some(task()), None);
+        for line in assignment_lines(&assigned) {
+            assert!(
+                line.only.is_none(),
+                "a line of the engineer's task section is tagged to one harness: {line:?}"
+            );
+        }
+
+        let shared = |harness| -> Vec<String> {
+            preamble_lines(&Brief {
+                harness,
+                ..assigned.clone()
+            })
+            .into_iter()
+            .filter(|l| l.only.is_none())
+            .map(|l| l.text)
+            .collect()
+        };
+        let claude = shared(HarnessKind::ClaudeCode);
+        assert_eq!(claude, shared(HarnessKind::OpenCode));
+        assert_eq!(claude, shared(HarnessKind::Agy));
+    }
+
+    // ---- what a placement changes about where you may write ----
+
+    /// **Check 25, first half.** `explore` is a prohibition, not a starting
+    /// position: a session told it may claim promotes itself to a writer its
+    /// manager planned no files for.
+    #[test]
+    fn an_exploring_engineer_is_never_sent_to_claim_a_worktree() {
+        let roots = [root("/repo", false)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            None,
+            Some(crate::leases::Placement::Explore),
+        ));
+        assert!(said.contains("placed this session as **explore**"), "{said}");
+        assert!(said.contains("no writable root by design"), "{said}");
+        assert!(said.contains("report and stop on"), "{said}");
+        assert!(
+            !said.contains("`claim_worktree`"),
+            "a session placed to read was handed the verb that cuts a branch: {said}"
+        );
+    }
+
+    /// **Check 25, second half.** A worktree claimed at spawn has to be
+    /// described as claimed, or the engineer spends its first turn claiming one
+    /// it already has and is told it already has one.
+    #[test]
+    fn an_engineer_placed_on_a_worktree_is_told_it_already_holds_one() {
+        let roots = [root("/repo", false), root("/repo-worktree", true)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            None,
+            Some(crate::leases::Placement::Worktree),
+        ));
+        assert!(said.contains("cut for you before this session started"), "{said}");
+        assert!(said.contains("Do not call `claim_worktree`; you already have one."), "{said}");
+        assert!(said.contains("`release_worktree`"), "{said}");
+    }
+
+    /// **The two axes are different questions, and the brief has to be true
+    /// about both.**
+    ///
+    /// A manager can place an engineer on a worktree and hand it read-only
+    /// access to Jod in the same `open_work` call. The worktree is real — Jod
+    /// cut it — and `claim_worktree` and `release_worktree` are still filtered
+    /// out of that session's catalogue, so naming either would send it after a
+    /// tool the server will refuse. This is the composition that
+    /// [`a_read_only_session_is_not_told_to_claim_a_worktree_it_cannot_claim`]
+    /// guards for an unplaced session, checked again with a placement on top of
+    /// it.
+    #[test]
+    fn a_read_only_engineer_on_a_worktree_is_told_it_holds_one_and_cannot_claim() {
+        let roots = [root("/repo", false), root("/repo-worktree", true)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::ReadOnly),
+            None,
+            Some(crate::leases::Placement::Worktree),
+        ));
+        assert!(said.contains("cut for you before this session started"), "{said}");
+        assert!(said.contains("read-only access to Jod"), "{said}");
+        assert!(!said.contains("`claim_worktree`"), "{said}");
+        assert!(!said.contains("`release_worktree`"), "{said}");
+    }
+
+    /// The same again for the placement that reads. Every arm of the split has
+    /// to survive a session that cannot call the verb, not only the ones where
+    /// naming it would have been natural.
+    #[test]
+    fn a_read_only_exploring_engineer_is_told_it_could_not_claim_one_anyway() {
+        let roots = [root("/repo", false)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::ReadOnly),
+            None,
+            Some(crate::leases::Placement::Explore),
+        ));
+        assert!(said.contains("no way for you to claim one in any case"), "{said}");
+        assert!(!said.contains("`claim_worktree`"), "{said}");
+    }
+
+    /// Sharing a worktree is the placement where the danger is another person
+    /// rather than Reljod, and rebasing is how one engineer destroys the
+    /// other's afternoon without either of them noticing.
+    #[test]
+    fn an_engineer_sharing_a_worktree_is_told_who_holds_it_and_never_to_rebase_it() {
+        let roots = [root("/repo", false), root("/repo-worktree", true)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            None,
+            Some(crate::leases::Placement::Share {
+                work_id: "w-first".into(),
+            }),
+        ));
+        assert!(said.contains("somebody else is already working in"), "{said}");
+        assert!(said.contains("w-first"), "the lender is not named: {said}");
+        assert!(said.contains("`work_board`"), "no way to find out whose files: {said}");
+        assert!(said.contains("never rebase, reset or force-push"), "{said}");
+    }
+
+    /// The rarest placement and the only one with nothing between the session
+    /// and Reljod's own tree, so the brief says that in those words.
+    #[test]
+    fn an_engineer_writing_in_reljods_checkout_is_told_there_is_no_branch_beneath_it() {
+        let roots = [root("/repo", true)];
+        let said = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            None,
+            Some(crate::leases::Placement::Direct),
+        ));
+        assert!(said.contains("**Reljod's own checkout**"), "{said}");
+        assert!(said.contains("no branch between you and his working tree"), "{said}");
+        assert!(said.contains("Commit what the task asked for and nothing else"), "{said}");
+        // And the root itself is not described as a worktree, which is the
+        // single most expensive sentence here to get wrong.
+        assert!(said.contains("**writable**, and it is Reljod's own checkout"), "{said}");
+        assert!(!said.contains("a worktree claimed for this work"), "{said}");
+    }
+
+    /// **A placement nobody stated is not `explore`.**
+    ///
+    /// Collapsing the two would read as a tidy simplification and would
+    /// silently strip the claim instruction out of every session Jod has ever
+    /// started, because `None` is what `delegate`, `continue_agent` and every
+    /// unplanned `open_work` pass. The two renderings have to stay different.
+    #[test]
+    fn an_unplaced_session_is_told_to_claim_and_a_placed_one_is_not() {
+        let roots = [root("/repo", false)];
+        let unplaced = worker_preamble(&engineer(&roots, Some(ToolAccess::Delegate), None, None));
+        let exploring = worker_preamble(&engineer(
+            &roots,
+            Some(ToolAccess::Delegate),
+            None,
+            Some(crate::leases::Placement::Explore),
+        ));
+        assert!(unplaced.contains("`claim_worktree`"), "{unplaced}");
+        assert!(!exploring.contains("`claim_worktree`"), "{exploring}");
+        assert_ne!(unplaced, exploring);
     }
 
     /// A drifting noun is a bug, so the orchestrator is given the vocabulary
@@ -3726,3 +4967,5 @@ mod tests {
         );
     }
 }
+
+

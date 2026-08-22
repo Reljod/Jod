@@ -10255,6 +10255,7 @@ mod tests {
                 owner: None,
                 status: "open".into(),
                 created_at_ms: 0,
+                paths: Vec::new(),
             },
             jod_core::team::TeamTask {
                 id: "t2".into(),
@@ -10262,6 +10263,7 @@ mod tests {
                 owner: None,
                 status: "done".into(),
                 created_at_ms: 0,
+                paths: Vec::new(),
             },
         ];
         // The cursor is an id, so it has to be placed once the rows exist —
@@ -10321,6 +10323,7 @@ mod tests {
                 owner: None,
                 status: "open".into(),
                 created_at_ms: 0,
+                paths: Vec::new(),
             })
             .collect()
     }
@@ -11200,6 +11203,7 @@ mod tests {
             owner: None,
             status: "open".into(),
             created_at_ms: 0,
+            paths: Vec::new(),
         }];
         app.go(Workspace::Tasks);
         app

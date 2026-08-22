@@ -1947,6 +1947,17 @@ impl Ticker {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
         };
+
+        // **Before the interval, deliberately.** The interval below exists to
+        // protect a rate-limited API, and asking a session to open its own pull
+        // request never leaves this machine: it is one `git rev-list` in a
+        // worktree and two writes to Jod's own database. Making it wait for the
+        // poll's turn would delay it by up to five minutes for no reason, and
+        // an interval is not what stops it repeating — the record on the lease
+        // is, which is why once per lease is once for ever however often this
+        // runs.
+        self.ask_for_pull_requests(&store).await;
+
         if !due_to_poll(&store, now_ms) {
             return Ok(TickReport::default());
         }
@@ -1991,6 +2002,70 @@ impl Ticker {
             held: usize::from(swept.quiet.is_some()),
             ..Default::default()
         })
+    }
+
+    /// Ask each session whose work looks finished to open its pull request.
+    ///
+    /// **The caller auto-PR never had.** [`crate::prs::auto_pr_instruction`]
+    /// wrote the words and [`Store::auto_pr`] held the switch, and between them
+    /// nothing ever decided a session should be asked — so the whole feature was
+    /// a subsystem whose tests stayed green because nothing ran it. Reljod's
+    /// requirement is that a project with a remote gets a pull request per
+    /// worktree, and until this line existed that depended entirely on a model
+    /// remembering to open one.
+    ///
+    /// **Jod does not open it.** The instruction goes to the session, which has
+    /// the context and the `create-pr` skill; Jod's process never saw the work
+    /// happen and a pull request it opened itself would carry no evidence. That
+    /// is the same reasoning `auto_pr_instruction` is built on and this does not
+    /// weaken it.
+    ///
+    /// The judgement is all in [`crate::prs::ask_for_pull_requests`] — whether
+    /// the setting is on, whether the board is empty, whether the branch has
+    /// anything on it, whether it has been asked before. What is here is the
+    /// delivery and the bookkeeping, the same division `tick_deliveries` keeps
+    /// with `plan_injection`.
+    ///
+    /// The words travel by the delivery queue rather than by a spawn of its
+    /// own, so a session that is mid-turn is not trampled and one with no
+    /// harness session to resume is left alone — `tick_deliveries` already
+    /// decides both, and doing it again here would be the same question
+    /// answered in two places.
+    ///
+    /// **Nothing here is fatal.** A pull request nobody was asked for is a
+    /// missing pull request, not a reason to stop a tick that also fires
+    /// schedules — the same call `trim_ledger` makes.
+    async fn ask_for_pull_requests(&self, store: &Arc<Store>) {
+        let store = store.clone();
+        // Blocking: it spawns `git` and writes to SQLite. On a runtime thread
+        // that stalls every other task the daemon is running, and the symptom
+        // reads as the scheduler being slow.
+        let asked = tokio::task::spawn_blocking(move || {
+            crate::prs::ask_for_pull_requests(&store, |ask| {
+                store
+                    .enqueue_delivery(
+                        &ask.candidate.conversation_id,
+                        crate::delivery::Kind::Jod,
+                        // The lease, because that is what the ask is *about* and
+                        // what is recorded against — one worktree, one branch,
+                        // one pull request.
+                        &format!("auto-pr:{}", ask.candidate.lease_id),
+                        &ask.instruction,
+                    )
+                    .map(|_| ())
+            })
+        })
+        .await;
+
+        match asked {
+            Ok(Ok(asks)) if !asks.is_empty() => eprintln!(
+                "[jod/tick] asked {} session(s) to open a pull request",
+                asks.len()
+            ),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("[jod/tick] could not ask for a pull request: {e}"),
+            Err(joined) => eprintln!("[jod/tick] the pull request ask did not come back: {joined}"),
+        }
     }
 
     /// Say to each idle session whatever has been queued for it.
@@ -5647,6 +5722,93 @@ mod tests {
                 Some("1000000"),
                 "the composite tick never polled for pull requests"
             );
+        }
+
+        /// **The guard on the auto-PR wiring**, which is the half that never
+        /// had a caller: the instruction text and the setting both existed and
+        /// nothing ever decided a session should be asked.
+        ///
+        /// Delete the `ask_for_pull_requests` line from `tick_pull_requests`
+        /// and this fails. It asserts the one thing only that step does — the
+        /// ask written down on the lease — rather than anything the sweep also
+        /// touches.
+        ///
+        /// No network, and by construction rather than by luck: the poll is
+        /// stamped as already done for this window, so the sweep returns before
+        /// it reaches the leases and `gh` is never spawned. That the ask still
+        /// happens is the point — it runs ahead of the interval because it does
+        /// not leave the machine.
+        #[tokio::test]
+        async fn the_tick_asks_a_finished_session_to_open_its_pull_request() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            store.set_auto_pr(true).unwrap();
+            // Already polled in this window, so the sweep is skipped entirely.
+            store.set_setting(POLLED_AT_KEY, "1000000").unwrap();
+            let Some((lease, session)) = crate::prs::a_finished_session(&store) else {
+                return;
+            };
+
+            ticker_over(&store)
+                .tick_pull_requests(1_000_001)
+                .await
+                .unwrap();
+
+            assert!(
+                store.pull_request_asked_at(lease).unwrap().is_some(),
+                "the tick never asked, so auto-PR is still a subsystem nothing calls"
+            );
+            let queued = store.pending_for(&session).unwrap();
+            assert_eq!(queued.len(), 1, "and the words are queued for the session");
+            assert_eq!(queued[0].kind, crate::delivery::Kind::Jod);
+            assert!(
+                queued[0].body.contains("create-pr"),
+                "the session is asked to run the skill, not told Jod opened one: {}",
+                queued[0].body
+            );
+        }
+
+        /// Once, and not again on the next tick. The tick loop runs every
+        /// minute and the record on the lease is the only thing between that
+        /// and a session nagged sixty times an hour.
+        #[tokio::test]
+        async fn the_tick_does_not_ask_the_same_session_twice() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            store.set_auto_pr(true).unwrap();
+            store.set_setting(POLLED_AT_KEY, "1000000").unwrap();
+            let Some((_, session)) = crate::prs::a_finished_session(&store) else {
+                return;
+            };
+            let ticker = ticker_over(&store);
+
+            ticker.tick_pull_requests(1_000_001).await.unwrap();
+            ticker.tick_pull_requests(1_000_002).await.unwrap();
+            ticker.tick_pull_requests(1_000_003).await.unwrap();
+
+            assert_eq!(
+                store.pending_for(&session).unwrap().len(),
+                1,
+                "three ticks, one ask — anything else is a session nagged for ever"
+            );
+        }
+
+        /// Off by default and it stays off. Opening a pull request is
+        /// externally visible, so a box whose owner never turned this on must
+        /// never have it happen.
+        #[tokio::test]
+        async fn the_tick_asks_nobody_while_auto_pr_is_off() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            store.set_setting(POLLED_AT_KEY, "1000000").unwrap();
+            let Some((lease, session)) = crate::prs::a_finished_session(&store) else {
+                return;
+            };
+
+            ticker_over(&store)
+                .tick_pull_requests(1_000_001)
+                .await
+                .unwrap();
+
+            assert!(store.pull_request_asked_at(lease).unwrap().is_none());
+            assert!(store.pending_for(&session).unwrap().is_empty());
         }
 
         /// The interval is the whole reason this step is not like the others:

@@ -91,6 +91,15 @@ pub enum Kind {
     Mail,
     /// Reljod, typing into a running session.
     Human,
+    /// Jod itself, from a tick loop rather than from any person or agent.
+    ///
+    /// Its own kind because the other three would each be a lie in the
+    /// transcript Reljod reads to find out what happened: `Human` would render
+    /// `[message from Reljod]` on a message he never sent, `CardAnswer` would
+    /// claim the session raised a card it did not raise, and `Mail` would say
+    /// another agent is speaking and have [`protocol_for`] tell the session to
+    /// `reply` to one that does not exist.
+    Jod,
 }
 
 impl Kind {
@@ -99,6 +108,7 @@ impl Kind {
             Kind::CardAnswer => "card_answer",
             Kind::Mail => "mail",
             Kind::Human => "human",
+            Kind::Jod => "jod",
         }
     }
 
@@ -106,6 +116,7 @@ impl Kind {
         match s {
             "mail" => Kind::Mail,
             "human" => Kind::Human,
+            "jod" => Kind::Jod,
             _ => Kind::CardAnswer,
         }
     }
@@ -127,6 +138,7 @@ impl Kind {
             Kind::CardAnswer => "[answer to a card you raised]",
             Kind::Mail => "[message from another agent]",
             Kind::Human => "[message from Reljod]",
+            Kind::Jod => "[from Jod]",
         }
     }
 }

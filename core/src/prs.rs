@@ -1206,9 +1206,9 @@ impl Store {
     /// attributed to the worktree the work was actually done in.
     pub fn attribution_for(&self, conversation_id: &str) -> Result<Attribution> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        let row: Option<(Option<String>, Option<String>)> = conn
+        let row: Option<(Option<String>, Option<String>, Option<i64>)> = conn
             .query_row(
-                "SELECT c.work_id, l.branch
+                "SELECT c.work_id, l.branch, l.id
                    FROM conversations c
                    LEFT JOIN leases l
                      ON l.conversation_id = c.id AND l.state = 'held'
@@ -1216,14 +1216,14 @@ impl Store {
                   ORDER BY l.created_at_ms DESC
                   LIMIT 1",
                 params![conversation_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let (work_id, branch) = row.unwrap_or((None, None));
+        let (work_id, branch, lease_id) = row.unwrap_or((None, None, None));
         Ok(Attribution {
             work_id,
             conversation_id: Some(conversation_id.to_string()),
-            lease_id: None,
+            lease_id,
             branch,
         })
     }
@@ -1270,10 +1270,36 @@ impl Store {
 ///
 /// **Integration point** for whoever owns delivery: this is the text to inject
 /// at a turn boundary once [`Store::auto_pr`] is on and the board is empty.
-pub fn auto_pr_instruction(branch: &str, base: &str) -> String {
+///
+/// `stacked_on` is the branch another engineer on the same job is working in,
+/// when this session's work was cut on top of it. Passing it changes two
+/// things and nothing else: the pull request is opened against that branch
+/// rather than against `base`, and a sentence says why. Both matter for the
+/// same reason — a pull request opened against `main` when its branch actually
+/// starts from a colleague's unmerged branch shows that colleague's diff as
+/// well as its own, and a reviewer then reads a change nobody in that pull
+/// request wrote.
+///
+/// `None` is the ordinary case and produces exactly the text it always has.
+/// That is not a coincidence to be maintained by hand; it is held by
+/// `the_instruction_for_an_unstacked_pull_request_is_the_one_it_has_always_been`.
+pub fn auto_pr_instruction(branch: &str, base: &str, stacked_on: Option<&str>) -> String {
+    // What the pull request is actually opened against. A stacked one is based
+    // on the branch below it, which is the whole of what stacking is.
+    let against = stacked_on.unwrap_or(base);
+    let stacked = match stacked_on {
+        None => String::new(),
+        Some(parent) => format!(
+            "This branch was cut on top of `{parent}`, which belongs to another engineer on \
+             the same job and has not landed yet. That is why the base is `{parent}` and not \
+             `{base}`: based that way, the diff is only the part you added, and the reviewer \
+             is not asked to read somebody else's change as well as yours.\n\n"
+        ),
+    };
     format!(
-        "Your work on `{branch}` looks finished. Open a pull request against `{base}` by \
+        "Your work on `{branch}` looks finished. Open a pull request against `{against}` by \
          running the `create-pr` skill — it builds the body and the evidence bundle.\n\n\
+         {stacked}\
          Open it as a **draft**. Do not merge it, do not mark it ready for review, and do not \
          run `gh pr merge`: whether this merges is decided by `merge_pr.sh` and by a person, \
          not here.\n\n\
@@ -1282,10 +1308,698 @@ pub fn auto_pr_instruction(branch: &str, base: &str) -> String {
     )
 }
 
+// ---- stacking ----------------------------------------------------------
+
+/// One work's pull requests, in the order they should sit on each other:
+/// `prs[0]` is the bottom of the stack and the last one is the top.
+///
+/// Only ever built with two or more in it. One pull request is a pull request,
+/// not a stack — see [`Stacking::TooFew`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stack {
+    pub prs: Vec<PullRequest>,
+}
+
+/// Whether a work has something worth linking into a stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stacking {
+    Ready(Stack),
+    /// Fewer than two pull requests, carrying how many there were. Zero and one
+    /// are different situations for whoever reads the refusal — nobody has
+    /// opened one yet, against only one engineer having finished — and a
+    /// refusal that does not say which leaves the manager guessing.
+    TooFew { found: usize },
+}
+
+impl Store {
+    /// A work's pull requests, ordered bottom to top by the order their tasks
+    /// were planned.
+    ///
+    /// ## Where the order comes from
+    ///
+    /// The plan is the only ordering anybody has a stated reason to trust. The
+    /// manager wrote the tasks in the order the work has to happen in, so the
+    /// task at the top of the board is the one everything else is built on,
+    /// and that is the bottom of the stack.
+    ///
+    /// Plan order is `tasks` sorted by `rowid`, and nothing else. **That has to
+    /// stay character for character the same as [`Store::work_tasks`]**, which
+    /// is the other reader of the same order; the whole design rests on the
+    /// board and the stack agreeing about what the plan said, and two queries
+    /// that sort a board differently would disagree silently.
+    ///
+    /// Not `id`, because `Store::plan_work` takes `now_ms()` once and reuses it
+    /// for every task in the plan, inside one transaction. Every task in a plan
+    /// therefore carries an identical `created_at_ms`, so the tiebreaker is the
+    /// only thing separating them — and `tasks.id` is a uuid v4, which would
+    /// shuffle the plan into a random order while looking perfectly
+    /// deterministic.
+    ///
+    /// Not `created_at_ms, rowid` either, which is what this used to be. That
+    /// spelling assumed the clock only moves forwards, and `now_ms()` is
+    /// `chrono::Utc::now()` — a wall clock. An NTP correction or a laptop waking
+    /// from sleep steps it backwards, and then a plan written second carries a
+    /// smaller timestamp than one written first and sorts underneath it: the
+    /// board silently reorders and the stack bases earlier work on top of later
+    /// work. `rowid` alone is immune, and it is the more faithful expression of
+    /// "the order they were written" in any case. `works.rs` holds a test of
+    /// that property, `a_backwards_clock_does_not_reorder_the_board`, which
+    /// covers this query too — the invariant is one thing and both halves have
+    /// to spell it the same way.
+    ///
+    /// A pull request reaches its task through the engineer that opened it:
+    /// `pull_requests.conversation_id` to `conversations.task_id`. Two other
+    /// conversations count as well, and both matter because of
+    /// `Placement::Share`. A shared worktree is one branch and therefore one
+    /// pull request covering the work of everybody standing in it, so the
+    /// conversation that holds the lease and every conversation in
+    /// `lease_sharers` are candidates too. The pull request takes the
+    /// **earliest** task among them: it contains that task's work, and putting
+    /// it any higher would make the tasks underneath appear to depend on a
+    /// pull request that already includes them.
+    ///
+    /// ## Pull requests with no task
+    ///
+    /// Every pull request written before `conversations.task_id` existed has a
+    /// null task, as does one opened by a session nobody spawned onto a task.
+    /// Those fall back to `detected_at_ms`, oldest first, which is the order
+    /// they came back in before any of this — and `detected_at_ms` stays the
+    /// tiebreaker inside a single rank, so a shared worktree's two pull
+    /// requests do not swap places between calls.
+    ///
+    /// They sort **above** every pull request that does have a task. Slotting
+    /// one into the middle would be a guess, and a wrong guess there rewrites a
+    /// planned pull request's base to point at something nobody planned. At the
+    /// top it is the only one whose position is uncertain and everything below
+    /// it is still ordered by the plan.
+    pub fn stack_for_work(&self, work_id: &str) -> Result<Stacking> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "WITH planned AS (
+               SELECT id AS task_id,
+                      ROW_NUMBER() OVER (ORDER BY rowid) AS position
+                 FROM tasks WHERE work_id = ?1
+             ),
+             -- Every task a pull request can be said to contain: the one its
+             -- opener was spawned onto, plus the ones belonging to anybody
+             -- else standing in the same worktree.
+             holders AS (
+               SELECT p.id AS pr_id, c.task_id AS task_id
+                 FROM pull_requests p
+                 JOIN conversations c ON c.id = p.conversation_id
+                WHERE p.work_id = ?1
+               UNION
+               SELECT p.id, c.task_id
+                 FROM pull_requests p
+                 JOIN leases l ON l.id = p.lease_id
+                 JOIN conversations c ON c.id = l.conversation_id
+                WHERE p.work_id = ?1
+               UNION
+               SELECT p.id, c.task_id
+                 FROM pull_requests p
+                 JOIN lease_sharers s ON s.lease_id = p.lease_id
+                 JOIN conversations c ON c.id = s.conversation_id
+                WHERE p.work_id = ?1
+             ),
+             ranked AS (
+               SELECT h.pr_id, MIN(planned.position) AS position
+                 FROM holders h JOIN planned ON planned.task_id = h.task_id
+                GROUP BY h.pr_id
+             )
+             SELECT {PR_COLUMNS}
+               FROM pull_requests
+               LEFT JOIN ranked ON ranked.pr_id = pull_requests.id
+              WHERE pull_requests.work_id = ?1
+              ORDER BY ranked.position IS NULL, ranked.position,
+                       pull_requests.detected_at_ms, pull_requests.id"
+        ))?;
+        let rows = stmt.query_map(params![work_id], read_pr)?;
+        let prs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        if prs.len() < 2 {
+            return Ok(Stacking::TooFew { found: prs.len() });
+        }
+        Ok(Stacking::Ready(Stack { prs }))
+    }
+}
+
+/// The `gh stack link` command line for an ordered list, bottom to top.
+///
+/// A free function taking the list rather than a method taking a work, so the
+/// rendering can be checked without a database — the argument order is the
+/// whole point of this command and it is worth testing on its own.
+///
+/// `gh stack link` accepts a pull request number, a branch name or a pull
+/// request URL for each argument, which is why each one is rendered from
+/// whichever of the three this row actually has. A number is preferred because
+/// it is what a person reading the line will recognise; a branch name is the
+/// fallback for a row polling found before it had a number, and the URL is the
+/// last resort that is always present, since it is the table's unique key.
+pub fn stack_link_command(prs: &[PullRequest]) -> String {
+    let args: Vec<String> = prs.iter().map(stack_argument).collect();
+    format!("gh stack link {}", args.join(" "))
+}
+
+fn stack_argument(pr: &PullRequest) -> String {
+    if let Some(number) = pr.number {
+        return number.to_string();
+    }
+    if !pr.branch.is_empty() {
+        return pr.branch.clone();
+    }
+    pr.url.clone()
+}
+
+/// What Jod says to a manager that asked for its work's pull requests to be
+/// stacked.
+///
+/// An instruction and an ordered list, not a `gh` call Jod makes itself, for
+/// the same reason [`auto_pr_instruction`] is one: linking rewrites the base
+/// branch of every pull request named on that line, which is a visible change
+/// to somebody else's open work, and the session asking for it is the one that
+/// can see whether the list is still right.
+pub fn stack_instruction(prs: &[PullRequest]) -> String {
+    let command = stack_link_command(prs);
+    let count = prs.len();
+    let repo = prs.first().map(|pr| pr.repo.as_str()).unwrap_or_default();
+    // Every pull request in a stack has to live in one repository, because a
+    // stack is a GitHub object belonging to a repository. A work whose
+    // engineers opened pull requests in two of them cannot be one stack, and
+    // saying so is more use than a command line that will be rejected.
+    let spread: Vec<&str> = {
+        let mut seen: Vec<&str> = Vec::new();
+        for pr in prs {
+            if !seen.contains(&pr.repo.as_str()) {
+                seen.push(pr.repo.as_str());
+            }
+        }
+        seen
+    };
+    let where_to_run = if spread.len() > 1 {
+        format!(
+            "These pull requests are not all in one repository — they are spread across {}. A \
+             stack belongs to a single repository, so link the ones that share a repository and \
+             leave the rest alone.\n\n",
+            spread.join(", ")
+        )
+    } else if repo.is_empty() {
+        String::new()
+    } else {
+        format!("Run it in a checkout of `{repo}`.\n\n")
+    };
+
+    format!(
+        "This job produced {count} pull requests. They were cut from the same starting point \
+         and each one is only part of the job, so they read as a stack rather than as {count} \
+         independent changes. Link them on GitHub, bottom to top:\n\n\
+         ```\n{command}\n```\n\n\
+         {where_to_run}\
+         The order above is Jod's best reading of which pull request sits on which — check it \
+         before you run anything, because the command takes it literally.\n\n\
+         Linking rewrites each pull request's base branch. A pull request whose branch has \
+         already landed must be left out of the command line: pointing a stack at a branch that \
+         no longer exists breaks every pull request above it. Look at each one first and drop \
+         the ones that are done.\n\n\
+         Do not pass `--open`. These are drafts deliberately, and marking them ready for review \
+         is not yours to do here. Nothing about a stack changes who decides what lands: that is \
+         `merge_pr.sh` and a person, as it is for every other pull request."
+    )
+}
+
+/// The refusal for a work that has fewer than two pull requests.
+///
+/// Its own function so the tool and this module cannot end up saying different
+/// things, and so the count is always in the sentence. Running `gh stack link`
+/// on a single pull request churns a base branch to produce a stack of one,
+/// which is worth nothing and is visible to everyone watching that pull
+/// request.
+pub fn stack_refusal(found: usize) -> String {
+    match found {
+        0 => "This work has no pull requests yet, so there is nothing to stack. An engineer \
+              opens one when its branch is finished; wait for at least two."
+            .to_string(),
+        1 => "This work has one pull request, and one pull request is not a stack. Linking it \
+              would rewrite its base branch to produce a stack of one, which changes an open \
+              pull request for no gain. Wait until a second engineer has opened theirs."
+            .to_string(),
+        found => format!(
+            "This work has {found} pull requests, which is not enough to stack. Two is the \
+             minimum."
+        ),
+    }
+}
+
+// ---- asking a session to open its pull request -------------------------
+//
+// The half that was missing. `auto_pr_instruction` wrote the words and
+// `AUTO_PR_SETTING` held the switch, and between them there was nothing that
+// ever decided a session should be asked — which made the whole of auto-PR a
+// subsystem whose tests were green for ever because nothing ran it.
+//
+// What is here is the decision, and only the decision. Rendering the words is
+// `auto_pr_instruction`'s job and getting them into a session is the tick's,
+// through the delivery queue that already knows how to resume a conversation
+// without trampling one mid-turn. Jod still never runs `gh pr create`.
+
+/// A held lease that the database says is ready to be asked.
+///
+/// Everything here is answerable without leaving the process. Whether the
+/// branch has anything on it is not, and is asked separately — see
+/// [`branch_is_ahead`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub lease_id: i64,
+    pub work_id: String,
+    pub conversation_id: String,
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    /// What the branch was cut from, from `leases.base_ref`.
+    pub base: String,
+    /// The branch below this one in its work's stack, when there is one.
+    ///
+    /// Computed over **every** held lease of the work, not only the ones being
+    /// asked. A lease whose pull request is already open is not a candidate,
+    /// but it is still what the next branch up sits on, and leaving it out
+    /// would base that pull request on the trunk and show somebody else's diff
+    /// inside it.
+    pub stacked_on: Option<String>,
+}
+
+/// One session, the instruction it should be given, and what it is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    pub candidate: Candidate,
+    pub instruction: String,
+}
+
+impl Store {
+    /// Every held lease whose session should be asked to open a pull request.
+    ///
+    /// The conditions, all of them necessary and none of them a matter of
+    /// judgement:
+    ///
+    /// - The lease is still **held** and has a branch. A released lease's
+    ///   branch is somebody else's business, and a lease with no branch has
+    ///   nothing to open a pull request from.
+    /// - Its work's board has at least one task and **no open one**. A board
+    ///   with work left on it is not finished whatever the session is doing,
+    ///   and requiring a task to exist keeps a work whose board was never
+    ///   written from reading as a finished one.
+    /// - **No pull request is recorded** for that lease or that branch. Asking
+    ///   for a second one is asking a session to duplicate its own work.
+    /// - **It has not been asked before** — `leases.auto_pr_asked_at_ms` is
+    ///   null. This is the one that matters on a loop that runs every minute:
+    ///   without it the ask is re-sent every tick for ever, and each repeat
+    ///   spends the session a turn.
+    ///
+    /// That last fact lives on the lease rather than in `settings` or in the
+    /// delivered `pending_deliveries` row, and both alternatives were
+    /// considered. The delivery ledger is durable today, because nothing prunes
+    /// `pending_deliveries`, but resting this loop's idempotence on that staying
+    /// true means the day somebody adds a retention policy Jod starts asking
+    /// every finished session again — silently, months later, with no visible
+    /// connection to the change that caused it. A `settings` key named after a
+    /// lease id is durable too, and outlives its lease for ever with nothing
+    /// ever looking for it again. On the lease, it is a property of the thing it
+    /// describes and it goes when the lease goes.
+    ///
+    /// [`Store::auto_pr`] is deliberately **not** checked here. This function
+    /// answers "which leases are ready", the setting answers "may Jod speak at
+    /// all", and keeping them apart means the readiness logic can be tested
+    /// without the switch and the switch cannot be forgotten in only one of
+    /// two callers — there is one caller, [`ask_for_pull_requests`], and it
+    /// checks it first.
+    ///
+    /// Ordering is plan order within each work, by the same ranking
+    /// [`Store::stack_for_work`] uses, because that is what makes
+    /// [`Candidate::stacked_on`] the branch actually below this one.
+    pub fn leases_ready_for_a_pull_request(&self) -> Result<Vec<Candidate>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "WITH planned AS (
+               SELECT work_id, id AS task_id,
+                      ROW_NUMBER() OVER (PARTITION BY work_id ORDER BY rowid) AS position
+                 FROM tasks WHERE work_id IS NOT NULL
+             ),
+             holders AS (
+               SELECT l.id AS lease_id, c.task_id AS task_id
+                 FROM leases l JOIN conversations c ON c.id = l.conversation_id
+               UNION
+               SELECT s.lease_id, c.task_id
+                 FROM lease_sharers s JOIN conversations c ON c.id = s.conversation_id
+             ),
+             ranked AS (
+               SELECT h.lease_id, MIN(p.position) AS position
+                 FROM holders h JOIN planned p ON p.task_id = h.task_id
+                GROUP BY h.lease_id
+             )
+             SELECT l.id, l.work_id, l.conversation_id, l.worktree_path, l.branch, l.base_ref,
+                    -- Whether this one is asked, as opposed to merely counted
+                    -- for the ordering. Every held lease comes back, because a
+                    -- lease that already has its pull request is still what the
+                    -- branch above it stands on.
+                    (EXISTS (SELECT 1 FROM tasks t WHERE t.work_id = l.work_id)
+                     AND NOT EXISTS (SELECT 1 FROM tasks t
+                                      WHERE t.work_id = l.work_id AND t.status != 'done')
+                     AND NOT EXISTS (SELECT 1 FROM pull_requests p
+                                      WHERE p.lease_id = l.id
+                                         OR (p.branch = l.branch AND p.branch <> ''))
+                     AND l.auto_pr_asked_at_ms IS NULL) AS ready
+               FROM leases l
+               LEFT JOIN ranked ON ranked.lease_id = l.id
+              WHERE l.state = 'held'
+                AND l.branch <> ''
+                AND l.work_id IS NOT NULL
+                AND l.conversation_id IS NOT NULL
+              ORDER BY l.work_id,
+                       ranked.position IS NULL, ranked.position,
+                       l.created_at_ms, l.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                Candidate {
+                    lease_id: r.get(0)?,
+                    work_id: r.get(1)?,
+                    conversation_id: r.get(2)?,
+                    worktree_path: PathBuf::from(r.get::<_, String>(3)?),
+                    branch: r.get(4)?,
+                    base: r.get(5)?,
+                    stacked_on: None,
+                },
+                r.get::<_, bool>(6)?,
+            ))
+        })?;
+
+        // The predecessor is filled in here rather than in SQL because it is a
+        // property of the row *before* this one within its work, and the rows
+        // arrive in exactly that order.
+        let mut out = Vec::new();
+        let mut below: Option<(String, String)> = None;
+        for row in rows {
+            let (mut candidate, ready) = row?;
+            candidate.stacked_on = match &below {
+                Some((work, branch)) if *work == candidate.work_id => Some(branch.clone()),
+                _ => None,
+            };
+            below = Some((candidate.work_id.clone(), candidate.branch.clone()));
+            if ready {
+                out.push(candidate);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Store {
+    /// Write down that this lease's session has been asked, so it never is
+    /// again.
+    ///
+    /// **Integration point**, like [`Store::leases_to_ask`] and
+    /// [`lease_for_branch`]: `leases` is `crate::leases`' table and this is a
+    /// column only the auto-PR loop reads or writes, so the statement lives
+    /// beside the loop that needs it rather than in a module that would never
+    /// call it.
+    pub fn note_pull_request_asked(&self, lease_id: i64, at_ms: i64) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE leases SET auto_pr_asked_at_ms = ?2 WHERE id = ?1",
+                params![lease_id, at_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// When this lease's session was asked, or `None` for one that never was.
+    pub fn pull_request_asked_at(&self, lease_id: i64) -> Result<Option<i64>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT auto_pr_asked_at_ms FROM leases WHERE id = ?1",
+                params![lease_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+}
+
+/// Whether `branch` has any commit `base` does not.
+///
+/// A branch with nothing on it is a session that claimed a worktree and then
+/// did the work somewhere else, or did none — and asking it for a pull request
+/// spends a turn to be told there is nothing to open.
+///
+/// **Every failure answers "no".** No git, a worktree somebody deleted by hand,
+/// a `base_ref` that no longer resolves: none of those are reasons to ask, and
+/// an ask Jod cannot justify is worse than one it misses, because the ask is
+/// recorded and never repeated. The missed one is recoverable by a person; the
+/// wrong one has already spent the turn.
+///
+/// This spawns `git` and so is not exercised by the fast tests. One test does
+/// run it against a real repository, because the question it answers is a fact
+/// about git rather than about Jod, and a stub would test the stub.
+pub fn branch_is_ahead(worktree: &Path, base: &str, branch: &str) -> bool {
+    if base.is_empty() || branch.is_empty() || !worktree.is_dir() {
+        return false;
+    }
+    let out = Command::new("git")
+        .current_dir(worktree)
+        .args(["rev-list", "--count", &format!("{base}..{branch}")])
+        .output();
+    match out {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|commits| commits > 0),
+        _ => false,
+    }
+}
+
+/// Every session that should be asked right now, and what to say to each.
+///
+/// Decides and renders; delivers nothing and writes nothing down. That split is
+/// what makes the whole of the judgement testable without a queue, a harness or
+/// a spawned process.
+pub fn asks(store: &Store) -> Result<Vec<Ask>> {
+    asks_with(store, |c| {
+        branch_is_ahead(&c.worktree_path, &c.base, &c.branch)
+    })
+}
+
+/// [`asks`] with the "has this branch got anything on it" question passed in,
+/// so the rest can be exercised without a git repository per case.
+pub fn asks_with(store: &Store, is_ahead: impl Fn(&Candidate) -> bool) -> Result<Vec<Ask>> {
+    if !store.auto_pr()? {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for candidate in store.leases_ready_for_a_pull_request()? {
+        if !is_ahead(&candidate) {
+            continue;
+        }
+        let instruction = auto_pr_instruction(
+            &candidate.branch,
+            &candidate.base,
+            candidate.stacked_on.as_deref(),
+        );
+        out.push(Ask {
+            candidate,
+            instruction,
+        });
+    }
+    Ok(out)
+}
+
+/// Ask each ready session, once, and remember that it was asked.
+///
+/// `deliver` is how the words reach the session, and it is a parameter rather
+/// than a call to the queue because *what* to say and *how to say it* are
+/// different jobs owned by different parts of the system. The tick passes the
+/// delivery queue; a test passes a closure that records what it was handed.
+///
+/// **The ask is written down before it is delivered**, which is the same order
+/// [`crate::ticker`] stamps its poll and its ledger trim in, and for the same
+/// reason: a delivery that fails and is retried every tick is the nagging this
+/// record exists to prevent, and it would nag hardest exactly when something
+/// is already wrong. The cost is that a failed delivery is a pull request
+/// nobody is asked for — recoverable, because a person or a manager can still
+/// ask, and visible, because the error is returned rather than swallowed.
+///
+/// Returns what it asked, so the caller can say so without asking again.
+pub fn ask_for_pull_requests(
+    store: &Store,
+    deliver: impl Fn(&Ask) -> Result<()>,
+) -> Result<Vec<Ask>> {
+    ask_for_pull_requests_with(
+        store,
+        |c| branch_is_ahead(&c.worktree_path, &c.base, &c.branch),
+        deliver,
+    )
+}
+
+/// [`ask_for_pull_requests`] with the branch check passed in, so the recording
+/// half can be exercised without a git repository per case.
+pub fn ask_for_pull_requests_with(
+    store: &Store,
+    is_ahead: impl Fn(&Candidate) -> bool,
+    deliver: impl Fn(&Ask) -> Result<()>,
+) -> Result<Vec<Ask>> {
+    let mut done = Vec::new();
+    for ask in asks_with(store, is_ahead)? {
+        store.note_pull_request_asked(ask.candidate.lease_id, now_ms())?;
+        deliver(&ask)?;
+        done.push(ask);
+    }
+    Ok(done)
+}
+
+/// A session that has finished its only task, holding a lease on a real git
+/// repository whose branch has a commit the base does not.
+///
+/// Returns the lease id and the conversation id, or `None` when git is not
+/// installed — the same contract [`crate::leases::fixture_repo`] keeps, and for
+/// the same reason: a test that quietly passed without git would be a test that
+/// stopped checking the thing it exists for.
+///
+/// Lives here rather than in the test module because [`crate::ticker`]'s guard
+/// on the auto-PR wiring needs it, and it is this module that knows what
+/// "ready to be asked" is made of. A real repository because
+/// [`branch_is_ahead`] runs real `git`, and the whole point of the guard is
+/// that the tick reaches it.
+#[cfg(test)]
+pub(crate) fn a_finished_session(store: &Store) -> Option<(i64, String)> {
+    let dir = std::env::temp_dir().join(format!(
+        "jod-prs-ask-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::write(dir.join("README.md"), "fixture\n").expect("a file to commit");
+    // Hermetic, and identity given per invocation: a machine with no
+    // `user.email` configured must not fail this for a reason that has nothing
+    // to do with what is being tested.
+    let who = [
+        "-c",
+        "user.name=Jod Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+    let steps: Vec<Vec<&str>> = vec![
+        vec!["init", "--quiet"],
+        vec!["add", "README.md"],
+        [&who[..], &["commit", "--quiet", "-m", "init"]].concat(),
+    ];
+    for args in steps {
+        let run = Command::new("git")
+            .current_dir(&dir)
+            .args(&args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output();
+        match run {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "SKIPPING an auto-PR test: `git` is not installed on this machine, and \
+                     whether a branch has anything on it is a fact about git. Install git \
+                     and run the suite again — this test checked nothing."
+                );
+                return None;
+            }
+            Err(e) => panic!("could not run `git {}`: {e}", args.join(" ")),
+            Ok(out) if !out.status.success() => panic!(
+                "`git {}` failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Ok(_) => {}
+        }
+    }
+    // Whatever `git init` called the default branch on this machine — it is
+    // `master` with no global config and `main` on plenty of real boxes, and
+    // the base has to be the real name or `rev-list base..branch` says nothing.
+    // Read before the checkout, because afterwards HEAD is the new branch.
+    let base = String::from_utf8_lossy(
+        &Command::new("git")
+            .current_dir(&dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+
+    // The branch needs something on it, or the ask is right to skip it.
+    std::fs::write(dir.join("work.md"), "the work\n").expect("a file to commit");
+    for args in [
+        vec!["checkout", "--quiet", "-b", "jod/first"],
+        vec!["add", "work.md"],
+        [&who[..], &["commit", "--quiet", "-m", "the work"]].concat(),
+    ] {
+        let out = Command::new("git")
+            .current_dir(&dir)
+            .args(&args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "`git {}` failed", args.join(" "));
+    }
+    let conversation = store
+        .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp/repo", None)
+        .expect("a session")
+        .id;
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO works (id, title, created_at_ms, updated_at_ms)
+                 VALUES ('w-ask', 'a work', 1, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("a work");
+    let task = store
+        .plan_work(
+            "w-ask",
+            &crate::works::Plan {
+                tasks: vec![crate::works::PlannedTask {
+                    title: "the only task".into(),
+                    paths: Vec::new(),
+                }],
+            },
+        )
+        .expect("a board")
+        .remove(0)
+        .id;
+    let lease = store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET task_id = ?2 WHERE id = ?1",
+                params![conversation, task],
+            )?;
+            tx.execute(
+                "INSERT INTO leases
+                   (work_id, work_title, conversation_id, repo_path, worktree_path, branch,
+                    base_ref, state, created_at_ms)
+                 VALUES ('w-ask', 'a work', ?1, '/tmp/repo/ask', ?2, 'jod/first', ?3, 'held', 1)",
+                params![conversation, dir.to_string_lossy(), base],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+        .expect("a lease");
+    store.complete_work_task(&task).expect("a finished board");
+    Some((lease, conversation))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::harness::HarnessKind;
+    use crate::works::{Plan, PlannedTask};
 
     fn store() -> Store {
         Store::in_memory().expect("in-memory store")
@@ -2138,7 +2852,7 @@ thing for the MCP server.
 
     #[test]
     fn the_auto_pr_instruction_asks_for_a_draft_through_the_skill() {
-        let text = auto_pr_instruction("feat/x", "main");
+        let text = auto_pr_instruction("feat/x", "main", None);
         assert!(text.contains("create-pr"), "the skill builds the evidence");
         assert!(text.contains("draft"));
         assert!(text.contains("feat/x") && text.contains("main"));
@@ -2146,6 +2860,722 @@ thing for the MCP server.
             text.contains("merge_pr.sh"),
             "and it says who does decide: {text}"
         );
+    }
+
+    /// The regression guard on the third argument. Every caller that existed
+    /// before stacking passes `None`, and for those the text must not have
+    /// moved by a single character — this is the whole of what makes the new
+    /// argument safe to add. Compared against the string written out in full
+    /// rather than against another call, because a test that renders the thing
+    /// it is checking would pass through any edit at all.
+    #[test]
+    fn the_instruction_for_an_unstacked_pull_request_is_the_one_it_has_always_been() {
+        let before = "Your work on `feat/x` looks finished. Open a pull request against `main` \
+                      by running the `create-pr` skill — it builds the body and the evidence \
+                      bundle.\n\nOpen it as a **draft**. Do not merge it, do not mark it ready \
+                      for review, and do not run `gh pr merge`: whether this merges is decided \
+                      by `merge_pr.sh` and by a person, not here.\n\nIf anything blocks the \
+                      pull request, write BLOCKED.md and stop — that is a successful ending.";
+        assert_eq!(auto_pr_instruction("feat/x", "main", None), before);
+    }
+
+    /// The stacked form changes the base and says why. Both halves are checked
+    /// because either one alone is a trap: the right base with no explanation
+    /// leaves the session wondering whether Jod meant `main`, and the sentence
+    /// with the wrong base opens a pull request showing a colleague's diff.
+    #[test]
+    fn a_stacked_instruction_bases_the_pull_request_on_the_branch_below_it() {
+        let text = auto_pr_instruction("jod/second", "main", Some("jod/first"));
+        assert!(
+            text.contains("Open a pull request against `jod/first`"),
+            "the base is the branch below it, not the trunk: {text}"
+        );
+        assert!(
+            text.contains("jod/first`, which belongs to another engineer"),
+            "and it says whose branch that is: {text}"
+        );
+        assert!(
+            text.contains("the diff is only the part you added"),
+            "which is the reason the base is not `main`: {text}"
+        );
+        assert!(
+            text.contains("create-pr") && text.contains("draft"),
+            "everything the unstacked instruction says, it still says: {text}"
+        );
+    }
+
+    // ---- stacking -------------------------------------------------------
+
+    /// A board written the way a manager actually writes one, through
+    /// [`Store::plan_work`]. Returns the task ids in plan order.
+    ///
+    /// The real writer rather than hand-placed rows, and the distinction is the
+    /// whole reason this helper exists. `plan_work` stamps one `now_ms()` across
+    /// the entire plan and inserts it in a single transaction, so every task in
+    /// a plan shares a millisecond and the tiebreaker is the only thing that
+    /// orders them. A test that picks distinct timestamps by hand exercises a
+    /// board production cannot produce and never touches the one it always
+    /// does.
+    fn plan(s: &Store, work_id: &str, titles: &[&str]) -> Vec<String> {
+        let plan = Plan {
+            tasks: titles
+                .iter()
+                .map(|title| PlannedTask {
+                    title: (*title).to_string(),
+                    paths: Vec::new(),
+                })
+                .collect(),
+        };
+        s.plan_work(work_id, &plan)
+            .unwrap()
+            .into_iter()
+            .map(|task| task.id)
+            .collect()
+    }
+
+    /// An engineer session, spawned onto one task. `conversations.task_id` is
+    /// the link the stack ordering is built on.
+    fn engineer(s: &Store, task_id: &str) -> String {
+        let id = conversation(s);
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET task_id = ?2 WHERE id = ?1",
+                params![id, task_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        id
+    }
+
+    /// A pull request this session opened, recorded the way the stream detector
+    /// records one.
+    ///
+    /// Through `attribution_for`, which is what `note_from_stream` calls, so a
+    /// session holding a lease produces a row carrying that lease's branch —
+    /// the same row production would write. Building the attribution by hand
+    /// would leave `branch` empty and quietly stop matching anything that looks
+    /// a pull request up by its branch.
+    fn opened_by(s: &Store, work_id: &str, conversation_id: &str, number: i64) {
+        let mut attribution = s.attribution_for(conversation_id).unwrap();
+        attribution.work_id = Some(work_id.to_string());
+        s.note_pull_requests(
+            &format!("https://github.com/Reljod/Jod/pull/{number}"),
+            &attribution,
+        )
+        .unwrap();
+    }
+
+    /// One pull request, as the renderers see it — no database involved.
+    fn pr(number: i64, branch: &str) -> PullRequest {
+        PullRequest {
+            id: number,
+            work_id: None,
+            conversation_id: None,
+            lease_id: None,
+            repo: "Reljod/Jod".into(),
+            number: Some(number),
+            url: format!("https://github.com/Reljod/Jod/pull/{number}"),
+            title: String::new(),
+            branch: branch.into(),
+            state: State::Open,
+            source: Source::Stream,
+            detected_at_ms: number,
+            reconciled_at_ms: None,
+        }
+    }
+
+    /// A stack of one is a pull request. Linking it rewrites its base branch to
+    /// produce nothing, in public, so the refusal has to say what it found
+    /// rather than only that it refused.
+    #[test]
+    fn a_work_with_one_pull_request_is_not_a_stack_and_the_refusal_says_so() {
+        let s = store();
+        work(&s, "w1");
+        let attribution = Attribution {
+            work_id: Some("w1".into()),
+            ..Default::default()
+        };
+        s.note_pull_requests("https://github.com/Reljod/Jod/pull/41", &attribution)
+            .unwrap();
+
+        let found = match s.stack_for_work("w1").unwrap() {
+            Stacking::TooFew { found } => found,
+            Stacking::Ready(stack) => panic!("one pull request is not a stack: {stack:?}"),
+        };
+        assert_eq!(found, 1);
+        let refusal = stack_refusal(found);
+        assert!(
+            refusal.contains("one pull request"),
+            "the refusal names how many it found: {refusal}"
+        );
+    }
+
+    /// A work nobody has opened a pull request on refuses differently, because
+    /// "wait for the engineers to finish" and "you only have one" are different
+    /// things for the manager to do next.
+    #[test]
+    fn a_work_with_no_pull_requests_at_all_is_refused_by_the_same_door() {
+        let s = store();
+        work(&s, "w1");
+        assert_eq!(
+            s.stack_for_work("w1").unwrap(),
+            Stacking::TooFew { found: 0 }
+        );
+        assert!(stack_refusal(0).contains("no pull requests"));
+    }
+
+    /// Bottom to top is plan order, and plan order is neither finish order nor
+    /// task id order.
+    ///
+    /// This is the test that decides whether the stack is right at all, and it
+    /// is built on the real writer for a reason. `plan_work` stamps one
+    /// timestamp across a whole plan, so every task on this board shares a
+    /// millisecond and nothing but the tiebreaker separates them. A task id is
+    /// a uuid v4, so a tiebreaker of `id` is a shuffle — which is exactly the
+    /// bug this guards, and it is invisible to any test that writes tasks with
+    /// hand-picked timestamps.
+    ///
+    /// Five tasks rather than two, because the failure is probabilistic: one
+    /// arrangement in a hundred and twenty is the right one by luck, and at two
+    /// tasks a broken implementation would pass half the time.
+    ///
+    /// The pull requests are opened out of plan order as well, so finish order
+    /// is wrong too. Both are ordinary — a small task at the top of a plan
+    /// finishes before a large one underneath it all the time.
+    #[test]
+    fn a_works_pull_requests_stack_in_the_order_their_tasks_were_planned() {
+        let s = store();
+        work(&s, "w1");
+        let tasks = plan(
+            &s,
+            "w1",
+            &["the board", "placement", "stacking", "the tools", "the briefs"],
+        );
+        let engineers: Vec<String> = tasks.iter().map(|task| engineer(&s, task)).collect();
+
+        // Finished 5, 3, 1, 4, 2 — nothing like the order they were planned in.
+        for (number, who) in [(45, 4), (43, 2), (41, 0), (44, 3), (42, 1)] {
+            opened_by(&s, "w1", &engineers[who], number);
+        }
+
+        let stack = match s.stack_for_work("w1").unwrap() {
+            Stacking::Ready(stack) => stack,
+            other => panic!("five pull requests are a stack: {other:?}"),
+        };
+        let numbers: Vec<Option<i64>> = stack.prs.iter().map(|p| p.number).collect();
+        assert_eq!(
+            numbers,
+            [Some(41), Some(42), Some(43), Some(44), Some(45)],
+            "the plan's order, not the order they were finished in and not the order \
+             their uuids happen to sort in"
+        );
+        assert_eq!(stack_link_command(&stack.prs), "gh stack link 41 42 43 44 45");
+    }
+
+    /// Every pull request already in a database on this box was opened before
+    /// there was a task to attach it to, and one with no task still has to come
+    /// back in a sensible order rather than an arbitrary one. Oldest first, the
+    /// same order it had before any of this existed.
+    #[test]
+    fn pull_requests_with_no_task_fall_back_to_the_order_they_were_opened_in() {
+        let s = store();
+        work(&s, "w1");
+        let attribution = Attribution {
+            work_id: Some("w1".into()),
+            ..Default::default()
+        };
+        for n in [41, 42, 43] {
+            s.note_pull_requests(
+                &format!("https://github.com/Reljod/Jod/pull/{n}"),
+                &attribution,
+            )
+            .unwrap();
+        }
+
+        let stack = match s.stack_for_work("w1").unwrap() {
+            Stacking::Ready(stack) => stack,
+            other => panic!("three pull requests are a stack: {other:?}"),
+        };
+        let numbers: Vec<Option<i64>> = stack.prs.iter().map(|p| p.number).collect();
+        assert_eq!(
+            numbers,
+            [Some(41), Some(42), Some(43)],
+            "oldest at the bottom, and the reverse of what a panel shows"
+        );
+    }
+
+    /// A pull request the plan does not account for goes above every one it
+    /// does, never among them.
+    ///
+    /// Somewhere in the middle would be a guess, and a wrong guess there
+    /// rewrites the base of a planned pull request to point at something
+    /// nobody planned. At the top it is the only one whose base is uncertain,
+    /// and everything below it is still ordered by the plan.
+    #[test]
+    fn a_pull_request_with_no_task_sits_above_every_one_that_has_a_task() {
+        let s = store();
+        work(&s, "w1");
+        let tasks = plan(&s, "w1", &["the board"]);
+        let planned = engineer(&s, &tasks[0]);
+
+        // The stray one is opened first, so time order would put it at the
+        // bottom.
+        s.note_pull_requests(
+            "https://github.com/Reljod/Jod/pull/99",
+            &Attribution {
+                work_id: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        opened_by(&s, "w1", &planned, 41);
+
+        let stack = match s.stack_for_work("w1").unwrap() {
+            Stacking::Ready(stack) => stack,
+            other => panic!("two pull requests are a stack: {other:?}"),
+        };
+        let numbers: Vec<Option<i64>> = stack.prs.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, [Some(41), Some(99)]);
+    }
+
+    /// Two engineers sharing one worktree share one branch and so open one
+    /// pull request between them. It carries both their tasks, and it belongs
+    /// at the position of the earlier one — anywhere lower and a task that is
+    /// inside it would appear to depend on it.
+    ///
+    /// Written so that two simpler implementations both get it wrong. Reading
+    /// only the conversation that opened it gives the last task, because the
+    /// borrower is the one that opened it, and the lease under it belongs to
+    /// the engineer on the first task. Reading the clock gives the other order
+    /// again, because the shared pull request is opened second.
+    #[test]
+    fn a_shared_worktrees_pull_request_sits_at_its_earliest_task() {
+        let s = store();
+        work(&s, "w1");
+        let tasks = plan(&s, "w1", &["the board", "placement", "stacking"]);
+        let lender = engineer(&s, &tasks[0]);
+        let borrower = engineer(&s, &tasks[2]);
+        let alone = engineer(&s, &tasks[1]);
+
+        // The lender cut the worktree; the borrower joined it and is the one
+        // that opened the pull request off their shared branch.
+        let shared = lease(&s, "w1", &lender, "jod/shared");
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO lease_sharers (lease_id, conversation_id, work_id, shared_at_ms)
+                 VALUES (?1, ?2, 'w1', 1)",
+                params![shared, borrower],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        opened_by(&s, "w1", &alone, 51);
+        opened_by(&s, "w1", &borrower, 50);
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE pull_requests SET lease_id = ?1 WHERE number = 50",
+                params![shared],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let stack = match s.stack_for_work("w1").unwrap() {
+            Stacking::Ready(stack) => stack,
+            other => panic!("two pull requests are a stack: {other:?}"),
+        };
+        let numbers: Vec<Option<i64>> = stack.prs.iter().map(|p| p.number).collect();
+        assert_eq!(
+            numbers,
+            [Some(50), Some(51)],
+            "the shared pull request holds the first task as well as the last, so it is \
+             the bottom"
+        );
+    }
+
+    /// The command line is the part a person will read before they run it, so
+    /// the arguments are pull request numbers when there are numbers to use.
+    #[test]
+    fn the_stack_command_names_each_pull_request_in_stack_order() {
+        let prs = [pr(41, "jod/board"), pr(42, "jod/placement")];
+        assert_eq!(stack_link_command(&prs), "gh stack link 41 42");
+    }
+
+    /// A row the poller found before it had a number still has a branch, and
+    /// `gh stack link` takes a branch name in the same position. Falling back
+    /// keeps one unnumbered row from making the whole command unusable.
+    #[test]
+    fn a_pull_request_with_no_number_is_named_by_its_branch_instead() {
+        let mut second = pr(42, "jod/placement");
+        second.number = None;
+        assert_eq!(
+            stack_link_command(&[pr(41, "jod/board"), second]),
+            "gh stack link 41 jod/placement"
+        );
+    }
+
+    /// Linking rewrites base branches, so the one thing the instruction cannot
+    /// leave out is that a branch which has already landed must be dropped from
+    /// the command line. And it must not tell anybody to land anything: that is
+    /// `merge_pr.sh` and a person, stack or no stack.
+    #[test]
+    fn the_stack_instruction_warns_about_rewritten_bases_and_never_asks_for_a_landing() {
+        let text = stack_instruction(&[pr(41, "jod/board"), pr(42, "jod/placement")]);
+        assert!(
+            text.contains("rewrites each pull request's base branch"),
+            "the warning is the point of the instruction: {text}"
+        );
+        assert!(
+            text.contains("already landed must be left out"),
+            "and what to do about it: {text}"
+        );
+        assert!(
+            text.contains("merge_pr.sh") && text.contains("a person"),
+            "who decides what lands has not changed: {text}"
+        );
+        assert!(
+            text.contains("Do not pass `--open`"),
+            "`--open` marks every pull request in the stack ready for review: {text}"
+        );
+        assert!(
+            text.contains("Run it in a checkout of `Reljod/Jod`"),
+            "the command needs a repository to be run in: {text}"
+        );
+    }
+
+    /// A stack is an object belonging to one repository. A work whose engineers
+    /// opened pull requests in two of them cannot be linked into one, and a
+    /// command line that will be rejected is worse than being told why.
+    #[test]
+    fn pull_requests_spread_across_two_repositories_are_not_one_stack() {
+        let mut elsewhere = pr(7, "jod/api");
+        elsewhere.repo = "Reljod/Jod-Apps".into();
+        let text = stack_instruction(&[pr(41, "jod/board"), elsewhere]);
+        assert!(
+            text.contains("not all in one repository"),
+            "it says so plainly: {text}"
+        );
+        assert!(
+            text.contains("Reljod/Jod, Reljod/Jod-Apps"),
+            "and names both: {text}"
+        );
+    }
+
+    /// A pull request an agent merely printed reaches its lease, exactly as a
+    /// polled one does.
+    ///
+    /// Worth a test of its own because the ordering in [`Store::stack_for_work`]
+    /// reaches a task through the lease as well as through the opener, and if
+    /// the two detection routes disagreed about `lease_id` then two pull
+    /// requests on one job would sort by different rules depending on how each
+    /// happened to be noticed.
+    ///
+    /// They agree twice over, which is the thing to know before touching
+    /// either. `attribution_for` now carries the lease id straight out of the
+    /// join it was already doing — and even when it did not, the row still
+    /// ended up with one, because `record_pull_request` falls back to
+    /// `lease_for_branch` and the attribution carries the branch. The direct
+    /// route is better only in the narrow case the fallback gets wrong: two
+    /// leases on one branch name, where a lookup by branch can pick the other
+    /// session's.
+    #[test]
+    fn a_pull_request_printed_by_a_session_holding_a_lease_reaches_that_lease() {
+        let s = store();
+        work(&s, "w1");
+        let session = conversation(&s);
+        let held = lease(&s, "w1", &session, "jod/first");
+
+        let attribution = s.attribution_for(&session).unwrap();
+        assert_eq!(
+            attribution.lease_id,
+            Some(held),
+            "the attribution carries the lease it already joined to"
+        );
+        assert_eq!(attribution.branch.as_deref(), Some("jod/first"));
+
+        opened_by(&s, "w1", &session, 41);
+        let saved = s
+            .pull_request("https://github.com/Reljod/Jod/pull/41")
+            .unwrap()
+            .expect("the row");
+        assert_eq!(saved.lease_id, Some(held));
+    }
+
+    // ---- asking for a pull request --------------------------------------
+
+    /// Complete every task on a board, which is what makes a work look
+    /// finished to the ask.
+    fn finished(s: &Store, tasks: &[String]) {
+        for task in tasks {
+            s.complete_work_task(task).unwrap();
+        }
+    }
+
+    /// Ask, with the branch check answered yes for everything, recording what
+    /// each session would have been told.
+    fn ask_all(s: &Store) -> Vec<Ask> {
+        let asks = asks_with(s, |_| true).unwrap();
+        // The recording delivery a test wants is the identity: `asks_with` has
+        // already done the deciding, and this is the write-it-down half.
+        let mut done = Vec::new();
+        for ask in asks {
+            s.note_pull_request_asked(ask.candidate.lease_id, 1).unwrap();
+            done.push(ask);
+        }
+        done
+    }
+
+    /// One session, one finished board, one branch with something on it.
+    fn ready_session(s: &Store, work_id: &str, branch: &str) -> (String, i64) {
+        let tasks = plan(s, work_id, &["the only task"]);
+        let session = engineer(s, &tasks[0]);
+        let lease = lease(s, work_id, &session, branch);
+        s.complete_work_task(&tasks[0]).unwrap();
+        (session, lease)
+    }
+
+    /// Opt-in, and it stays opt-in. Opening a pull request is externally
+    /// visible and costs a turn, so a box whose owner never asked for this must
+    /// never have it happen.
+    #[test]
+    fn nothing_is_asked_while_auto_pr_is_off() {
+        let s = store();
+        work(&s, "w1");
+        ready_session(&s, "w1", "jod/first");
+
+        assert!(
+            asks_with(&s, |_| true).unwrap().is_empty(),
+            "the setting defaults to off and nothing may be sent before it is turned on"
+        );
+        s.set_auto_pr(true).unwrap();
+        assert_eq!(asks_with(&s, |_| true).unwrap().len(), 1, "and on, it asks");
+    }
+
+    /// A board with work left on it is not finished, whatever the session
+    /// looks like it is doing.
+    #[test]
+    fn nothing_is_asked_while_a_task_is_still_open() {
+        let s = store();
+        s.set_auto_pr(true).unwrap();
+        work(&s, "w1");
+        let tasks = plan(&s, "w1", &["the board", "stacking"]);
+        let session = engineer(&s, &tasks[0]);
+        lease(&s, "w1", &session, "jod/first");
+
+        s.complete_work_task(&tasks[0]).unwrap();
+        assert!(
+            asks_with(&s, |_| true).unwrap().is_empty(),
+            "one of the two tasks is still open, so the job is not done"
+        );
+
+        s.complete_work_task(&tasks[1]).unwrap();
+        assert_eq!(asks_with(&s, |_| true).unwrap().len(), 1);
+    }
+
+    /// **The one that matters on a loop that runs every minute.** Without the
+    /// record, the same instruction is re-sent every tick for ever and each
+    /// repeat spends a turn — an agent nagged hourly about a pull request it
+    /// opened an hour ago.
+    #[test]
+    fn a_session_is_asked_once_and_not_again_on_the_next_tick() {
+        let s = store();
+        s.set_auto_pr(true).unwrap();
+        work(&s, "w1");
+        let (_, lease_id) = ready_session(&s, "w1", "jod/first");
+
+        let first = ask_all(&s);
+        assert_eq!(first.len(), 1, "the first tick asks");
+        assert!(
+            s.pull_request_asked_at(lease_id).unwrap().is_some(),
+            "and writes down on the lease that it did"
+        );
+
+        assert!(
+            ask_all(&s).is_empty(),
+            "the second tick says nothing, and so does every tick after it"
+        );
+        assert!(ask_all(&s).is_empty());
+    }
+
+    /// A session that already opened one does not need asking, however it came
+    /// to be recorded — parsed out of the stream or found by the poller.
+    #[test]
+    fn nothing_is_asked_when_the_branch_already_has_a_pull_request() {
+        let s = store();
+        s.set_auto_pr(true).unwrap();
+        work(&s, "w1");
+        let (session, _) = ready_session(&s, "w1", "jod/first");
+        opened_by(&s, "w1", &session, 41);
+
+        assert!(asks_with(&s, |_| true).unwrap().is_empty());
+    }
+
+    /// Each branch is based on the one below it, so its diff is only the part
+    /// its own engineer wrote. The order is the plan's, the same one
+    /// `stack_for_work` uses.
+    #[test]
+    fn a_second_lease_in_a_work_is_asked_to_stack_on_the_one_below_it() {
+        let s = store();
+        s.set_auto_pr(true).unwrap();
+        work(&s, "w1");
+        let tasks = plan(&s, "w1", &["the board", "stacking"]);
+        let first = engineer(&s, &tasks[0]);
+        let second = engineer(&s, &tasks[1]);
+        lease(&s, "w1", &first, "jod/first");
+        lease(&s, "w1", &second, "jod/second");
+        finished(&s, &tasks);
+
+        let asks = asks_with(&s, |_| true).unwrap();
+        let stacked: Vec<(&str, Option<&str>)> = asks
+            .iter()
+            .map(|a| {
+                (
+                    a.candidate.branch.as_str(),
+                    a.candidate.stacked_on.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            stacked,
+            [("jod/first", None), ("jod/second", Some("jod/first"))],
+            "the bottom of the stack is based on the trunk and nothing else is"
+        );
+        assert!(
+            asks[1].instruction.contains("against `jod/first`"),
+            "and the instruction says so: {}",
+            asks[1].instruction
+        );
+    }
+
+    /// The branch below is whatever is below it, not whatever is below it
+    /// *and still being asked*. A lease whose pull request is already open is
+    /// no longer a candidate, and basing the next one on the trunk instead
+    /// would put that engineer's diff inside somebody else's pull request.
+    #[test]
+    fn a_lease_that_already_has_its_pull_request_is_still_the_branch_below() {
+        let s = store();
+        s.set_auto_pr(true).unwrap();
+        work(&s, "w1");
+        let tasks = plan(&s, "w1", &["the board", "stacking"]);
+        let first = engineer(&s, &tasks[0]);
+        let second = engineer(&s, &tasks[1]);
+        lease(&s, "w1", &first, "jod/first");
+        lease(&s, "w1", &second, "jod/second");
+        finished(&s, &tasks);
+        opened_by(&s, "w1", &first, 41);
+
+        let asks = asks_with(&s, |_| true).unwrap();
+        assert_eq!(asks.len(), 1, "only the second one still needs asking");
+        assert_eq!(asks[0].candidate.branch, "jod/second");
+        assert_eq!(
+            asks[0].candidate.stacked_on.as_deref(),
+            Some("jod/first"),
+            "the branch below it has not moved just because it is no longer being asked"
+        );
+    }
+
+    /// The write-down happens whether or not the delivery does, and the ask is
+    /// handed out exactly as `asks` rendered it.
+    #[test]
+    fn asking_records_the_ask_and_hands_the_instruction_to_the_deliverer() {
+        let s = store();
+        s.set_auto_pr(true).unwrap();
+        work(&s, "w1");
+        let (_, lease_id) = ready_session(&s, "w1", "jod/first");
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let asked = ask_for_pull_requests_with(
+            &s,
+            |_| true,
+            |ask| {
+                seen.borrow_mut().push(ask.instruction.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(asked.len(), 1);
+        assert_eq!(seen.borrow().len(), 1);
+        assert_eq!(seen.borrow()[0], asked[0].instruction);
+        assert!(seen.borrow()[0].contains("create-pr"));
+        assert!(s.pull_request_asked_at(lease_id).unwrap().is_some());
+    }
+
+    /// Against a real repository, because whether a branch has anything on it
+    /// is a fact about git and a stub would test the stub.
+    #[test]
+    fn a_branch_with_nothing_on_it_is_not_worth_a_pull_request() {
+        let (_guard, dir) = crate::leases::scratch("prs-ahead");
+        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let base = git_out(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git_ok(&repo, &["checkout", "--quiet", "-b", "jod/feature"]);
+
+        assert!(
+            !branch_is_ahead(&repo, &base, "jod/feature"),
+            "a branch cut and left alone has nothing to open a pull request from"
+        );
+
+        std::fs::write(repo.join("new.md"), "work\n").expect("a file to commit");
+        git_ok(&repo, &["add", "new.md"]);
+        git_ok(
+            &repo,
+            &[
+                "-c",
+                "user.name=Jod Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "a commit",
+            ],
+        );
+
+        assert!(
+            branch_is_ahead(&repo, &base, "jod/feature"),
+            "one commit the base does not have is a pull request worth asking for"
+        );
+    }
+
+    /// Every way of failing to find out answers no, because an ask is recorded
+    /// and never repeated: a wrong one has spent the turn for good.
+    #[test]
+    fn a_branch_check_that_cannot_be_answered_does_not_ask() {
+        assert!(!branch_is_ahead(Path::new("/nonexistent/worktree"), "main", "jod/x"));
+        assert!(!branch_is_ahead(Path::new("/tmp"), "", "jod/x"));
+        assert!(!branch_is_ahead(Path::new("/tmp"), "main", ""));
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     /// The charter is emphatic that a script decides what merges unread, and

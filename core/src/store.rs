@@ -1781,6 +1781,76 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
     );
     "#,
     ),
+    (
+    "0031_a_task_owns_its_files",
+    r#"
+    -- Which files a task's engineer is allowed to write, as a JSON array of
+    -- repository-relative path prefixes, or NULL.
+    --
+    -- `docs/teamwork.md` has said "one owner per path" since teams existed, and
+    -- until now there was nowhere to write the path down — so the rule was a
+    -- sentence in prose with nothing behind it, and two engineers sharing a
+    -- worktree collided without either being told. `Store::plan_work` is the
+    -- writer, and it refuses a plan whose tasks claim overlapping paths.
+    --
+    -- Existing rows get NULL, which is true rather than merely convenient: a
+    -- task written before this column claims no files, and so does every
+    -- exploratory one written after it. There is nothing to backfill.
+    ALTER TABLE tasks ADD COLUMN paths TEXT;
+
+    -- Who else is standing in a worktree somebody else's lease cut.
+    --
+    -- A borrowed worktree is deliberately *not* a second `leases` row. The
+    -- partial unique index is on `(work_id, repo_path)`, and a second row for
+    -- the same directory would let `release_worktree` remove a tree another
+    -- engineer is working in. One worktree is one lease; this table records the
+    -- borrowers, so releasing can refuse while somebody is still attached.
+    CREATE TABLE lease_sharers (
+      lease_id        INTEGER NOT NULL REFERENCES leases(id) ON DELETE CASCADE,
+      conversation_id TEXT    NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      work_id         TEXT,
+      shared_at_ms    INTEGER NOT NULL,
+      PRIMARY KEY (lease_id, conversation_id)
+    );
+
+    -- Which task the engineer in this conversation was spawned onto.
+    --
+    -- There was no path at all from a pull request back to the task it came
+    -- from: `pull_requests` carries a work, a conversation and a lease;
+    -- `tasks.owner` is a free-text agent name rather than a conversation id;
+    -- and neither `conversations` nor `leases` knew about a task. So
+    -- `Store::stack_for_work` had nothing to order by except when each pull
+    -- request was *detected*, which is the order the engineers finished in.
+    -- An engineer that finished the third task first landed at the bottom of
+    -- the stack with every base beneath it pointing at the wrong branch — a
+    -- silently wrong stack rather than an ugly one.
+    --
+    -- On the conversation and not on the lease, because `Placement::Share`
+    -- puts two engineers in one worktree: a lease maps to several tasks and
+    -- the column would have to hold a list, while one engineer conversation is
+    -- one task. `ON DELETE SET NULL` for the reason the other references in
+    -- this file use it — deleting a task must leave the transcript readable
+    -- rather than cascade into the conversation that holds it.
+    ALTER TABLE conversations ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
+
+    -- When this lease's session was last asked to open its pull request, or
+    -- NULL for one that never has been.
+    --
+    -- The tick loop that asks has no memory of its own, so without somewhere to
+    -- write this down it asks again on every tick — and each ask costs the
+    -- session a turn to answer. Null is the honest starting state for every
+    -- lease that exists today, because none of them has ever been asked.
+    --
+    -- On the lease rather than in `settings`, for two reasons. It is a property
+    -- of the lease, so it belongs on the lease. And here it is part of the
+    -- lease's own row and goes when that row goes, whereas a settings key named
+    -- after a lease id would outlive the lease for ever, with nothing that ever
+    -- looks for it again — one orphan per lease is a small thing, and small
+    -- things that accumulate for years with nothing cleaning them up are what
+    -- nobody notices until there are forty thousand of them.
+    ALTER TABLE leases ADD COLUMN auto_pr_asked_at_ms INTEGER;
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
@@ -3354,7 +3424,7 @@ impl Store {
     pub fn team_tasks(&self, team: &str) -> Result<Vec<TeamTask>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0)
+            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0), paths
                FROM tasks WHERE team = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(params![team], |r| {
@@ -3364,6 +3434,7 @@ impl Store {
                 owner: r.get(2)?,
                 status: r.get(3)?,
                 created_at_ms: r.get(4)?,
+                paths: crate::works::paths_from_column(r.get(5)?),
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

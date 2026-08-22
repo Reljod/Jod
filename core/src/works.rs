@@ -733,6 +733,238 @@ impl Deletion {
     }
 }
 
+// ---- how many engineers at once ---------------------------------------------
+
+/// Where the cap on concurrent engineers is kept.
+///
+/// In `settings` rather than in a column, because "how many of a role may exist
+/// at once" is a different kind of fact from "what a role is spawned on", and
+/// `settings` is key and value so it needs no migration.
+pub const MAX_ENGINEERS_SETTING: &str = "max_engineers_per_project";
+
+/// How many engineers a project may run at once when nobody has said.
+///
+/// Each engineer is a whole harness process with its own checkout of a Rust
+/// repository. Three is what a laptop runs without the build cache thrashing,
+/// and it is a number a manager can still describe in one sentence.
+pub const DEFAULT_MAX_ENGINEERS: usize = 3;
+
+/// The cap on how many engineers may run on one project at once.
+impl Store {
+    /// [`DEFAULT_MAX_ENGINEERS`] unless somebody has set it, and
+    /// [`DEFAULT_MAX_ENGINEERS`] again if what they set will not parse.
+    ///
+    /// **`0` means no cap**, not "no engineers" — the same spelling the scratch
+    /// lane's two knobs use for their escape hatch, so all three read alike.
+    ///
+    /// A value this cannot read falls back rather than failing, for the reason
+    /// [`Store::auto_pr`] gives about its own broken values: a typo in a
+    /// settings row must cost the setting, never the tool. `open_work` is the
+    /// caller, and a manager unable to open a work at all because somebody
+    /// wrote `three` into a row is worse off than one running with the default.
+    pub fn max_engineers_per_project(&self) -> Result<usize> {
+        Ok(self
+            .setting(MAX_ENGINEERS_SETTING)?
+            .as_deref()
+            .map(str::trim)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_ENGINEERS))
+    }
+
+    pub fn set_max_engineers_per_project(&self, n: usize) -> Result<()> {
+        self.set_setting(MAX_ENGINEERS_SETTING, &n.to_string())
+    }
+}
+
+// ---- who owns which files ---------------------------------------------------
+
+/// One task in a plan, before it is on the board.
+///
+/// A plan is written in one call rather than a task at a time, and this is the
+/// unit of it: a title somebody can be told to do, and the files only they may
+/// change while they do it. A plan accumulated task by task could not be
+/// checked for overlapping paths before any of it was handed out, which is the
+/// whole reason [`Store::plan_work`] takes the breakdown all at once.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedTask {
+    pub title: String,
+    /// Repository-relative path prefixes. Empty is ordinary and means the task
+    /// claims no files — the right answer for anything exploratory.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// A whole breakdown, as the manager wrote it.
+///
+/// The order is the manager's stated order, and everything downstream that
+/// needs one — the board, and the order a stack of pull requests is linked
+/// in — reads it from here rather than inventing its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plan {
+    pub tasks: Vec<PlannedTask>,
+}
+
+/// How a task says it owns the whole repository.
+///
+/// A meaningful thing for a manager to say — one engineer, everything — and it
+/// has to be a value the rest of this module recognises rather than a path like
+/// any other, because the root contains every other path and nothing else does.
+/// Every spelling of it (`.`, `./`, `././`) normalises to this one token, so
+/// there is a single thing to compare against and a single thing to print.
+pub const REPO_ROOT: &str = ".";
+
+/// Tidy one declared path into the form everything else compares.
+///
+/// Refuses the two shapes that would make ownership unenforceable: an absolute
+/// path, which names a place on one machine rather than a place in the
+/// repository, and one containing `..`, which claims a prefix and then reaches
+/// out of it. Both are named in the refusal, because a manager told only "bad
+/// path" has to guess which of five it got wrong.
+///
+/// Both checks read the string as it arrived rather than the tidied form, and
+/// that ordering is load-bearing. [`tidy`] drops empty components, so it turns
+/// `/Users/reljod/Jod` into `Users/reljod/Jod` — a check made afterwards would
+/// see an ordinary relative path and wave the absolute one through.
+///
+/// A blank string is refused rather than read as the repository root. A caller
+/// that meant the root has `.` to say it with, and an empty string in a list of
+/// paths is a bug in whatever built the list — reading it as "this engineer
+/// owns everything" would refuse every other task in the plan and send somebody
+/// looking for a conflict that was never there.
+pub fn normalise_path(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(JodError::Invalid(
+            "a task cannot own a blank path: name the files it owns, write `.` for the \
+             whole repository, or leave the list empty for a task that claims nothing"
+                .into(),
+        ));
+    }
+    if raw.starts_with('/') || raw.starts_with('\\') {
+        return Err(JodError::Invalid(format!(
+            "`{raw}` is an absolute path, and a task that owns one owns nothing the \
+             next machine can check — name it relative to the repository root"
+        )));
+    }
+    if raw.split('/').any(|part| part == "..") {
+        return Err(JodError::Invalid(format!(
+            "`{raw}` reaches outside the repository with `..`, so it claims a prefix \
+             and then leaves it — name the directory itself"
+        )));
+    }
+    Ok(tidy(raw))
+}
+
+/// The collapsing half of [`normalise_path`], with nothing to refuse.
+///
+/// Split out because [`overlapping`] has to compare paths it did not validate:
+/// a board row was normalised when it was written, and a caller comparing two
+/// literals should still get the right answer.
+///
+/// Drops every component that says nothing about where a path is — the empties
+/// left by a leading `./`, a trailing `/` and an internal `//`, and every `.`
+/// component. `core//src`, `core/./src` and `./core/src/` are one directory on
+/// disk, and before this collapsed them a plan could hand that directory to two
+/// engineers and be told nothing. A path left with no components at all is the
+/// repository root.
+fn tidy(raw: &str) -> String {
+    let kept: Vec<&str> = raw
+        .trim()
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if kept.is_empty() {
+        return REPO_ROOT.to_string();
+    }
+    kept.join("/")
+}
+
+/// The first pair of paths from `a` and `b` where one contains the other.
+///
+/// Two prefixes overlap when either is a prefix of the other **on a path
+/// component boundary**. `core/src` overlaps `core/src/store.rs` and
+/// `core/src/store.rs` overlaps `core/src`, in both argument orders, because
+/// whichever way round they are written the two tasks would be editing the same
+/// file. `core/src` does **not** overlap `core/srcfile.rs`, and getting that
+/// wrong by comparing raw strings is the whole reason this is a function with
+/// its own tests rather than a `starts_with` at the call site.
+///
+/// [`REPO_ROOT`] overlaps everything, so a plan that gives one engineer the
+/// whole repository and anybody else a single file is refused.
+///
+/// ## Case is ignored, deliberately, and it is a trade
+///
+/// This runs on a Mac, where the default filesystem is case-insensitive:
+/// `Core/Src` and `core/src` are one directory, and `README.md` and `readme.md`
+/// are one file with no typo involved. On Linux they are two, so comparing
+/// without case over-refuses there — a plan that would have been fine is sent
+/// back.
+///
+/// That is the direction to be wrong in. A check that wrongly refuses costs a
+/// manager one retry and says exactly what to change. A check that wrongly
+/// allows costs two engineers a merge conflict in a file neither was told
+/// anybody else could touch, discovered after both have finished.
+///
+/// Returns the offending pair rather than a bare `true`, because the refusal
+/// this feeds has to name both sides — a manager told only that its plan
+/// collides has to diff the plan itself to find out where. The pair comes back
+/// in the case it was written in; only the comparison ignores case, because an
+/// error message that silently lower-cased somebody's path would read as though
+/// it were quoting them.
+pub fn overlapping(a: &[String], b: &[String]) -> Option<(String, String)> {
+    for left in a {
+        let left = tidy(left);
+        let left_key = left.to_lowercase();
+        for right in b {
+            let right = tidy(right);
+            let right_key = right.to_lowercase();
+            if covers(&left_key, &right_key) || covers(&right_key, &left_key) {
+                return Some((left.clone(), right));
+            }
+        }
+    }
+    None
+}
+
+/// Whether `prefix` contains `path`, counting the two as the same place when
+/// they are equal.
+///
+/// Both sides are expected to be tidied and case-folded already; this is the
+/// containment rule on its own.
+///
+/// The boundary check is the byte after the prefix: it has to be a separator,
+/// or `core/src` would swallow `core/srcfile.rs`. The repository root is the
+/// one prefix that needs no boundary, because everything is inside it.
+fn covers(prefix: &str, path: &str) -> bool {
+    if prefix == REPO_ROOT || prefix == path {
+        return true;
+    }
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Read a board row's `paths` column.
+///
+/// Null is the ordinary case and means the task claims nothing. Text that is
+/// not a JSON array of strings is treated the same way rather than failing the
+/// read, for the reason [`crate::team::MemberStatus::parse`] gives: a row
+/// written by a build this one has never met must not make the whole board
+/// unlistable.
+pub(crate) fn paths_from_column(stored: Option<String>) -> Vec<String> {
+    stored
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+        .unwrap_or_default()
+}
+
+/// How a task's paths are written back, or `None` when it claims nothing.
+fn paths_to_column(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    serde_json::to_string(paths).ok()
+}
+
 // ---- the store -------------------------------------------------------------
 
 const WORK_COLUMNS: &str = "id, title, summary, instruction, colour, state, message_budget,
@@ -800,7 +1032,14 @@ impl Store {
                  VALUES (?1, ?2, '', ?3, ?4, 'open', 0, ?5, ?5, ?6)",
                 params![id, title, instruction, colour_for(&taken), at, project_id],
             )?;
-            insert_task(tx, &id, &uuid::Uuid::new_v4().to_string(), &instruction, at)?;
+            insert_task(
+                tx,
+                &id,
+                &uuid::Uuid::new_v4().to_string(),
+                &instruction,
+                &[],
+                at,
+            )?;
             // The person is on the roster from the moment the work exists,
             // before any session is attached to it. An agent that answers a
             // question it was asked must not be told the asker does not exist,
@@ -1203,7 +1442,7 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let at = now_ms();
         self.write(|tx| {
-            insert_task(tx, work_id, &id, &title, at)?;
+            insert_task(tx, work_id, &id, &title, &[], at)?;
             // A work with an open task is not closed, whatever it was a moment
             // ago. The invariant this epic rests on is that *closed* means
             // every task is complete; a closed work carrying an open task would
@@ -1218,12 +1457,27 @@ impl Store {
         Ok(id)
     }
 
-    /// A work's board, oldest first.
+    /// A work's board, in the order the tasks were written.
+    ///
+    /// **By `rowid` alone, and not by `created_at_ms`.** The order that matters
+    /// here is the order the manager wrote the plan in: it is what the board
+    /// shows, and `Store::stack_for_work` reads the same expression to decide
+    /// which pull request sits under which. `rowid` *is* that order, because
+    /// SQLite hands them out as rows are inserted.
+    ///
+    /// A clock is not that order. `now_ms` reads the wall clock, which is not
+    /// monotonic — an NTP correction or a laptop waking from sleep can step it
+    /// backwards, and then a plan written second carries a smaller
+    /// `created_at_ms` than the plan written first and sorts above it. The
+    /// board reorders itself and the stack bases the earlier work on top of the
+    /// later work, both silently. Sorting by the clock first also made every
+    /// task in one `plan_work` a tie, since they all share a millisecond, so
+    /// the tiebreaker was doing all the work anyway.
     pub fn work_tasks(&self, work_id: &str) -> Result<Vec<crate::team::TeamTask>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0)
-               FROM tasks WHERE work_id = ?1 ORDER BY created_at_ms, id",
+            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0), paths
+               FROM tasks WHERE work_id = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(params![work_id], |r| {
             Ok(crate::team::TeamTask {
@@ -1232,9 +1486,152 @@ impl Store {
                 owner: r.get(2)?,
                 status: r.get(3)?,
                 created_at_ms: r.get(4)?,
+                paths: paths_from_column(r.get(5)?),
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Write a whole breakdown onto a work's board in one go.
+    ///
+    /// This is the manager's act, and the refusals are the feature. A plan is
+    /// checked before any of it is written — against itself, and against the
+    /// tasks already open on the board — so a manager learns that two of its
+    /// engineers would collide before either of them has been started, rather
+    /// than from a merge conflict an hour later.
+    ///
+    /// The check and the writing are one transaction. Half a plan is worse than
+    /// none: the manager would believe it had handed out five tasks while two
+    /// engineers sat idle with no work and no error to explain it.
+    ///
+    /// Returns the board as it now stands, so a caller that has just written a
+    /// plan does not have to read it back to find out what the tasks are
+    /// called or what ids they got.
+    pub fn plan_work(&self, work_id: &str, plan: &Plan) -> Result<Vec<crate::team::TeamTask>> {
+        if plan.tasks.is_empty() {
+            return Err(JodError::Invalid(
+                "a plan needs at least one task: an empty plan hands nothing out and \
+                 leaves the board exactly as it was"
+                    .into(),
+            ));
+        }
+        if self.work(work_id)?.is_none() {
+            return Err(JodError::Invalid(format!("no work `{work_id}`")));
+        }
+
+        // Titles and paths are settled before the board is touched, so a plan
+        // with a bad path in its last task writes none of its first.
+        let mut planned: Vec<(String, Vec<String>)> = Vec::with_capacity(plan.tasks.len());
+        for task in &plan.tasks {
+            let title = task.title.trim().to_string();
+            if title.is_empty() {
+                return Err(JodError::Invalid(
+                    "every task in a plan needs a title, or completing it says nothing \
+                     and the engineer holding it has nothing to be told"
+                        .into(),
+                ));
+            }
+            let mut paths = Vec::with_capacity(task.paths.len());
+            for raw in &task.paths {
+                paths.push(normalise_path(raw)?);
+            }
+            planned.push((title, paths));
+        }
+
+        // Every pair, rather than the neighbouring ones: three tasks where the
+        // first and the last collide is exactly the plan a scan of adjacent
+        // pairs would wave through.
+        for (i, (title, paths)) in planned.iter().enumerate() {
+            for (other_title, other_paths) in planned.iter().skip(i + 1) {
+                if let Some((mine, theirs)) = overlapping(paths, other_paths) {
+                    return Err(JodError::Invalid(format!(
+                        "`{title}` claims `{mine}` and `{other_title}` claims `{theirs}`, \
+                         and one is inside the other — two engineers cannot both own the \
+                         same file, so split the work differently or give one of them the \
+                         whole directory"
+                    )));
+                }
+            }
+        }
+
+        let at = now_ms();
+        self.write(|tx| {
+            // Read inside the transaction, so a second manager planning at the
+            // same moment cannot slip a task in between the check and the
+            // write. Open tasks only: a `done` task's engineer has stopped, and
+            // holding its files for ever would make a board impossible to plan
+            // against twice.
+            let held: Vec<(String, Vec<String>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT COALESCE(title, id), paths FROM tasks
+                      WHERE work_id = ?1 AND status != 'done'",
+                )?;
+                let rows = stmt.query_map(params![work_id], |r| {
+                    Ok((r.get::<_, String>(0)?, paths_from_column(r.get(1)?)))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (title, paths) in &planned {
+                for (open_title, open_paths) in &held {
+                    if let Some((mine, theirs)) = overlapping(paths, open_paths) {
+                        return Err(JodError::Invalid(format!(
+                            "`{title}` claims `{mine}`, and `{open_title}` is still open on \
+                             this board holding `{theirs}` — the engineer on it may be \
+                             editing that file right now"
+                        )));
+                    }
+                }
+            }
+            for (title, paths) in &planned {
+                insert_task(
+                    tx,
+                    work_id,
+                    &uuid::Uuid::new_v4().to_string(),
+                    title,
+                    paths,
+                    at,
+                )?;
+            }
+            // A work with an open task is not closed, whatever it was a moment
+            // ago — the same reasoning `add_work_task` records.
+            tx.execute(
+                "UPDATE works SET state = 'open', closed_at_ms = NULL, updated_at_ms = ?2
+                  WHERE id = ?1 AND state != 'open'",
+                params![work_id, at],
+            )?;
+            Ok(())
+        })?;
+        self.work_tasks(work_id)
+    }
+
+    /// Say which engineer holds one of a work's tasks.
+    ///
+    /// The manager's counterpart to [`Store::claim_task`], and deliberately not
+    /// the same thing. A claim is contended — two agents racing for one task,
+    /// and the `owner IS NULL` guard picks the winner. An assignment is a
+    /// decision already made by the one party allowed to make it, so it
+    /// overwrites, and the only thing it refuses is a task that does not exist:
+    /// `claim_task` would create that row, which for a board means a task no
+    /// work ever shows.
+    pub fn assign_work_task(&self, task_id: &str, owner: &str) -> Result<()> {
+        let owner = owner.trim();
+        if owner.is_empty() {
+            return Err(JodError::Invalid(format!(
+                "task `{task_id}` needs an owner to be assigned to: an assignment to \
+                 nobody is the state it was already in"
+            )));
+        }
+        let at = now_ms();
+        let changed = self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE tasks SET owner = ?2, claimed_at = ?3 WHERE id = ?1",
+                params![task_id, owner, at],
+            )?)
+        })?;
+        if changed == 0 {
+            return Err(JodError::Invalid(format!("no task `{task_id}` to assign")));
+        }
+        Ok(())
     }
 
     /// Mark one of a work's tasks done, and close the work if it was the last.
@@ -1686,7 +2083,10 @@ impl Store {
     fn work_pull_request_urls(&self, work_id: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT url FROM pull_requests WHERE work_id = ?1 ORDER BY detected_at_ms",
+            // `id` breaks the tie, so two pull requests noticed in the same
+            // millisecond do not swap places between two readings of one
+            // closing card.
+            "SELECT url FROM pull_requests WHERE work_id = ?1 ORDER BY detected_at_ms, id",
         )?;
         let rows = stmt.query_map(params![work_id], |r| r.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1699,18 +2099,23 @@ impl Store {
 /// shows and the board `jod team` shows are the same rows read two ways —
 /// which is what "one board, two scopes" has to mean if `claim_task` is to
 /// stay the only claim in Jod.
+///
+/// `paths` is written as a JSON array, or left null when the task claims
+/// nothing — which is the ordinary case and the only one every task written
+/// before path ownership existed can honestly be in.
 fn insert_task(
     tx: &rusqlite::Transaction,
     work_id: &str,
     task_id: &str,
     title: &str,
+    paths: &[String],
     at: i64,
 ) -> Result<()> {
     tx.execute(
-        "INSERT INTO tasks (id, status, team, title, work_id, created_at_ms)
-         VALUES (?1, 'open', ?2, ?3, ?2, ?4)
+        "INSERT INTO tasks (id, status, team, title, work_id, created_at_ms, paths)
+         VALUES (?1, 'open', ?2, ?3, ?2, ?4, ?5)
          ON CONFLICT(id) DO NOTHING",
-        params![task_id, work_id, title, at],
+        params![task_id, work_id, title, at, paths_to_column(paths)],
     )?;
     Ok(())
 }
@@ -2107,6 +2512,571 @@ mod tests {
         let reopened = s.work(&work.id).unwrap().unwrap();
         assert_eq!(reopened.state, State::Open);
         assert!(reopened.closed_at_ms.is_none());
+    }
+
+    // ---- how many engineers at once ---------------------------------------
+
+    /// The absent case is the one every machine that already exists is in, so
+    /// it is the one most worth holding: nobody has ever written this key, and
+    /// the answer still has to be a number `open_work` can enforce.
+    #[test]
+    fn the_engineer_cap_is_three_until_somebody_says_otherwise() {
+        let s = store();
+        assert_eq!(s.max_engineers_per_project().unwrap(), 3);
+
+        s.set_max_engineers_per_project(5).unwrap();
+        assert_eq!(s.max_engineers_per_project().unwrap(), 5);
+
+        s.set_max_engineers_per_project(1).unwrap();
+        assert_eq!(s.max_engineers_per_project().unwrap(), 1);
+
+        // Zero is the escape hatch and reads as "no cap", spelled the same way
+        // the scratch lane's two knobs spell theirs. It is stored and read back
+        // as itself; deciding that zero means unlimited is the caller's job,
+        // and this is the accessor that has to let it through.
+        s.set_max_engineers_per_project(0).unwrap();
+        assert_eq!(s.max_engineers_per_project().unwrap(), 0);
+    }
+
+    /// A typo in a settings row must cost the setting and never the tool.
+    ///
+    /// `open_work` is the caller. A manager that cannot open a work at all
+    /// because somebody wrote `three` into a row is worse off than one running
+    /// with the default, which is the same trade [`Store::auto_pr`] makes about
+    /// its own unreadable values.
+    #[test]
+    fn an_unreadable_engineer_cap_falls_back_to_the_default() {
+        let s = store();
+        for wrong in ["three", "", "  ", "-1", "2.5", "lots"] {
+            s.set_setting(MAX_ENGINEERS_SETTING, wrong).unwrap();
+            assert_eq!(
+                s.max_engineers_per_project().unwrap(),
+                DEFAULT_MAX_ENGINEERS,
+                "`{wrong}` is not a number of engineers"
+            );
+        }
+
+        // Surrounding space is a typo this one *can* read, and refusing it
+        // would send somebody hunting for a fault in the cap rather than in
+        // their own settings row.
+        s.set_setting(MAX_ENGINEERS_SETTING, " 4 ").unwrap();
+        assert_eq!(s.max_engineers_per_project().unwrap(), 4);
+    }
+
+    // ---- who owns which files ---------------------------------------------
+
+    fn planned(title: &str, paths: &[&str]) -> PlannedTask {
+        PlannedTask {
+            title: title.to_string(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    /// A directory and a file inside it are the same place, whichever order the
+    /// two tasks were written in.
+    ///
+    /// Both orders are asserted because the caller has no say in which task the
+    /// manager listed first, and an overlap that is only found one way round is
+    /// an overlap that is missed half the time.
+    #[test]
+    fn a_directory_and_a_file_inside_it_overlap_in_both_argument_orders() {
+        let dir = vec!["core/src".to_string()];
+        let file = vec!["core/src/store.rs".to_string()];
+
+        assert_eq!(
+            overlapping(&dir, &file),
+            Some(("core/src".to_string(), "core/src/store.rs".to_string()))
+        );
+        assert_eq!(
+            overlapping(&file, &dir),
+            Some(("core/src/store.rs".to_string(), "core/src".to_string()))
+        );
+        assert_eq!(
+            overlapping(&dir, &dir),
+            Some(("core/src".to_string(), "core/src".to_string())),
+            "the same path twice is the plainest overlap there is"
+        );
+
+        // The form the paths arrive in must not decide the answer: a manager
+        // that writes `./core/src/` and one that writes `core/src` have said
+        // the same thing.
+        assert!(overlapping(&["./core/src/".to_string()], &file).is_some());
+    }
+
+    /// Every spelling of one place has to reach one verdict, so they are held
+    /// in one table.
+    ///
+    /// A table rather than a handful of examples, and that is the point of this
+    /// test rather than a detail of it. What was here before asserted the three
+    /// cases the spec happened to write down, and an audit afterwards found
+    /// four spellings that walked straight through `plan_work` and handed one
+    /// directory to two engineers: `.`, `Core/Src`, `core//src` and
+    /// `core/./src`. Not one of them was outside the design; every one was
+    /// outside the examples. A table is what stops the next one being outside
+    /// them too, so add a row rather than a test.
+    ///
+    /// Each row is checked in both argument orders. The manager chooses which
+    /// of its tasks it writes first, and an overlap found only one way round is
+    /// an overlap missed half the time.
+    #[test]
+    fn every_spelling_of_one_place_reaches_the_same_verdict() {
+        // (one task's path, the other's, do they own the same place, why)
+        let table: &[(&str, &str, bool, &str)] = &[
+            // The rule itself.
+            ("core/src", "core/src/store.rs", true, "a directory holds its files"),
+            ("core/src", "core/src", true, "the same path twice"),
+            ("core/src", "core/srcfile.rs", false, "the component boundary"),
+            ("core", "cores", false, "a longer name is not a child"),
+            ("core/src", "cli/src", false, "different trees"),
+            // Spellings of one directory. These four are what the audit found.
+            ("./core/src/", "core/src", true, "a leading ./ and a trailing /"),
+            ("core//src", "core/src", true, "an empty component"),
+            ("core/./src", "core/src", true, "a . component in the middle"),
+            ("core/src/.", "core/src", true, "a . component at the end"),
+            (".//core/src", "core/src", true, "both at once"),
+            ("  core/src  ", "core/src", true, "surrounding space"),
+            // The repository root, which contains everything.
+            (".", "core/src", true, "the root holds every path under it"),
+            ("./", "core/src", true, "another spelling of the root"),
+            (".", ".", true, "two engineers cannot both own everything"),
+            // Case. This box is macOS and its filesystem is case-insensitive.
+            ("Core/Src", "core/src", true, "one directory on this machine"),
+            ("README.md", "readme.md", true, "one file, and no typo needed"),
+            ("CORE/SRC/store.rs", "core/src", true, "case and containment at once"),
+            // Names that only look alike.
+            ("core /src", "core/src", false, "a space inside is part of the name"),
+            ("core\\src", "core/src", false, "a backslash is an ordinary character here"),
+        ];
+
+        for (a, b, same_place, why) in table {
+            // Through `normalise_path` first, because that is what `plan_work`
+            // does and a spelling that never reaches `overlapping` is not
+            // tested by handing `overlapping` the tidy version of it.
+            let left = normalise_path(a).unwrap_or_else(|e| panic!("`{a}` should normalise: {e}"));
+            let right = normalise_path(b).unwrap_or_else(|e| panic!("`{b}` should normalise: {e}"));
+            for (first, second) in [(&left, &right), (&right, &left)] {
+                let found = overlapping(std::slice::from_ref(first), std::slice::from_ref(second));
+                assert_eq!(
+                    found.is_some(),
+                    *same_place,
+                    "`{a}` against `{b}` ({why}) — normalised to `{first}` against `{second}`"
+                );
+            }
+        }
+    }
+
+    /// Claiming nothing and claiming everything are different answers, and the
+    /// difference is why `.` was given a meaning rather than refused.
+    #[test]
+    fn claiming_nothing_collides_with_nobody_and_claiming_the_root_collides_with_everybody() {
+        let nothing: Vec<String> = Vec::new();
+        let root = vec![REPO_ROOT.to_string()];
+        let file = vec!["core/src/store.rs".to_string()];
+
+        assert_eq!(overlapping(&nothing, &file), None);
+        assert_eq!(overlapping(&file, &nothing), None);
+        assert_eq!(
+            overlapping(&nothing, &root),
+            None,
+            "an exploratory task does not fight anybody for the repository"
+        );
+        assert!(overlapping(&root, &file).is_some());
+        assert!(overlapping(&file, &root).is_some());
+    }
+
+    /// The refusal quotes the manager, so the pair comes back in the case it
+    /// was written in even though the comparison ignored case.
+    #[test]
+    fn the_pair_a_refusal_names_is_spelled_the_way_the_manager_wrote_it() {
+        assert_eq!(
+            overlapping(
+                &["Core/Src".to_string()],
+                &["core/src/store.rs".to_string()]
+            ),
+            Some(("Core/Src".to_string(), "core/src/store.rs".to_string())),
+        );
+        assert_eq!(
+            overlapping(&["./".to_string()], &["core/src".to_string()]),
+            Some((REPO_ROOT.to_string(), "core/src".to_string())),
+            "the root is named `.` rather than printed as nothing at all"
+        );
+    }
+
+    /// A path that names a place on one machine, or reaches out of the
+    /// repository, cannot be checked by the next machine to read the board.
+    #[test]
+    fn a_task_cannot_own_an_absolute_path_or_one_that_reaches_outside_the_repository() {
+        let absolute = normalise_path("/Users/reljod/Jod/core/src").unwrap_err();
+        assert!(matches!(absolute, JodError::Invalid(_)), "got {absolute:?}");
+        assert!(absolute.to_string().contains("/Users/reljod/Jod/core/src"));
+
+        let escaping = normalise_path("core/../../elsewhere").unwrap_err();
+        assert!(matches!(escaping, JodError::Invalid(_)), "got {escaping:?}");
+        assert!(escaping.to_string().contains("core/../../elsewhere"));
+
+        // Blank is a bug in whoever built the list, not a way of saying "the
+        // whole repository" — there is `.` for that, and the refusal says so.
+        for blank in ["", "   ", "\t"] {
+            let err = normalise_path(blank).unwrap_err();
+            assert!(err.to_string().contains('.'), "{err}");
+        }
+
+        // The absolute check reads the string as it arrived. Were it made after
+        // the tidying, `/Users/...` would have lost its leading empty component
+        // and come out looking like an ordinary relative path.
+        assert!(normalise_path("//Users/reljod").is_err());
+
+        // And the one that used to be refused for the wrong reason: `.//x`
+        // called itself an absolute path, which sent the reader hunting for a
+        // leading slash that was never there.
+        assert_eq!(normalise_path(".//core/src").unwrap(), "core/src");
+
+        assert_eq!(normalise_path("  ./core/src/  ").unwrap(), "core/src");
+        assert_eq!(normalise_path("core//./src/").unwrap(), "core/src");
+        assert_eq!(normalise_path(".").unwrap(), REPO_ROOT);
+        assert_eq!(normalise_path("./").unwrap(), REPO_ROOT);
+        assert_eq!(
+            normalise_path("core/src/store.rs").unwrap(),
+            "core/src/store.rs"
+        );
+    }
+
+    /// The four spellings the audit found, refused through the real call.
+    ///
+    /// `overlapping` having the right opinion is not the property that matters;
+    /// `plan_work` refusing the plan is. These four were accepted end to end,
+    /// which is how two engineers would have been handed one directory with
+    /// nothing said.
+    #[test]
+    fn plan_work_refuses_the_spellings_that_used_to_walk_through_it() {
+        for (mine, theirs) in [
+            (".", "core/src"),
+            ("Core/Src", "core/src"),
+            ("core//src", "core/src"),
+            ("core/./src", "core/src"),
+        ] {
+            let s = store();
+            let work = s.create_work("two engineers, one directory").unwrap();
+            let outcome = s.plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![planned("the first", &[mine]), planned("the second", &[theirs])],
+                },
+            );
+            assert!(
+                outcome.is_err(),
+                "`{mine}` and `{theirs}` are one place, and the plan was accepted"
+            );
+            assert_eq!(
+                s.work_tasks(&work.id).unwrap().len(),
+                1,
+                "and the refusal wrote nothing",
+            );
+        }
+    }
+
+    /// One engineer owning the whole repository is a plan, not a mistake.
+    #[test]
+    fn a_plan_that_gives_one_engineer_the_whole_repository_is_allowed() {
+        let s = store();
+        let work = s.create_work("one engineer, everything").unwrap();
+
+        let board = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![planned("rewrite it all", &["."])],
+                },
+            )
+            .expect("`.` is a thing a manager may say");
+
+        assert_eq!(
+            board.last().expect("the planned task").paths,
+            vec![REPO_ROOT.to_string()]
+        );
+    }
+
+    /// The refusal is the feature, and a refusal that does not say which two
+    /// tasks collided leaves the manager to diff its own plan.
+    #[test]
+    fn a_plan_whose_tasks_claim_the_same_file_is_refused_and_names_both_of_them() {
+        let s = store();
+        let work = s.create_work("split the board work up").unwrap();
+
+        let err = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![
+                        planned("teach the board about paths", &["core/src/works.rs"]),
+                        planned("write the migration", &["core/src", "docs"]),
+                    ],
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, JodError::Invalid(_)), "got {err:?}");
+        let said = err.to_string();
+        assert!(said.contains("teach the board about paths"), "{said}");
+        assert!(said.contains("write the migration"), "{said}");
+        assert!(said.contains("core/src/works.rs"), "{said}");
+        assert!(said.contains("core/src"), "{said}");
+    }
+
+    #[test]
+    fn a_plan_on_disjoint_paths_writes_every_task_in_the_order_it_was_written() {
+        let s = store();
+        let work = s.create_work("three engineers, three areas").unwrap();
+
+        let board = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![
+                        planned("the board", &["core/src/works.rs", "core/src/team.rs"]),
+                        planned("placement", &["core/src/leases.rs"]),
+                        planned("read the docs", &[]),
+                    ],
+                },
+            )
+            .unwrap();
+
+        let titles: Vec<&str> = board.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                work.instruction.as_str(),
+                "the board",
+                "placement",
+                "read the docs"
+            ],
+            "the plan's own order is the only one anything downstream can trust"
+        );
+        assert_eq!(
+            board, s.work_tasks(&work.id).unwrap(),
+            "the returned board is the board, so nobody has to read it back"
+        );
+        assert_eq!(
+            board[1].paths,
+            vec!["core/src/works.rs".to_string(), "core/src/team.rs".to_string()]
+        );
+        assert!(
+            board[3].paths.is_empty(),
+            "an exploratory task claims nothing, and that is written as null"
+        );
+    }
+
+    /// A clock that steps backwards must not reorder a board.
+    ///
+    /// The wall clock is not monotonic. An NTP correction, or a laptop waking
+    /// from sleep, can move it backwards between two `plan_work` calls, and
+    /// then the second plan's tasks carry a smaller `created_at_ms` than the
+    /// first plan's. Ordering by the clock put them above it, so the board
+    /// reordered itself and `stack_for_work` — which reads the same order —
+    /// based the earlier engineer's pull request on top of the later one's.
+    /// Both silently.
+    ///
+    /// The step is written in by hand because there is no way to hand a store a
+    /// clock. That is the one thing here production does differently; the rows
+    /// it produces are exactly the rows an NTP correction leaves behind.
+    #[test]
+    fn a_backwards_clock_does_not_reorder_the_board() {
+        let s = store();
+        let work = s.create_work("planned across a clock step").unwrap();
+        s.plan_work(
+            &work.id,
+            &Plan {
+                tasks: vec![planned("written first", &["core"])],
+            },
+        )
+        .unwrap();
+        s.plan_work(
+            &work.id,
+            &Plan {
+                tasks: vec![planned("written second", &["cli"])],
+            },
+        )
+        .unwrap();
+
+        // The clock goes backwards by an hour, and the plan written second is
+        // stamped an hour before the one written first.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE tasks SET created_at_ms = 1 WHERE work_id = ?1 AND title = 'written second'",
+                params![work.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let titles: Vec<String> = s
+            .work_tasks(&work.id)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                work.instruction.clone(),
+                "written first".to_string(),
+                "written second".to_string()
+            ],
+            "the order tasks were written in, not the order their timestamps claim"
+        );
+    }
+
+    /// Half a plan is worse than none: the manager would believe it had handed
+    /// out both tasks while one engineer sat idle with no work and no error.
+    #[test]
+    fn a_refused_plan_writes_no_tasks_at_all() {
+        let s = store();
+        let work = s.create_work("plan twice").unwrap();
+        s.plan_work(
+            &work.id,
+            &Plan {
+                tasks: vec![planned("hold the core", &["core/src"])],
+            },
+        )
+        .unwrap();
+        let before = s.work_tasks(&work.id).unwrap();
+
+        // The first task is fine and the second collides with what is already
+        // open, so a writer that inserted as it checked would leave the first
+        // one behind.
+        let err = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![
+                        planned("tidy the cli", &["cli/src"]),
+                        planned("also the core", &["core/src/store.rs"]),
+                    ],
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, JodError::Invalid(_)), "got {err:?}");
+
+        assert_eq!(
+            s.work_tasks(&work.id).unwrap(),
+            before,
+            "a refused plan leaves the board exactly as it found it"
+        );
+    }
+
+    /// A second plan on a half-finished work must not hand out a file somebody
+    /// is holding — and must not go on holding the files of a task that is
+    /// over.
+    #[test]
+    fn a_plan_is_refused_against_an_open_task_and_allowed_against_a_finished_one() {
+        let s = store();
+        let work = s.create_work("two rounds").unwrap();
+        let first = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![planned("the first pass", &["core/src/works.rs"])],
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .find(|t| t.title == "the first pass")
+            .expect("the task just written");
+
+        let err = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![planned("the second pass", &["core/src"])],
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, JodError::Invalid(_)), "got {err:?}");
+        let said = err.to_string();
+        assert!(said.contains("the first pass"), "{said}");
+        assert!(said.contains("the second pass"), "{said}");
+
+        s.complete_work_task(&first.id).unwrap();
+
+        let board = s
+            .plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![planned("the second pass", &["core/src"])],
+                },
+            )
+            .expect("a done task's engineer has stopped and holds nothing");
+        assert!(board.iter().any(|t| t.title == "the second pass"));
+    }
+
+    #[test]
+    fn a_plan_needs_a_work_that_exists_a_task_and_a_title_on_it() {
+        let s = store();
+        let work = s.create_work("something").unwrap();
+
+        assert!(matches!(
+            s.plan_work(&work.id, &Plan::default()).unwrap_err(),
+            JodError::Invalid(_)
+        ));
+        assert!(matches!(
+            s.plan_work(
+                &work.id,
+                &Plan {
+                    tasks: vec![planned("   ", &["core/src"])],
+                },
+            )
+            .unwrap_err(),
+            JodError::Invalid(_)
+        ));
+        assert!(matches!(
+            s.plan_work(
+                "no-such-work",
+                &Plan {
+                    tasks: vec![planned("a task", &[])],
+                },
+            )
+            .unwrap_err(),
+            JodError::Invalid(_)
+        ));
+        assert_eq!(
+            s.work_tasks(&work.id).unwrap().len(),
+            1,
+            "only the instruction's own task",
+        );
+    }
+
+    /// An assignment is a decision the manager has already made, so it
+    /// overwrites — but it refuses a task that does not exist, because
+    /// `claim_task` would create that row and a board would then hold a task no
+    /// work ever shows.
+    #[test]
+    fn assigning_a_task_names_its_owner_and_refuses_one_that_does_not_exist() {
+        let s = store();
+        let work = s.create_work("hand it out").unwrap();
+        let task = s.work_tasks(&work.id).unwrap().remove(0);
+
+        s.assign_work_task(&task.id, "engineer-a").unwrap();
+        assert_eq!(
+            s.work_tasks(&work.id).unwrap()[0].owner.as_deref(),
+            Some("engineer-a")
+        );
+
+        s.assign_work_task(&task.id, "engineer-b").unwrap();
+        assert_eq!(
+            s.work_tasks(&work.id).unwrap()[0].owner.as_deref(),
+            Some("engineer-b"),
+            "the manager may move a task it already handed out"
+        );
+
+        assert!(matches!(
+            s.assign_work_task("no-such-task", "engineer-a")
+                .unwrap_err(),
+            JodError::Invalid(_)
+        ));
+        assert!(matches!(
+            s.assign_work_task(&task.id, "  ").unwrap_err(),
+            JodError::Invalid(_)
+        ));
     }
 
     #[test]

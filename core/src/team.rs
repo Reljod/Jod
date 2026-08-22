@@ -139,6 +139,17 @@ pub struct TeamTask {
     /// as this instant.
     #[serde(default)]
     pub created_at_ms: i64,
+    /// The repository-relative path prefixes this task's engineer owns, and the
+    /// only files it may change.
+    ///
+    /// Empty means the task claims nothing, which is the honest state for every
+    /// task written before there was a column to put paths in, and for every
+    /// exploratory one written since. `serde(default)` for the reason
+    /// `created_at_ms` above it has one: a payload written by an older build
+    /// must still deserialise, and it must deserialise to "claims nothing"
+    /// rather than to a failure.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 impl TeamTask {
@@ -2184,6 +2195,7 @@ mod tests {
             owner: None,
             status: "open".into(),
             created_at_ms: 0,
+            paths: Vec::new(),
         };
         assert!(!t.is_claimed());
         assert!(!t.is_done());
@@ -2192,6 +2204,25 @@ mod tests {
         t.status = "done".into();
         assert!(t.is_claimed());
         assert!(t.is_done());
+    }
+
+    /// A board payload written by a build that had never heard of path
+    /// ownership must still be readable, and it must read as "this task claims
+    /// no files" rather than as a failure.
+    ///
+    /// The API hands boards out as JSON and the TUI reads them back, so the two
+    /// ends of that wire are upgraded at different moments. A missing field
+    /// that failed the whole read would take the board down for whichever end
+    /// was older.
+    #[test]
+    fn a_task_written_before_paths_existed_reads_as_claiming_nothing() {
+        let task: TeamTask = serde_json::from_str(
+            r#"{"id":"t1","title":"port the parser","owner":null,"status":"open"}"#,
+        )
+        .expect("a payload from an older build still deserialises");
+
+        assert!(task.paths.is_empty());
+        assert_eq!(task.created_at_ms, 0);
     }
 
     // ---- threads, bounds and waking --------------------------------------
