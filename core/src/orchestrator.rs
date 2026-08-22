@@ -91,6 +91,17 @@ pub const COMPACT_IDLE_MS: i64 = 24 * 60 * 60 * 1000;
 /// at exactly the point where the specifics are all there is.
 pub const COMPACT_FLOOR_CHARS: usize = 4_000;
 
+/// How far back [`Store::on_main_thread`] walks the chain of compactions.
+///
+/// Each compaction of the main chat adds one link, so this is sixty-four
+/// compactions of one conversation — several times the nine seen in an evening
+/// of heavy use, and far enough back that a turn old enough to fall off the end
+/// has long since finished. The bound is here for the case the data is wrong
+/// rather than the case it is long: `forked_from` is a plain self-reference
+/// with nothing in the schema forbidding a cycle, and an unbounded walk over a
+/// cyclic one would hang the tool call that asked instead of answering it.
+pub const MAIN_CHAIN_DEPTH: i64 = 64;
+
 /// Why the main chat is due for compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2403,6 +2414,50 @@ impl Store {
             .ok())
     }
 
+    /// Whether this conversation is the main chat — the thread, not the row.
+    ///
+    /// The pin is the answer to "where does the *next* main turn go", and it is
+    /// the right answer to that question. It is the wrong answer to "is this
+    /// caller main", because compacting main does not edit its row: it forks
+    /// the thread into a new conversation and moves the pin onto that one. A
+    /// turn already running keeps writing into the conversation it started in,
+    /// so from the moment the pin moves, comparing that conversation against
+    /// the pin says no about a turn that is still the main chat's.
+    ///
+    /// `forked_from` records where each thread came from, so walking it back
+    /// from the pinned row names exactly the conversations that used to be main
+    /// and nothing else. This is the same walk migrations `0025` to `0028`
+    /// already use to move mail, cards, deliveries and parent edges forward
+    /// after a compaction; asking who is main is the fifth reader of it.
+    ///
+    /// # The walk is bounded
+    ///
+    /// At [`MAIN_CHAIN_DEPTH`] generations. One live chat had compacted itself
+    /// nine times in an evening and there is nothing in the schema stopping the
+    /// chain being longer, or — if a row were ever corrupted or a fork edge
+    /// wired into a loop — cyclic. Past the bound the walk stops and the answer
+    /// is `false`, which is what this returns today for every ancestor, so the
+    /// worst a chain that long can do is leave the old behaviour in place
+    /// rather than hang the tool call that asked.
+    pub fn on_main_thread(&self, conversation_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let found: i64 = conn.query_row(
+            "WITH RECURSIVE main_chain(id, depth) AS (
+               SELECT id, 0 FROM conversations WHERE COALESCE(pinned, 0) = 1
+               UNION
+               SELECT c.forked_from, m.depth + 1
+                 FROM conversations c
+                 JOIN main_chain m ON c.id = m.id
+                WHERE c.forked_from IS NOT NULL
+                  AND m.depth < ?2
+             )
+             SELECT EXISTS (SELECT 1 FROM main_chain WHERE id = ?1)",
+            rusqlite::params![conversation_id, MAIN_CHAIN_DEPTH],
+            |r| r.get(0),
+        )?;
+        Ok(found == 1)
+    }
+
     /// Note that a person said something, which is the clock compaction reads.
     pub fn touch_human(&self, conversation_id: &str, at_ms: i64) -> Result<()> {
         self.write(|tx| {
@@ -4695,6 +4750,89 @@ mod tests {
         assert_eq!(s.pinned_conversation().unwrap(), None);
         let id = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
         assert_eq!(s.pinned_conversation().unwrap().as_deref(), Some(id.as_str()));
+    }
+
+    /// Compaction moves the pin off the conversation a running turn is writing
+    /// into, and that conversation is still the main chat.
+    #[test]
+    fn a_conversation_compacted_away_is_still_on_the_main_thread() {
+        use crate::conversation::{NewMessage, Role};
+        let s = store();
+        let first = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.append_message(&first, NewMessage::new(Role::User, "the long question")).unwrap();
+        s.append_message(&first, NewMessage::new(Role::Assistant, "the long answer")).unwrap();
+
+        let second = s.continue_as_new(&first, "it was answered", "context").unwrap().conversation.id;
+
+        assert!(s.on_main_thread(&second).unwrap(), "the pinned row is main");
+        assert!(
+            s.on_main_thread(&first).unwrap(),
+            "and so is the thread it was compacted from"
+        );
+    }
+
+    /// The other half, and the one that would break the fleet if it were wrong:
+    /// an answer of "main" for everybody refuses every agent Jod runs.
+    #[test]
+    fn a_conversation_off_the_main_thread_is_not_main() {
+        let s = store();
+        s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        let other = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+
+        assert!(!s.on_main_thread(&other).unwrap());
+    }
+
+    /// No main chat yet means nothing is main, rather than an error a caller
+    /// has to decide what to do about.
+    #[test]
+    fn nothing_is_on_the_main_thread_when_there_is_no_pin() {
+        let s = store();
+        let lone = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+
+        assert!(!s.on_main_thread(&lone).unwrap());
+    }
+
+    /// `forked_from` is a plain self-reference and the schema does not forbid a
+    /// loop, so the walk has to answer rather than spin. Written by hand
+    /// because no code path produces this — the point is that a corrupted row
+    /// cannot hang the tool call that asks who is calling.
+    #[test]
+    fn a_cyclic_fork_chain_terminates_at_the_bound() {
+        let s = store();
+        let main = s.main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp").unwrap();
+        let other = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET forked_from = ?2 WHERE id = ?1",
+                rusqlite::params![main, other],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET forked_from = ?2 WHERE id = ?1",
+                rusqlite::params![other, main],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(s.on_main_thread(&main).unwrap());
+        assert!(
+            s.on_main_thread(&other).unwrap(),
+            "a row on the chain reads as on it, however the chain got that way"
+        );
+        let unrelated = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        assert!(!s.on_main_thread(&unrelated).unwrap());
     }
 
     /// A second pinned chat splits where instructions land, and you find out
