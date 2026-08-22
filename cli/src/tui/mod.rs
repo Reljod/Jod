@@ -6932,12 +6932,15 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
 fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
     app.cards = data::cards(jod, &app.rail.query(app.conversation.clone()));
     app.reconcile_rail();
-    // Once per session, and said out loud when it happens: a column that
-    // appears on its own without explanation reads as a rendering fault.
-    if app.rail.auto_open(&app.cards) {
-        app.push(Entry::Notice(
-            "a run is blocked — the rail is open; Ctrl-N answers, and closes it again".into(),
-        ));
+    // The rail opens itself once per session — a column that appears on its own
+    // without explanation reads as a rendering fault, so that is said out loud
+    // — but the *sentence* is not rationed the same way. It repeats whenever
+    // the blocker count rises, because the second blocker of a session is worth
+    // exactly as much as the first, and it goes out as an `Alert` so it does
+    // not arrive looking like the compaction notice above it.
+    let opened = app.rail.auto_open(&app.cards);
+    if let Some(said) = app.rail.announce(&app.cards, opened) {
+        app.push(Entry::Alert(said));
     }
 }
 

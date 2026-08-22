@@ -115,6 +115,17 @@ pub struct RailState {
     /// arrives is a rail people turn off, and then the *next* blocker is
     /// invisible — the failure the auto-open exists to prevent.
     pub auto_opened: bool,
+    /// The largest number of open blockers that has already been said out loud.
+    ///
+    /// Kept apart from [`RailState::auto_opened`] because opening the rail and
+    /// saying something are different promises. Opening it twice fights the
+    /// reader who just closed it, so that stays once per session; staying quiet
+    /// about the second blocker is the failure this whole column exists to
+    /// prevent, so the *sentence* is not rationed. A count rather than a flag,
+    /// so three blockers arriving one at a time produce three lines and three
+    /// blockers arriving together produce one. It falls back to zero when the
+    /// last one is answered, which is what lets the next one speak again.
+    pub announced: usize,
     /// Whether the rail shows the whole subtree or only this conversation.
     ///
     /// On by default, and that is the orchestrator's whole case for existing:
@@ -144,6 +155,7 @@ impl Default for RailState {
             kind: 0,
             stack: 0,
             auto_opened: false,
+            announced: 0,
             cascade: true,
         }
     }
@@ -390,6 +402,54 @@ impl RailState {
         self.shown = true;
         was_hidden
     }
+
+    /// The line to say about blockers this tick, or `None` to stay quiet.
+    ///
+    /// Said whenever the number of open blockers **rises** past the highest
+    /// already said, and reset to nothing once they are all gone. Before this,
+    /// the sentence rode on [`RailState::auto_open`]'s once-per-session latch,
+    /// so a session that had seen one blocker never mentioned another — you
+    /// closed the rail, an agent stopped an hour later, and the only trace was
+    /// a grey fragment in the middle of a run-on status line.
+    ///
+    /// `opened` is whether this same tick is what put the rail on screen, which
+    /// changes what the reader has to do next: a rail already in front of them
+    /// needs no instructions, and a hidden one does.
+    pub fn announce(&mut self, cards: &[Card], opened: bool) -> Option<String> {
+        let blocked = cards.iter().filter(|c| c.blocking && c.is_open()).count();
+        if blocked == 0 {
+            // Not a floor at the old count: answering everything and then being
+            // blocked again is a fresh piece of news, not a repeat.
+            self.announced = 0;
+            return None;
+        }
+        if blocked <= self.announced {
+            return None;
+        }
+        // How many are *new* since the last thing said, so the sentence is
+        // about what just happened rather than about the whole backlog.
+        let fresh = blocked - self.announced;
+        self.announced = blocked;
+        let subject = if fresh == 1 {
+            "a run is blocked".to_string()
+        } else {
+            format!("{fresh} runs are blocked")
+        };
+        // The total only earns its place when it differs from what just
+        // arrived; otherwise it says the same number twice.
+        let total = if blocked > fresh {
+            format!(" · {blocked} waiting on you")
+        } else {
+            String::new()
+        };
+        // One key either way: `Ctrl-N` shows the rail and takes the keyboard,
+        // so it is the answer whether the column is already up or not.
+        Some(if opened {
+            format!("{subject}{total} — the rail is open; Ctrl-N answers, and closes it again")
+        } else {
+            format!("{subject}{total} — Ctrl-N opens the rail to answer")
+        })
+    }
 }
 
 /// What the rail says about a card's *delivery*, or `None` when there is
@@ -528,6 +588,78 @@ mod tests {
     #[test]
     fn an_open_card_has_no_delivery_to_report() {
         assert_eq!(delivery_note(&card(1, false)), None);
+    }
+
+    /// The gap this closes: the sentence used to ride on `auto_open`'s
+    /// once-per-session latch, so a session that had already seen one blocker
+    /// never mentioned another. You closed the rail, an agent stopped an hour
+    /// later, and nothing said so.
+    #[test]
+    fn a_second_blocker_is_announced_even_though_the_rail_only_opens_once() {
+        let mut rail = RailState::default();
+        let one = vec![card(1, true)];
+        assert!(rail.auto_open(&one), "the first blocker opens the rail");
+        let first = rail.announce(&one, true).expect("and it says so");
+        assert!(first.contains("a run is blocked"), "{first}");
+
+        let two = vec![card(1, true), card(2, true)];
+        assert!(!rail.auto_open(&two), "the rail is not opened a second time");
+        let second = rail
+            .announce(&two, false)
+            .expect("but the news is said a second time");
+        assert!(second.contains("2 waiting on you"), "{second}");
+        assert!(
+            second.contains("Ctrl-N"),
+            "with the key that answers it: {second}"
+        );
+    }
+
+    /// A line every tick is noise, and noise is what the reader learns to skip.
+    #[test]
+    fn nothing_new_is_said_while_the_same_cards_sit_there() {
+        let mut rail = RailState::default();
+        let one = vec![card(1, true)];
+        assert!(rail.announce(&one, true).is_some(), "said once");
+        assert!(rail.announce(&one, false).is_none(), "and not again");
+        assert!(rail.announce(&one, false).is_none());
+    }
+
+    /// Two at once is one sentence. The count only earns its place when it
+    /// differs from what just arrived; otherwise it prints the same number
+    /// twice in one line.
+    #[test]
+    fn blockers_that_arrive_together_are_one_line_carrying_one_number() {
+        let mut rail = RailState::default();
+        let two = vec![card(1, true), card(2, true)];
+        let said = rail.announce(&two, true).expect("said");
+        assert!(said.contains("2 runs are blocked"), "{said}");
+        assert!(!said.contains("waiting on you"), "and only once: {said}");
+    }
+
+    /// Answering everything and then being blocked again is fresh news, not a
+    /// repeat — so the high-water mark falls back rather than holding.
+    #[test]
+    fn clearing_every_blocker_lets_the_next_one_speak_again() {
+        let mut rail = RailState::default();
+        assert!(rail.announce(&[card(1, true)], true).is_some());
+        assert!(
+            rail.announce(&[card(1, false)], false).is_none(),
+            "nothing to say when nothing is blocked"
+        );
+        let again = rail
+            .announce(&[card(2, true)], false)
+            .expect("the next blocker is news again");
+        assert!(again.contains("a run is blocked"), "{again}");
+    }
+
+    /// An answered card is not blocking anybody, so it must not keep the
+    /// high-water mark up and silence the next real one.
+    #[test]
+    fn an_answered_card_does_not_count_as_a_blocker() {
+        let mut rail = RailState::default();
+        let mut answered = card(1, true);
+        answered.status = Status::Answered;
+        assert!(rail.announce(&[answered], true).is_none());
     }
 
     /// A session that ended owing an answer says so. Mail that vanishes is

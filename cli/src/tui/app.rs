@@ -65,6 +65,18 @@ pub enum Entry {
     /// [`Entry::Hint`]: a session holding one of these has answered a question
     /// and must not be painted over by the splash.
     Notice(String),
+    /// Something Jod says that the reader has to *act* on — today, that a run
+    /// has stopped and is waiting for an answer.
+    ///
+    /// Its own variant rather than a [`Entry::Notice`] for the reason
+    /// [`Entry::Routing`] is one: a notice cannot be told apart from a warning.
+    /// The blocked line used to be a notice, and it came out as one amber
+    /// bullet in a column of amber bullets — `context is 100% full`,
+    /// `compacted — 17239 chars…`, `a run is blocked` — where the only entry
+    /// that costs real time to miss looked exactly like the two that cost
+    /// nothing. Colour is never the only channel here, so this carries its own
+    /// marker too.
+    Alert(String),
     /// Where a typed line was sent — the hand-off to the orchestrator, and the
     /// id of the run now carrying it.
     ///
@@ -3245,14 +3257,14 @@ impl App {
         if background > 0 {
             parts.push(format!("{background} in background"));
         }
-        // Somebody has stopped and is waiting on an answer. This is the one
-        // state that costs real time to miss: a blocked agent is not working
-        // and will not start again on its own, and until now the only place
-        // that said so was the rail — a panel that is closed by default, so the
-        // news reached exactly the readers who already knew to go looking.
-        if let Some(waiting) = self.waiting_on_you() {
-            parts.push(waiting);
-        }
+        // What is *blocked* used to be appended here. It has moved out to
+        // [`App::waiting_on_you`]'s own callers — `ui::header_doing` and
+        // `ui::draw_status` — and the move is the point. As one more fragment
+        // in this string it inherited two properties that made it useless: the
+        // whole line is drawn in one colour, so the state that costs real time
+        // to miss looked exactly like `ready`; and both callers `cut` the
+        // string to the room they have, which drops the tail first — so on a
+        // narrow terminal the fragment that mattered was the first to go.
         if !self.queued.is_empty() {
             parts.push(format!("{} queued", self.queued.len()));
         }
@@ -3676,6 +3688,14 @@ mod tests {
 
     /// A blocked agent is not working and will not start again on its own, and
     /// the only place that said so was a panel closed by default.
+    ///
+    /// This used to end by asserting that `activity()` *contained* the words,
+    /// which was never the claim the name makes: a fragment can be inside that
+    /// string and still never reach a screen, and that is exactly what happened
+    /// to it — drawn in the same grey as `ready`, and `cut` off the end of the
+    /// line on any terminal narrow enough to matter. The rendering half of the
+    /// claim is now checked where a frame can actually be drawn, by
+    /// `ui::tests::a_blocked_run_is_the_loudest_thing_on_the_always_on_row`.
     #[test]
     fn a_blocked_agent_says_so_on_the_line_that_is_always_visible() {
         let mut a = app();
@@ -3683,11 +3703,6 @@ mod tests {
 
         a.cards = vec![blocking_card("c-1")];
         assert_eq!(a.waiting_on_you().as_deref(), Some("1 waiting on you"));
-        assert!(
-            a.activity().contains("waiting on you"),
-            "and it reaches the status line: {}",
-            a.activity()
-        );
     }
 
     /// "A manager is waiting" and "something is waiting" prompt different

@@ -1894,10 +1894,33 @@ fn header_who(app: &App, room: usize) -> Vec<Span<'static>> {
 }
 
 /// Line three: what he is doing about it, in the colour the status bar gives
-/// the same fact — amber while a turn is running, quiet once it is not.
+/// the same fact — amber while a turn is running, quiet once it is not — and
+/// then, in red, what has stopped and is waiting on him.
+///
+/// The blocker is a span of its own rather than a fragment of
+/// [`App::activity`], for the two reasons that fragment never worked. It gets
+/// its own colour, so it stops reading like `ready`; and it is reserved before
+/// the activity is `cut`, so a narrow band drops what he is *doing* rather than
+/// what is stuck. Those are the right things to lose in that order: a run in
+/// flight finishes on its own and a blocked one does not.
 fn header_doing(app: &App, room: usize) -> Vec<Span<'static>> {
     let colour = if app.busy { WARN } else { MUTED };
-    vec![Span::styled(cut(&app.activity(), room), fg(colour))]
+    let Some(waiting) = app.waiting_on_you() else {
+        return vec![Span::styled(cut(&app.activity(), room), fg(colour))];
+    };
+    let waiting = format!("  ▌ {waiting}");
+    // Beside the activity rather than out at the right margin: the three lines
+    // of this band are a left-aligned block, and a mark floating at the far
+    // edge of line three reads as belonging to something else. If even the
+    // blocker will not fit, it is what stays — the status row below carries the
+    // same fact, but this is the line that is beside the lion on every screen.
+    let Some(left) = room.checked_sub(waiting.chars().count()) else {
+        return vec![Span::styled(cut(waiting.trim_start(), room), bold(BAD))];
+    };
+    vec![
+        Span::styled(cut(&app.activity(), left), fg(colour)),
+        Span::styled(waiting, bold(BAD)),
+    ]
 }
 
 /// Line four: where he is working — the directory `jod tui` was launched in,
@@ -2624,6 +2647,18 @@ fn meter(level: f32, speaking: bool) -> String {
     out
 }
 
+/// How many columns a list of badges takes, separators included.
+///
+/// Counted here rather than by building the string and measuring it, because
+/// the caller drops badges one at a time and has to re-measure after each — and
+/// a measurement that disagreed with the layout by three columns would put the
+/// last badge over the right edge, which is the one place a status row is never
+/// allowed to go.
+fn width_of(badges: &[(String, Style)]) -> usize {
+    let text: usize = badges.iter().map(|(t, _)| t.chars().count()).sum();
+    text + 3 * badges.len().saturating_sub(1)
+}
+
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
@@ -2634,12 +2669,26 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{} · {}", ws.title(), app.count_for(ws))
     };
-    let mut badge = String::new();
+    // The badges, in the order they matter, each with its own colour. A list
+    // rather than one string because the two properties that string could not
+    // have are the ones this row needs: a badge that is *louder* than the rest,
+    // and a narrow terminal that drops the least important badge instead of
+    // dropping all of them. Anything appended below is lower priority than
+    // everything above it — that ordering is the whole policy.
+    let mut badges: Vec<(String, Style)> = Vec::new();
     // First, and unconditionally. A live microphone is the one state on this
     // row where not knowing has a cost outside the program, so it goes ahead
     // of every other badge and never competes for the space.
     if let Some(said) = dictation_badge(app) {
-        badge.push_str(&said);
+        badges.push((said, fg(WARN)));
+    }
+    // Second, and in red: something has stopped and will not start again on its
+    // own. It carries the key as well as the count, because a reader who has
+    // just learned they are the blocker should not then have to go and find out
+    // how to answer. This is the fact the whole change is about — as a grey
+    // fragment inside the left-hand run-on it was there, and nobody saw it.
+    if let Some(waiting) = app.waiting_on_you() {
+        badges.push((format!("▌ {waiting} · Ctrl-N"), bold(BAD)));
     }
     // The panel holds the context bar, but the panel is shut most of the time
     // and something about to happen unannounced is worse than advice nobody can
@@ -2654,30 +2703,27 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // compacting deletes nothing: the earlier turns stay searchable and the
     // thread behind the summary is still in `/sessions`.
     if app.should_compact() {
-        if !badge.is_empty() {
-            badge.push_str(" · ");
-        }
-        badge.push_str(if app.auto_compact {
-            "⚠ compacting (estimate)"
-        } else {
-            "⚠ compact (estimate)"
-        });
+        badges.push((
+            if app.auto_compact {
+                "⚠ compacting (estimate)".to_string()
+            } else {
+                "⚠ compact (estimate)".to_string()
+            },
+            fg(WARN),
+        ));
     }
     // Endings that arrive while you are away have to survive until you look.
     if app.unread() > 0 {
-        if !badge.is_empty() {
-            badge.push_str(" · ");
-        }
-        badge.push_str(&format!("⚑ {} unread", app.unread()));
+        badges.push((format!("⚑ {} unread", app.unread()), fg(WARN)));
     }
     // A shell building in the background is invisible by construction — that
     // is what backgrounding it means — so the always-on row is the only place
     // it can be seen without being looked for.
     if app.running_jobs() > 0 {
-        if !badge.is_empty() {
-            badge.push_str(" · ");
-        }
-        badge.push_str(&format!("⚙ {} running (Ctrl-G j)", app.running_jobs()));
+        badges.push((
+            format!("⚙ {} running (Ctrl-G j)", app.running_jobs()),
+            fg(WARN),
+        ));
     }
     let style = if app.busy && ws == Workspace::Chat {
         fg(WARN)
@@ -2693,13 +2739,27 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(left.clone(), style),
     ];
     // The status grows — a spinner, a clock, a background count, a queue — so
-    // the badge has to yield rather than collide with it. Running them together
-    // produced `1 queuedCtrl-X stop`, which reads as neither.
+    // the badges have to yield rather than collide with it. Running them
+    // together produced `1 queuedCtrl-X stop`, which reads as neither.
+    //
+    // They yield one at a time, from the least important end. Dropping the lot
+    // the moment the row got tight was what made the blocker badge worth
+    // nothing on the screens it was most needed on: a phone terminal is eighty
+    // columns, `⚙ 2 running (Ctrl-G j)` is twenty-two of them, and the fact
+    // that an agent had stopped went out with it.
     let used = mode_width + 3 + left.chars().count() + 2;
     let room = (area.width as usize).saturating_sub(used);
-    if !badge.is_empty() && room >= badge.chars().count() + 2 {
-        spans.push(Span::raw(" ".repeat(room - badge.chars().count())));
-        spans.push(Span::styled(badge, fg(WARN)));
+    while width_of(&badges) + 2 > room && !badges.is_empty() {
+        badges.pop();
+    }
+    if !badges.is_empty() {
+        spans.push(Span::raw(" ".repeat(room - width_of(&badges))));
+        for (i, (text, style)) in badges.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", fg(MUTED)));
+            }
+            spans.push(Span::styled(text, style));
+        }
     }
     spans.push(Span::raw(" "));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -6033,6 +6093,10 @@ fn render(entry: &Entry, ctx: &Ctx) -> Vec<Line<'static>> {
         // A hint reads exactly like a notice — the difference between them is
         // about which entries the splash may cover, not about how they look.
         Entry::Notice(t) | Entry::Hint(t) => ("• ", fg(WARN), t.clone()),
+        // A bar rather than a bullet, and red rather than amber. This is the
+        // one entry the reader has to do something about, and in a column of
+        // amber bullets a third amber bullet is not a signal.
+        Entry::Alert(t) => ("▌ ", bold(BAD), t.clone()),
         // Reads as a notice, because while it is on screen it is one. What
         // separates it is only that it folds away with the other steps.
         Entry::Routing(t) => ("• ", fg(WARN), t.clone()),
@@ -10608,6 +10672,89 @@ mod tests {
             .expect("the rail's query");
         a.reconcile_rail();
         a
+    }
+
+    /// The claim `app::tests::a_blocked_agent_says_so_on_the_line_that_is_always_visible`
+    /// makes but cannot check: that it reaches a *frame*.
+    ///
+    /// With the rail put away, which is its resting state. The whole point of
+    /// the always-on row is that the news does not depend on the panel being
+    /// open, and the panel is shut by default.
+    #[test]
+    fn a_blocked_run_is_the_loudest_thing_on_the_always_on_row() {
+        let (store, conversation) = wordy_store();
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.rail.shown = false;
+
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("1 waiting on you"), "{frame}");
+        assert!(
+            frame.contains("Ctrl-N"),
+            "a reader who has just learned they are the blocker must not then \
+             have to go and find out how to answer: {frame}"
+        );
+        assert!(
+            frame.contains('▌'),
+            "colour is never the only channel here: {frame}"
+        );
+    }
+
+    /// The badges used to be one string, dropped whole the moment the row got
+    /// tight — so on the terminal where a blocker was hardest to notice, the
+    /// badge saying there was one is the thing that went.
+    #[test]
+    fn a_tight_status_row_drops_the_lesser_badges_before_the_blocker() {
+        let (store, conversation) = wordy_store();
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.rail.shown = false;
+        // A second badge to compete with, so there is something to drop.
+        a.activity = vec![ActivityItem {
+            id: "e1".into(),
+            at_ms: 0,
+            source: Source::Hook,
+            text: "pr-opened fired".into(),
+            unread: true,
+            needs_you: false,
+            jump_to: None,
+        }];
+
+        let wide = rendered(&a, 160, 24);
+        assert!(wide.contains("unread"), "both fit at 160 columns: {wide}");
+        assert!(wide.contains("waiting on you"), "{wide}");
+
+        let tight = rendered(&a, 96, 24);
+        assert!(
+            tight.contains("waiting on you"),
+            "the blocker is what survives: {tight}"
+        );
+        assert!(
+            tight.lines().all(|l| l.chars().count() <= 96),
+            "and nothing runs off the edge:\n{tight}"
+        );
+    }
+
+    /// A blocked run used to be pushed as a `Notice`, which put it in the same
+    /// amber bullet as `compacted — 17239 chars…` directly above it.
+    #[test]
+    fn an_alert_does_not_come_out_looking_like_an_ordinary_notice() {
+        let mut a = app();
+        a.push(Entry::Notice("compacted — 17239 chars".into()));
+        a.push(Entry::Alert("a run is blocked — Ctrl-N opens the rail".into()));
+
+        let frame = rendered(&a, 120, 24);
+        let notice = frame
+            .lines()
+            .find(|l| l.contains("compacted"))
+            .expect("the notice is on screen");
+        let alert = frame
+            .lines()
+            .find(|l| l.contains("a run is blocked"))
+            .expect("and so is the alert");
+        assert!(notice.contains('•'), "the notice keeps its bullet: {notice}");
+        assert!(
+            alert.contains('▌') && !alert.contains('•'),
+            "and the alert is marked apart from it: {alert}"
+        );
     }
 
     /// **E2's check, word for word:** a rendered frame showing three cards, one
