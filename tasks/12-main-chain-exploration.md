@@ -246,7 +246,7 @@ what the limit is for and why it is the number it is.
 ---
 
 ## X5. A summariser run that fails is reported as a summary that came back empty, and it leaves you unable to change harness
-Status: **open — fix in progress, composing with PR #238** · Severity: high · Owner: the pull-request session
+Status: **open — fix is PR #252** · Severity: high · Owner: the pull-request session
 
 Switching the main chat's harness first summarises the conversation *on the
 harness you are leaving*, and hands that summary to the new one. When the
