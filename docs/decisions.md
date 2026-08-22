@@ -4192,3 +4192,57 @@ object it happens to share with the older one. Only `CREATE` and `ADD COLUMN`
 are ever skipped, since they are the only statements that fail this way; a
 backfilling `INSERT` or `UPDATE` still takes the whole migration down, which is
 what it should do.
+
+## An engineer is reused on its own subject only, and the one-hour rule archives rather than redirects
+
+Reuse was written the other way round on purpose. `list_agents` told the caller
+to prefer a free agent *"for any instruction here, including one on a different
+subject"*, and the manager's brief said it three more times, ending with
+*"Different subject, same repository, same engineer."* The reasoning was sound:
+an engineer's value is a warm checkout, and every instruction in that repository
+benefits from one.
+
+What it did not account for is *where* the warm checkout is. A free engineer is
+often one that was started on the real checkout rather than in a worktree.
+`continue_agent` resumes a session exactly where it sat, so handing it a task
+that writes writes into Reljod's working copy — no branch, no worktree, no pull
+request. The placement rules that exist to prevent precisely this are never
+reached, because reuse is decided first and always wins. Nobody chose that
+behaviour; it fell out of "reuse whoever is free".
+
+So the rule inverts. An engineer is offered for reuse only for an instruction
+that carries on what it was already doing, and a different subject opens a new
+engineer with a worktree of its own. The roster names each engineer's subject so
+the manager can judge, and says when an engineer is sitting on the checkout so
+the answer is obvious rather than inferred.
+
+**Relatedness is the manager's judgement, not a computation.** Gating reuse on
+the work id was considered and rejected: a genuinely related follow-up filed as
+new work would be locked out, and a manager that cannot exercise judgement is a
+dispatcher again. Jod reports the subject and states the rule; the decision
+stays with the manager.
+
+**The one-hour window archives, it does not redirect.** Treating an hour-old
+engineer as fair game for anything was the other reading, and it is worse than
+the problem: reusing a stale worktree engineer lands an unrelated change on a
+branch that may already have a pull request open on it. Age decides only what
+gets put away — an engineer stranded on the checkout for an hour, and a finished
+one a day after its pull request merged. An engineer in a worktree that has not
+finished is never archived by age, because it holds a branch and a roster that
+loses it loses the only pointer to that branch.
+
+**Finished means merged, not opened.** A draft pull request means the engineer
+is waiting for review and probably has more to do — review comments are the
+commonest reason to continue one. A closed, unmerged pull request usually means
+the work is being redone, and the engineer holding it is the one to redo it.
+Only a merge ends a job.
+
+This reverses the engineer half of *"A scratch session is reused on the same
+subject only, which is the opposite of the engineer rule"* above. That decision
+is still right about scratch. It was wrong about engineers, and after this the
+two rules agree instead of contradicting each other.
+
+**Not built yet.** The reasoning is settled and the work is specced in
+[`SPEC.md`](../SPEC.md); the code still says the old thing in
+`core/src/mcp.rs`, `core/src/orchestrator.rs` and the decision above. Anyone
+reading those before the spec ships is reading the behaviour being replaced.
