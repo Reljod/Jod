@@ -3292,6 +3292,50 @@ never loaded the catalog. So every panel it has ever printed said `none yet —
 /project add <path>` on a database with a full catalog in it: the one claim the
 example makes, failing on the one box a reader would check it against.
 
+## The newest view holds the keyboard, and `Esc` walks back out in that order
+
+The entry above settled that the rail and the catalog cannot both hold the bare
+keys, and settled it with a fixed order: the router checks the rail first. That
+is the right answer to "which one gets this keypress" and the wrong answer to
+"and what happens when it closes", which is the question nobody asked at the
+time.
+
+Open the rail, then open the catalog over it. The catalog takes the keyboard,
+which is correct — it is the thing you just opened. Press `Esc` and the catalog
+closes back to the *chat*, because closing it only knew how to un-focus itself,
+and the rail is left drawn beside a chat that has the keyboard. It is on screen,
+it has a cursor in it, and nothing on the bar names a key that reaches it. The
+way back in was `Ctrl-N`, which is exactly the failure the entry above fixed one
+level further out.
+
+So the two flags now have an order behind them. `App::focus` is a stack of the
+views that are open and have held the keyboard, newest last; opening a view puts
+it on top, closing one takes it off wherever it sits, and the keyboard always
+goes to whatever is left. `rail.focused` and `panel_focused` are still what the
+router and the renderer read and still cannot both be true — they are written
+from the stack rather than set by hand. The rule a person sees is the one they
+already expected: `Esc` closes the newest thing on screen, and the thing it was
+opened over is still there, still where they left it, and holding the keyboard
+again.
+
+A stack rather than a third boolean, because the reason this broke is that a
+boolean cannot answer "and then what". Two views is the number there is today
+and the number the flags could have limped along on; the order is the part that
+has to be written down, and it is written down once.
+
+The keybar has to say where `Esc` lands, which is now a different place
+depending on what is underneath — "back to the projects" from a rail opened over
+the catalog, "back to the chat" from a rail opened over nothing. A bar that
+names the wrong destination is worse than one that names none.
+
+Two things stay out of the stack on purpose. An overlay is always the newest
+thing on screen by construction, so it already closes back onto whichever view
+had the keyboard; putting it on the stack would only let `Esc` reopen a
+which-key menu that was a step on the way somewhere. And a rail that opened
+*itself* when a blocker arrived is not a view anybody opened — it never held the
+keyboard, so it is not in the stack, and `Esc` does not close it. It is a
+notification until somebody presses `Ctrl-N` and makes it a view.
+
 ## A notice belongs to the screen that raised it
 
 The transcript is drawn on the chat screen and nowhere else, so a notice pushed

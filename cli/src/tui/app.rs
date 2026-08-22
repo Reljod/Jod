@@ -283,6 +283,32 @@ impl Overlay {
     }
 }
 
+/// A view that can be on screen while another one is, and can hold the bare
+/// keys while it is.
+///
+/// Two of them so far — the decision rail and the project catalog — and they
+/// are the two because they are drawn *beside* a screen rather than instead of
+/// it. Everything else is either a workspace, of which there is one at a time
+/// and [`App::back_stack`] already remembers the way back, or an
+/// [`Overlay`], of which there is one at a time and it is always the newest
+/// thing on screen by construction.
+///
+/// The order matters, which is why [`App::focus`] is a stack and not a pair of
+/// flags. See it for the rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// The decision rail — the column of cards. `Ctrl-N`, or a click on it.
+    Rail,
+    /// The project catalog on the panel. `Ctrl-P`, or a click on it.
+    Catalog,
+}
+
+impl Layer {
+    /// Every layer there is, which is what [`App::sync_focus`] walks to find
+    /// the ones that have been opened or closed behind its back.
+    pub const ALL: [Layer; 2] = [Layer::Rail, Layer::Catalog];
+}
+
 /// What the microphone is doing.
 ///
 /// ## The microphone is a switch, not a button
@@ -499,6 +525,24 @@ pub struct App {
     /// coming back lands where you left.
     pub lists: Vec<ListState>,
     pub overlay: Overlay,
+    /// The views that are open and have held the keyboard, oldest first.
+    ///
+    /// The last one is the one holding it now. Opening a view puts it on the
+    /// top of this stack, closing one takes it off wherever it sits, and the
+    /// keyboard always goes to whatever is left on top — so `Esc` walks back
+    /// out through the views in the reverse of the order they were opened,
+    /// which is the order anybody who opened them expects.
+    ///
+    /// A stack rather than the two booleans it drives, because the booleans
+    /// alone cannot answer "and then what". They record *who has the keyboard*,
+    /// and the moment that view closes there is nothing left saying that the
+    /// other one is still on screen and had it a keystroke ago: the catalog
+    /// opened over a rail used to close back to the chat, leaving a rail drawn
+    /// beside it that no key on the bar could reach. `rail.focused` and
+    /// `panel_focused` are still the things the router and the renderer read,
+    /// and they still cannot both be true — [`App::apply_focus`] writes them
+    /// from this, and this is where the order lives.
+    pub focus: Vec<Layer>,
     /// What a keypress made outside chat has to say for itself, if anything.
     ///
     /// See [`Flash`]. `None` means the last one has expired or nothing has
@@ -1291,6 +1335,7 @@ impl App {
             back_stack: Vec::new(),
             lists: vec![ListState::default(); Workspace::ALL.len()],
             overlay: Overlay::None,
+            focus: Vec::new(),
             flash: None,
             graph: GraphView::new(String::new()),
             busy: false,
@@ -1564,14 +1609,14 @@ impl App {
     /// projects key already had: a key whose promise is *show me the projects*
     /// must mean that from either state, and a shut panel is the state every
     /// user starts in.
+    ///
+    /// A rail already on screen stays on screen and keeps its cursor. It only
+    /// gives up the keyboard, and it takes it back the moment the catalog is
+    /// closed — see [`App::focus`].
     pub fn focus_catalog(&mut self) {
         self.panel = true;
         self.projects_open = true;
-        self.panel_focused = true;
-        // Two things cannot hold the bare keys at once. The router checks the
-        // rail first, so a rail left focused would swallow every key meant for
-        // the catalog and the catalog would look inert.
-        self.rail.focused = false;
+        self.take_keyboard(Layer::Catalog);
         if self.project_selected.is_none() {
             self.project_selected = self.catalog().first().map(|p| p.id.clone());
         }
@@ -1584,9 +1629,153 @@ impl App {
     /// as well, and a key that reached in to collapse one box has no business
     /// taking the other two off screen; `Shift-Tab` is the one that owns the
     /// whole panel.
+    ///
+    /// "Back" is whatever was underneath rather than the chat by definition: a
+    /// rail that was open before the catalog was is still open now, and it gets
+    /// the keyboard.
     pub fn close_catalog(&mut self) {
-        self.panel_focused = false;
         self.projects_open = false;
+        self.release_keyboard(Layer::Catalog);
+    }
+
+    // ---- which view has the keyboard -------------------------------------
+
+    /// Whether this view is on screen at all.
+    ///
+    /// Drawn, not focused. A rail can be visible without holding anything —
+    /// [`RailState::auto_open`] puts it there when a blocker arrives — and the
+    /// catalog needs both its own box open and the panel that carries it.
+    pub fn is_drawn(&self, layer: Layer) -> bool {
+        match layer {
+            Layer::Rail => self.rail.shown,
+            Layer::Catalog => self.panel && self.projects_open,
+        }
+    }
+
+    /// The view that gets the keyboard when the one holding it closes, or
+    /// `None` when the answer is the screen underneath both.
+    ///
+    /// Read by the keybar, which has to name where `Esc` actually lands: a bar
+    /// that says "back to the chat" beside a key that goes back to the projects
+    /// is the one thing a keybar must never do.
+    pub fn beneath_focus(&self) -> Option<Layer> {
+        let depth = self.focus.len();
+        (depth >= 2).then(|| self.focus[depth - 2])
+    }
+
+    /// Whether this view is holding the bare keys right now.
+    pub fn holds_keyboard(&self, layer: Layer) -> bool {
+        match layer {
+            Layer::Rail => self.rail.focused,
+            Layer::Catalog => self.panel_focused,
+        }
+    }
+
+    /// Hand this view the keyboard, on top of whatever already had it.
+    ///
+    /// The one underneath keeps everything except the keys — it stays drawn,
+    /// keeps its cursor, and is handed the keys back when the view above it
+    /// closes.
+    pub fn take_keyboard(&mut self, layer: Layer) {
+        // Before the push, so a holder that was set outside this file is
+        // adopted *under* the view being opened rather than over it.
+        self.sync_focus();
+        self.focus.retain(|open| *open != layer);
+        self.focus.push(layer);
+        self.apply_focus();
+    }
+
+    /// Take this view off the stack, and give the keyboard to whatever is left.
+    ///
+    /// Called when a view closes, by whichever key closed it. It does not close
+    /// anything itself: the caller has already put the view away, and this is
+    /// the part that decides where the keyboard goes next.
+    pub fn release_keyboard(&mut self, layer: Layer) {
+        self.focus.retain(|open| *open != layer);
+        self.apply_focus();
+    }
+
+    /// Reconcile the stack with what is actually on screen.
+    ///
+    /// Two jobs, both of them repairs. A view that has been closed by something
+    /// that did not go through [`App::release_keyboard`] — `Shift-Tab` taking
+    /// the whole panel away with the catalog inside it — comes off the stack
+    /// here. And a view that was focused directly, which the tests do and which
+    /// keeps this from being a second source of truth that can disagree with
+    /// the first, is adopted onto the top of it.
+    ///
+    /// Safe to call whenever anything opens or closes, which is what it is for.
+    pub fn sync_focus(&mut self) {
+        for layer in Layer::ALL {
+            if self.holds_keyboard(layer) && !self.focus.contains(&layer) {
+                self.focus.push(layer);
+            }
+        }
+        let drawn: Vec<Layer> = Layer::ALL
+            .into_iter()
+            .filter(|layer| self.is_drawn(*layer))
+            .collect();
+        self.focus.retain(|open| drawn.contains(open));
+        self.apply_focus();
+    }
+
+    /// Write the stack out to the two flags the router and the renderer read.
+    ///
+    /// The top of the stack holds the keys and nothing else does, which is the
+    /// invariant every bare letter in this program depends on: the digits are
+    /// the rail's only while the rail is the thing highlighted and named on the
+    /// keybar.
+    fn apply_focus(&mut self) {
+        let top = self.focus.last().copied();
+        self.rail.focused = top == Some(Layer::Rail);
+        self.panel_focused = top == Some(Layer::Catalog);
+    }
+
+    /// `Ctrl-N`: open the rail and take the keyboard, or put it away again.
+    ///
+    /// The stack-keeping half of [`RailState::toggle`], which owns the
+    /// three states themselves.
+    pub fn toggle_rail(&mut self) {
+        let ids = self.card_ids();
+        self.rail.toggle(&ids);
+        if self.rail.focused {
+            self.take_keyboard(Layer::Rail);
+        } else {
+            self.release_keyboard(Layer::Rail);
+        }
+    }
+
+    /// `Ctrl-R`: put the rail on screen, or take it off.
+    ///
+    /// A visibility toggle and not a focus one, so showing the rail this way
+    /// leaves the keyboard where it is. Hiding it hands the keyboard on to
+    /// whatever was underneath.
+    pub fn toggle_rail_shown(&mut self) {
+        if self.rail.shown {
+            self.rail.close();
+            self.release_keyboard(Layer::Rail);
+        } else {
+            self.rail.shown = true;
+            self.sync_focus();
+        }
+    }
+
+    /// A pointer landing in the rail, which says the same thing `Ctrl-N` does.
+    pub fn focus_rail(&mut self) {
+        self.rail.shown = true;
+        self.take_keyboard(Layer::Rail);
+    }
+
+    /// `Esc` while the rail has the keyboard: back exactly one level.
+    ///
+    /// [`RailState::back`] owns the levels — the filter, then the
+    /// expanded card, then the rail itself. This is the part that notices the
+    /// rail has gone and passes the keyboard on.
+    pub fn rail_back(&mut self) {
+        self.rail.back();
+        if !self.rail.shown {
+            self.release_keyboard(Layer::Rail);
+        }
     }
 
     /// Keep the catalog's cursor on a project that still exists.
