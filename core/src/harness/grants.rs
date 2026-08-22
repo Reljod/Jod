@@ -198,7 +198,7 @@ mod tests {
             Box::new(ClaudeCode::default()) as Box<dyn Harness>,
             Box::new(Agy::default()) as Box<dyn Harness>,
         ] {
-            let args = flat(&harness.args(&request), "do the thing");
+            let args = flat(&harness.args(&request, None), "do the thing");
             let grant = granted_at_launch(&args, &request.cwd);
             assert_eq!(
                 grant.confinement,
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn a_bypass_run_is_not_confined_by_the_directories_it_was_given() {
         let request = req(&["/repo"], PermissionPolicy::Bypass);
-        let args = flat(&ClaudeCode::default().args(&request), "do the thing");
+        let args = flat(&ClaudeCode::default().args(&request, None), "do the thing");
         assert_eq!(
             granted_at_launch(&args, &request.cwd).confinement,
             Confinement::Unbounded,
@@ -243,7 +243,7 @@ mod tests {
             Box::new(Agy::default()) as Box<dyn Harness>,
         ] {
             let request = req(&["/repo"], PermissionPolicy::Plan);
-            let args = flat(&harness.args(&request), "do the thing");
+            let args = flat(&harness.args(&request, None), "do the thing");
             let grant = granted_at_launch(&args, &request.cwd);
             assert_eq!(
                 grant.confinement,

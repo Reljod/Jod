@@ -478,7 +478,7 @@ Observed: `jod ls`, `jod work ls`, `jod schedule ls`, `jod goal ls` and
 Fix: accept `ls` on `team`, keeping `list` as an alias so nothing breaks.
 
 ## L10. `cargo test` migrates the developer's real `~/.jod/jod.db`
-Status: **open** · Owner: — · Severity: high
+Status: **open** · Owner: l10-jod-home · Severity: high
 
 Every file in this directory says its checks were run against an isolated
 `JOD_HOME`, never `~/.jod`. The test suite does not keep that promise.
