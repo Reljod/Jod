@@ -985,7 +985,32 @@ in the store, and a `delegations` row of kind `ask_manager`. Today you get an
 ---
 
 ## X14. The doorman decides correctly, main is not interrupted, and the message is stranded in `reviewing` for ever
-Status: **open** · Severity: critical · Owner: —
+Status: **open — stop path fixed by #262; the stranding is X15 and X16** · Severity: critical · Owner: —
+
+**A naming note, because the tool this finding names does not exist on main.**
+`interrupt_main` is on `feat/interruptible-main` only — `git grep` for it
+against `origin/main` returns nothing. Everything below was observed on that
+branch, where the doorman really did call a tool by that name. Read outside that
+branch, the accurate phrasing is "the doorman's stop path was inert", which is
+what was actually seen.
+
+**And the mechanism given below was wrong; the real one is a window.** The text
+said `kill_agent` failed because the process serving the tool call had no
+in-memory registry of main. The registry part is right and the reason is not:
+`Tool::stop_agent` (`core/src/mcp.rs:2165`) *does* call `rehydrate(REHYDRATE)`
+first. `REHYDRATE` is `200`, and `Store::runs(limit)` is
+`ORDER BY created_at_ms DESC LIMIT ?1` — so rehydration loads the two hundred
+**most recent** runs. The main chat is the longest-lived thing on the box and
+every new run pushes it further down, until it drops out of that window
+entirely. That is why a correct id for a live run came back
+`no agent with id 8a93350d…` five times.
+
+Fixed and merged as **#262**. It also means the one-line "rehydrate inside the
+MCP server" fix that was considered and rejected would have changed nothing,
+because the server already rehydrates.
+
+This mechanism has a second victim that had nothing to do with doormen: see
+**X17**.
 
 This is the behaviour Reljod asked for in his own words — *"an assistant read
 queue messages and determining when it will interrupt the main"* — and end to
@@ -1311,6 +1336,61 @@ thread as one still waiting, and the comment's reasoning about not moving
 Check: queue a message into a busy main chat, let a doorman claim it, force a
 compaction before the doorman finishes, and read the row's `conversation_id`.
 Green is the new conversation's id, and the row eventually leaving `reviewing`.
+
+---
+
+## X17. A `replace` schedule fails to stop the run it is replacing, records that it did, and starts a second one
+Status: **open — belongs in `tasks/40-scheduling.md`, filed here to avoid two owners on one file** · Severity: high · Owner: —
+
+Not found by testing scheduling. It fell out of X14's mechanism, and it is
+listed here rather than in the scheduling area file only because that file has
+another owner and one owner per path is the rule. Whoever sweeps should move it.
+
+A schedule with the `replace` misfire policy is meant to stop the previous run
+before starting the next, so the two never overlap. `Ticker` does this
+(`core/src/ticker.rs:983`):
+
+```rust
+Decision::Replace { due_at_ms, stop } => {
+    // Stop first, so the two never overlap even briefly — the whole
+    // point of choosing `replace` over `allow`.
+    let _ = self.jod.kill_agent(stop).await;
+```
+
+`let _ =` discards the result. It then records the fire as
+`FireOutcome::Replaced` with `detail: "stopped {stop}"`, and spawns the new run
+regardless.
+
+So when `kill_agent` fails — which, before #262, it did for any run outside the
+two-hundred-most-recent window that `rehydrate` loads, and a scheduled run is
+exactly the kind of long-lived thing that falls out of it — three things happen
+at once:
+
+1. the previous run **keeps going**;
+2. the ledger says `Replaced`, `stopped <id>`, which is false;
+3. a second run starts anyway.
+
+The result is two runs where the policy exists to guarantee one, and a record
+that positively asserts the opposite. Nothing errors, and the symptom — a
+schedule quietly running twice over — is not one anybody would attribute to a
+stop that failed. It would not be found by testing scheduling, because
+scheduling behaves exactly as designed; the failure is in a call whose result is
+thrown away.
+
+**#262 removes the cause for now**, but not the swallowed error. The other
+callers of `kill_agent` were failing the same way and are worth a look for the
+same reason: `DELETE /agents/:id`, `jod kill`, and the TUI's stop key. Of those,
+only this one both discards the error *and* writes a record claiming success.
+
+**The fix is not to add a `?`.** A schedule that refuses to fire because it could
+not stop its predecessor may be worse than one that overlaps — that is a policy
+question. What is not a policy question is the ledger: if the stop failed, the
+fire must not be recorded as `Replaced` with `stopped <id>` on it. Say what
+happened, then decide whether to fire.
+
+Check: arrange a `replace` schedule whose previous run cannot be stopped, let it
+fire, and read the `fires` row. Green is a record that does not claim to have
+stopped anything, and either one run or an explicit decision to have two.
 
 ---
 
