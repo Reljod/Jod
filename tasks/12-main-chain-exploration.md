@@ -245,6 +245,121 @@ what the limit is for and why it is the number it is.
 
 ---
 
+## X5. A summariser run that fails is reported as a summary that came back empty, and it leaves you unable to change harness
+Status: **open** · Severity: high · Owner: —
+
+Switching the main chat's harness first summarises the conversation *on the
+harness you are leaving*, and hands that summary to the new one. When the
+summary is empty the switch is abandoned and the chat stays where it was. The
+reasoning for abandoning it is sound and is written down at
+`cli/src/tui/mod.rs:2849`:
+
+> A half-completed switch — new harness, no context — is strictly worse than one
+> that did not happen, because the conversation is still there and the user no
+> longer has a way back to it.
+
+Two things go wrong on top of that, and the first is the one to fix.
+
+**A failed run is not an empty summary, and saying it is misdirects the
+reader.** `finish_summary` (`cli/src/tui/mod.rs:2855`) sees only the text.
+Whatever the reason there is no text — the model declined, the provider
+returned an error, the process died — the user is told:
+
+```
+the summary came back empty, so nothing was handed over — still on OpenCode
+```
+
+"Came back empty" reads as *the model had nothing to say*, which invites you to
+try a different prompt or give up. What actually happened here was an upstream
+failure, visible two lines earlier in the transcript and nowhere in the
+explanation:
+
+```
+• UnknownError: Unexpected server error. Check server logs for details.
+✗ failed · 12s
+```
+
+Those are different faults with different remedies — one is worth retrying, the
+other is not — and the message the user is given points at neither.
+
+**And there is no way to switch anyway.** The escape hatch does not exist:
+nothing offers to cross without the context, so the conversation is pinned to
+its current harness for as long as the summariser keeps failing. That is exactly
+backwards from when you need it, because *the current harness misbehaving* is
+one of the main reasons anyone types `/harness` in the first place.
+
+**Observed twice in a row, identically.** In the live console on
+`~/.jod`, main on OpenCode with model `opencode/deepseek-v4-flash-free`:
+
+```
+/harness agy
+• AGY has no import path, so the context can only travel as prose in the prompt
+• summarising this conversation on OpenCode before handing it to AGY…
+• UnknownError: Unexpected server error. Check server logs for details.
+✗ failed · 12s
+• the summary came back empty, so nothing was handed over — still on OpenCode
+```
+
+The second attempt produced the same three lines and the same outcome. The
+status bar still read `OpenCode` throughout, correctly.
+
+Worth saying plainly: **the refusal itself is right and should stay.** What
+needs changing is that a failed run should say it failed, and that there should
+be some way — a confirmation, a flag, an offer in the notice itself — to cross
+without the context when the person has been told what they are giving up.
+
+Check: make the summariser fail (a model id the provider rejects is enough) and
+run `/harness <other>`. Green is a notice that names the failure rather than
+calling it empty, and an offer to cross without the context.
+
+---
+
+## X6. The roles panel offers a row the wrong harness's models, silently, and this is reachable in one keystroke
+Status: **open — fix is PR #237** · Severity: high · Owner: —
+
+Filed as a live reproduction rather than as a new fault: PR #237 fixes it. It
+is recorded here because it was reproduced against a build **without** #237, in
+the ordinary console on `~/.jod`, and because the reproduction turned up one
+detail the pull request does not mention.
+
+With the chat box on OpenCode, set the `main` row's harness to `agy`, then press
+`m`:
+
+```
+main — model
+▸ —                   leave it to the caller, the conversation, and then the harness itself
+  opencode/big-pickle opencode
+  opencode/claude-fa… opencode
+  …
+  opencode/gpt-5.2-c… opencode
+```
+
+Every name offered is an OpenCode name; the row runs on AGY. None of them can
+work. There is no free-text entry on that field, so AGY's own spelling —
+`gemini-3.7-flash-medium`, which is what Reljod asked main to run — is not
+selectable at all.
+
+**The detail worth adding: no caveat line appeared.** The panel is supposed to
+say in small type which harness the list belongs to
+(`cli/src/tui/ui.rs:5512`). On a 200x50 terminal, with the list long enough to
+fill the panel, nothing of the sort was visible — the list simply ran to the
+bottom edge and the footer showed only the key hints. So in practice the wrong
+list is presented with no warning at all, which is worse than the pull request's
+own description of the bug, and worth checking is genuinely fixed rather than
+merely made accurate.
+
+**This makes #237 a prerequisite for Reljod's requested configuration, not a
+nicety.** Main on AGY flash 3.7 and the assistant on AGY gpt-oss-120b cannot be
+set through the supported path without it. The four rows used for this
+exploration were written straight into the `roles` table instead, which is
+deliberately not a path a user could reproduce.
+
+Check: `/harness agy` in the chat box, then `/roles`, set a row to `claude_code`
+and press `m`. Green is Claude Code's names on that row while the console is on
+AGY.
+
+---
+
 ## Checked and not a bug
 
 Recorded because both looked like findings and both cost real time to
@@ -279,3 +394,8 @@ twice in one afternoon.
 | S03 | `jod main --wait`, build a real `wordfreq` tool with files | manager plans, engineer writes files under the given cwd | **fail** — delegation recorded in `~/.jod`, engineer ran in `/home/reljod`, nothing in the test store. Filed as X1 |
 | S04 | `jod main --wait "Reply with exactly the word: pong"` | main answers itself, returns promptly | **pass** — "pong", exit 0, seconds |
 | — | Main's very first turn on a fresh store | honours the `main` role row | **pass** — answered as Gemini 3.7 Flash |
+| S05 | `/roles` in the live console | panel opens, six roles, main at the root | **pass** — tree renders `main`, `├ scratch`, `└ manager`, `└ engineer`, `assistant`, `housekeeping` |
+| S06 | Set `main`'s harness to `agy` from the panel | value sticks, row marked configured | **pass** — `●` on the row, header moved to "1 of 6 set". A row showing built-in defaults stays `○`, which is the right distinction and reads clearly |
+| S07 | Press `m` on that agy row | AGY's model names | **fail** — OpenCode's names, no caveat shown. Filed as X6 |
+| S08 | `/harness agy` in the chat box | chat crosses to AGY | **fail** — summariser errored, reported as an empty summary, stayed on OpenCode. Filed as X5 |
+| S09 | `/harness agy` again | same or a clearer error | **fail** — reproduced identically |
