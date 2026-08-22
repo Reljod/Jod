@@ -904,6 +904,15 @@ in a state that nothing revisits, while the console simultaneously claims *"an
 assistant is reading it"* and *"doorman … failed"*. Those two lines were on
 screen at the same time and they cannot both be acted on.
 
+**Nothing recovers it.** Checked deliberately rather than assumed. Over the
+following minutes: exactly one doorman run was ever created and it was never
+retried; main's turn ended and the delivery did not drain; Esc was pressed and
+the turn was interrupted, and it still did not drain. Ten minutes after it was
+typed the row is unchanged — `state = reviewing`, `run_id = NULL`,
+`reviewed_at_ms = NULL` — and the status bar still reads `1 queued`. The only
+thing that clears the counter is presumably restarting the console, which loses
+the message rather than delivering it.
+
 **The stranding is the part to fix first, and it is structural rather than
 model-dependent.** E2.S3 makes "under review" a state so that only one doorman
 runs at a time, which is right. But nothing releases the state when the doorman
