@@ -579,3 +579,86 @@ missing (P5) — not run, since both `open_work` and `claim_worktree` need a
 work/session context this task didn't set up, and the MCP tools weren't
 driven directly (would need a live agent holding an MCP connection, which is
 a bigger live-model cost than the two round trips already spent above).
+
+---
+
+## Part 3 — left open by the manager-plans-engineers-execute work (#228)
+
+### M1. Six subsystems shipped green and unable to run
+Status: **fixed in #228** · Severity was: high
+
+Kept because the pattern is the finding, not any one instance, and it will
+recur. Each of these was tested, passing, and inert:
+
+| Subsystem | Why nothing happened |
+|---|---|
+| `Store::stack_for_work` | joined `conversations.task_id`; nothing wrote it |
+| `leases::refuse_a_collision_in` | same column, so every share was waved through |
+| `prs::auto_pr_instruction` | no production caller — no pull request was ever opened |
+| `Store::enqueue_delivery` | no production caller |
+| `remember` | `ToolAccess::Orchestrate`, but managers spawn at `Delegate` |
+| `orchestrator::roots_lines` | told `ReadOnly` sessions to call `claim_worktree` |
+
+**Every one was found by an engineer reading a colleague's file. None by a
+test.** They share a shape: the test builds the state a production writer was
+supposed to produce, asserts on it, and passes, while the writer does not
+exist. See [`docs/decisions.md`](../docs/decisions.md).
+
+The two habits that fall out are cheap. Test *through* the production writer —
+build a board by calling `plan_work`, not by inserting rows. And when a column,
+function or tool is added, grep for its **writer** before believing its reader.
+
+### M2. Test helpers that build states production cannot produce
+Status: **open** · Severity: low · Owner: unclaimed
+
+The residue of M1. Known instances, none load-bearing:
+
+- `core/src/prs.rs`, the shared-worktree ordering test sets `lease_id` by raw
+  `UPDATE`. The branch route covers the real path, so the ordering it checks is
+  genuinely covered — but the setup implies a route it does not prove. Reported
+  by the engineer who wrote it.
+- `core/src/mcp.rs`, the stack-ordering test writes `conversations.task_id`
+  directly rather than through `open_work`. There is now a production writer
+  (`spawn_onto_first_task`), so this one can simply use it.
+
+Neither is a live fault. Both are the shape that hid six real ones, which is
+the reason to close them rather than the severity.
+
+### M3. `additionalProperties` is absent from every tool schema
+Status: **open** · Severity: medium · Owner: unclaimed
+
+`obj()` (`core/src/mcp.rs`) emits `{type, properties, required}` and never
+`additionalProperties: false`, so an argument a tool does not know is accepted,
+ignored, and answered with a success.
+
+This bit during #228: `manager_preamble` described `open_work`'s `placement`
+argument before the argument existed, and a manager placing an engineer
+read-only was told it worked and got an ordinary engineer. That specific gap is
+closed, but the silence is general and applies to every tool in the catalogue.
+
+Not fixed in #228 deliberately. Switching it on is one line and changes the
+answer a model gets for every stray argument across every tool, from a success
+to a hard error, so it wants its own change and its own thinking about the
+blast radius.
+
+### M4. Fifteen git-dependent tests report green without running
+Status: **open** · Severity: low · Owner: unclaimed
+
+`let Some(repo) = fixture_repo(..) else { return; }` appears sixteen times in
+`core/src/leases.rs` and fifteen of them return silently when git is absent.
+Pre-existing convention, followed by the new tests rather than invented by
+them.
+
+Not a live fault — git is present here and on CI, so they run. It means "green"
+does not distinguish "ran and passed" from "never ran" for that half of the
+file, which is worth knowing before trusting the suite on an unfamiliar
+machine.
+
+### M5. A delivery to a session that cannot be resumed queues for ever
+Status: **open** · Severity: low · Owner: unclaimed
+
+`Ticker::tick_deliveries` holds a delivery when `resume_for` does not return
+`Resume::Session`, and nothing sweeps or reports one that stays queued — the
+only trace is a per-tick `held` counter nobody reads. In practice a manager has
+a session by the time it has spawned an engineer, so this is latent. It has no
+floor.
