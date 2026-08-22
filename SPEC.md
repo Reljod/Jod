@@ -216,7 +216,7 @@ wording has to survive all of them.
 
 ## E2.S1 Typing into a busy chat writes to the store
 
-In `cli/src/tui/mod.rs:5993`, replace `app.queue(prompt)` with a new
+In `cli/src/tui/mod.rs:5995`, replace `app.queue(prompt)` with a new
 `Action::Enqueue { conversation_id, text }` whose handler calls
 `Store::enqueue_delivery` with `Kind::Human`. Delete `App::queued`,
 `App::queue`, `App::next_queued` and the drain at turn end — `tick_deliveries`
