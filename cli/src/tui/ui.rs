@@ -24,7 +24,7 @@ use jod_core::PermissionPolicy;
 
 use super::app::{
     absolute, plural, short_duration, since, until, AgentLine, App, Dictation, Entry, JobState,
-    Overlay, Step,
+    Layer, Overlay, Step,
 };
 use super::data::{Outcome, Source};
 use super::diff;
@@ -2566,16 +2566,18 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "typing searches the rail".to_string(),
             "⏎ keeps it · Esc clears it",
         ),
-        Overlay::None if app.rail.focused && app.rail.shown => {
-            (keys::rail_keybar(area.width), keys::RAIL_EXIT)
-        }
+        Overlay::None if app.rail.focused && app.rail.shown => (
+            keys::rail_keybar(area.width),
+            keys::exit_beneath(Layer::Rail, app.beneath_focus()),
+        ),
         // The catalog, on the same terms and in the same place in the order:
         // below the rail, because that is the order the router dispatches in,
         // and a bar that named a layer the router checks second would print
         // keys that are not the ones in force.
-        Overlay::None if app.panel_focused && app.panel && app.projects_open => {
-            (keys::catalog_keybar(area.width), keys::CATALOG_EXIT)
-        }
+        Overlay::None if app.panel_focused && app.panel && app.projects_open => (
+            keys::catalog_keybar(area.width),
+            keys::exit_beneath(Layer::Catalog, app.beneath_focus()),
+        ),
         Overlay::None if app.here().editing_filter => (
             "typing filters this list".to_string(),
             "⏎ keeps it · Esc clears it",

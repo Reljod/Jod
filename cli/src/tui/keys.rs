@@ -142,6 +142,7 @@
 #[cfg(test)]
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use super::app::Layer;
 use super::workspace::Workspace;
 
 /// One binding, as it appears on the keybar and in the `?` overlay.
@@ -502,6 +503,14 @@ pub const RAIL: &[Key] = &[
 /// What the rail's keybar says on its right-hand half.
 pub const RAIL_EXIT: &str = "Esc back to the chat · ? keys";
 
+/// The same, for a rail that was opened over the catalog.
+///
+/// `Esc` closes the newest view first and hands the keyboard to whatever was
+/// open underneath it, so from here it lands on the projects rather than on the
+/// chat. A keybar that named the wrong destination would be worse than naming
+/// none — see [`super::app::App::focus`].
+pub const RAIL_EXIT_TO_CATALOG: &str = "Esc back to the projects · ? keys";
+
 /// The project catalog's own verbs, in force only while it has the keyboard —
 /// which `Ctrl-P`, or a click on the box, is what gives it.
 ///
@@ -524,6 +533,24 @@ pub const CATALOG: &[Key] = &[
 
 /// What the catalog's keybar says on its right-hand half.
 pub const CATALOG_EXIT: &str = "Esc back to the chat · ? keys";
+
+/// The same, for a catalog that was opened over the rail. See
+/// [`RAIL_EXIT_TO_CATALOG`], which is the same rule the other way around.
+pub const CATALOG_EXIT_TO_RAIL: &str = "Esc back to the cards · ? keys";
+
+/// What `Esc` says it does, given what is open underneath the view that has the
+/// keyboard.
+///
+/// One function for both views, because there is one rule: `Esc` closes the
+/// newest thing and the bar names whatever that uncovers.
+pub fn exit_beneath(here: Layer, beneath: Option<Layer>) -> &'static str {
+    match (here, beneath) {
+        (Layer::Rail, Some(Layer::Catalog)) => RAIL_EXIT_TO_CATALOG,
+        (Layer::Rail, _) => RAIL_EXIT,
+        (Layer::Catalog, Some(Layer::Rail)) => CATALOG_EXIT_TO_RAIL,
+        (Layer::Catalog, _) => CATALOG_EXIT,
+    }
+}
 
 /// The footer printed inside the expanded card's border. Same relationship to
 /// [`RAIL`] that [`footer`] has to [`local`], and fitted the same way at the

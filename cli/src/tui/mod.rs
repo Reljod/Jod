@@ -3209,10 +3209,9 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
             app.panel = !app.panel;
             // Closing the panel hands the keyboard back with it, the way hiding
             // the rail does — otherwise the bare keys stay the catalog's with no
-            // catalog on screen to explain them.
-            if !app.panel {
-                app.panel_focused = false;
-            }
+            // catalog on screen to explain them. Back to a rail that was open
+            // underneath, if there is one, and to the chat otherwise.
+            app.sync_focus();
             return None;
         }
         KeyCode::Tab if command::completions(&app.input, app).is_empty() => {
@@ -3233,9 +3232,12 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
     }
     // The catalog, on the same terms and for the same reason: drawn beside every
     // screen, so it is above both layers, and it holds the bare keys only once
-    // `Ctrl-P` or a click has handed them over. Below the rail because a card
-    // that is blocking a run is more pressing than a list of repositories, and
-    // both cannot hold the keyboard at once.
+    // `Ctrl-P` or a click has handed them over.
+    //
+    // Which of the two is tested first decides nothing: they cannot both be
+    // focused, because `App::apply_focus` gives the keys to the newest view
+    // that is open and to no other. That is what makes `Esc` walk back out in
+    // the reverse of the order things were opened — see `App::focus`.
     if app.panel_focused && app.panel && app.projects_open {
         return on_catalog_key(app, key);
     }
@@ -3281,7 +3283,7 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     let ids = app.card_ids();
     match key.code {
         KeyCode::Esc => {
-            app.rail.back();
+            app.rail_back();
             None
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -3490,14 +3492,12 @@ fn on_click(
     if !hits.holds(column, row) {
         return None;
     }
-    // A pointer in the rail takes the keyboard, so it must take it from the
-    // catalog as well — see `App::focus_catalog`.
-    app.panel_focused = false;
     // A pointer in the rail is the same statement as `Ctrl-N`: the rail has the
     // keyboard now. Without this the digits would still be the composer's, and
-    // the card that was just tapped could not be answered by typing.
-    app.rail.shown = true;
-    app.rail.focused = true;
+    // the card that was just tapped could not be answered by typing. It takes
+    // the keys from the catalog if the catalog had them, and gives them back
+    // when the rail closes — see `App::focus`.
+    app.focus_rail();
 
     if let Some((id, at)) = hits.option_at(column, row) {
         let card = app.cards.iter().find(|c| c.id == id)?;
@@ -3714,11 +3714,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // cost you the keyboard. Hiding it also hands the keyboard back, or the
         // bare keys would still be the rail's with no rail on screen.
         KeyCode::Char('r') if either => {
-            if app.rail.shown {
-                app.rail.close();
-            } else {
-                app.rail.shown = true;
-            }
+            app.toggle_rail_shown();
             handled(None)
         }
         // Open the rail, take the keyboard, and put it away again on the second
@@ -3734,13 +3730,10 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // the rail's keybar never printed. Stepping is what `↑↓`/`jk` are for
         // once the rail has the keyboard, and they were already there.
         KeyCode::Char('n') if either => {
-            let ids = app.card_ids();
-            app.rail.toggle(&ids);
             // The other half of the mutual exclusion `App::focus_catalog`
-            // keeps. Only one thing may hold the bare keys.
-            if app.rail.focused {
-                app.panel_focused = false;
-            }
+            // keeps. Only one thing may hold the bare keys, and it is the last
+            // one opened — `App::toggle_rail` is where that is worked out.
+            app.toggle_rail();
             handled(None)
         }
         // Copy the last reply. The terminal's own selection stops working the
@@ -15766,6 +15759,180 @@ mod tests {
         ctrl(&mut app, KeyCode::Char('p'));
         assert!(app.panel_focused);
         assert!(!app.rail.focused, "the catalog took the keys and the rail kept them");
+    }
+
+    /// A rail and a catalog on screen at once, opened in that order.
+    fn with_both_views() -> App {
+        let mut app = with_projects();
+        app.cards = vec![a_card(1, "which port for the API?", true, &["8080"])];
+        app.reconcile_rail();
+        ctrl(&mut app, KeyCode::Char('n'));
+        ctrl(&mut app, KeyCode::Char('p'));
+        app
+    }
+
+    /// The whole rule, in the order somebody actually presses the keys: open a
+    /// view, open another over it, and `Esc` walks back out through them
+    /// newest first.
+    ///
+    /// The catalog used to close straight back to the chat, because closing it
+    /// only knew how to un-focus itself. The rail stayed drawn beside a chat
+    /// that had the keyboard, and the only way back into it was a chord that
+    /// nothing on screen named.
+    #[test]
+    fn esc_closes_the_views_in_the_reverse_of_the_order_they_were_opened() {
+        let mut app = with_projects();
+        app.cards = vec![a_card(1, "which port for the API?", true, &["8080"])];
+        app.reconcile_rail();
+        type_line(&mut app, "half a sentence");
+        ctrl(&mut app, KeyCode::Char('n'));
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel_focused, "the catalog was opened last, so it has the keys");
+        assert!(app.rail.shown, "and the rail is still on screen underneath it");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.projects_open, "the newest view closed first");
+        assert!(
+            app.rail.focused && app.rail.shown,
+            "and the rail underneath it took the keyboard back"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.shown, "the second Esc closed the rail");
+        assert!(!app.rail.focused && !app.panel_focused, "and nothing is holding the keys");
+
+        assert_eq!(app.input, "half a sentence", "walking out cost the sentence");
+        type_line(&mut app, "!");
+        assert_eq!(app.input, "half a sentence!", "the letters are the chat's again");
+    }
+
+    /// The same rule with the two views opened the other way round, because a
+    /// stack that only worked in one order would be the old fixed priority
+    /// wearing a different name.
+    #[test]
+    fn a_rail_opened_over_the_catalog_hands_the_keyboard_back_to_it() {
+        let mut app = with_projects();
+        app.cards = vec![a_card(1, "which port for the API?", true, &["8080"])];
+        app.reconcile_rail();
+
+        ctrl(&mut app, KeyCode::Char('p'));
+        ctrl(&mut app, KeyCode::Char('n'));
+        assert!(app.rail.focused, "the rail was opened last, so it has the keys");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.shown, "the newest view closed first");
+        assert!(
+            app.panel_focused && app.projects_open,
+            "and the catalog underneath it took the keyboard back"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.projects_open, "the second Esc closed the catalog");
+    }
+
+    /// Closing the view *underneath* leaves the top one exactly where it was.
+    ///
+    /// `Ctrl-R` hides the rail from anywhere, so it can reach past the catalog
+    /// that has the keyboard. What it must not do is take the keyboard with it:
+    /// the catalog is still open and still the newest thing on screen.
+    #[test]
+    fn hiding_the_rail_underneath_leaves_the_catalog_holding_the_keys() {
+        let mut app = with_both_views();
+
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert!(!app.rail.shown, "Ctrl-R hid the rail");
+        assert!(app.panel_focused, "and the catalog kept the keyboard");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.projects_open);
+        assert!(
+            !app.rail.focused,
+            "a rail that is no longer on screen must not be handed the keys"
+        );
+    }
+
+    /// Shift-Tab takes the whole panel away, catalog included, so it is one
+    /// more way for the top view to close — and the rail underneath gets the
+    /// keyboard exactly as it would from `Esc`.
+    #[test]
+    fn taking_the_panel_away_hands_the_keyboard_to_a_rail_underneath() {
+        let mut app = with_both_views();
+
+        press(&mut app, KeyCode::BackTab);
+        assert!(!app.panel, "Shift-Tab shut the panel");
+        assert!(!app.panel_focused, "so the catalog cannot still hold the keys");
+        assert!(app.rail.focused && app.rail.shown, "the rail underneath took them");
+    }
+
+    /// The keybar names where `Esc` actually lands, which is a different place
+    /// depending on what is open underneath.
+    #[test]
+    fn the_keybar_says_which_view_esc_goes_back_to() {
+        let mut app = with_both_views();
+        assert_eq!(
+            keys::exit_beneath(app::Layer::Catalog, app.beneath_focus()),
+            keys::CATALOG_EXIT_TO_RAIL,
+            "the catalog was opened over the rail"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            keys::exit_beneath(app::Layer::Rail, app.beneath_focus()),
+            keys::RAIL_EXIT,
+            "with the catalog gone the rail goes back to the chat"
+        );
+    }
+
+    /// A rail opened *over* the catalog says the other thing.
+    #[test]
+    fn the_rails_keybar_points_at_the_catalog_it_was_opened_over() {
+        let mut app = with_projects();
+        app.cards = vec![a_card(1, "which port for the API?", true, &["8080"])];
+        app.reconcile_rail();
+        ctrl(&mut app, KeyCode::Char('p'));
+        ctrl(&mut app, KeyCode::Char('n'));
+
+        assert_eq!(
+            keys::exit_beneath(app::Layer::Rail, app.beneath_focus()),
+            keys::RAIL_EXIT_TO_CATALOG
+        );
+    }
+
+    /// The rail's own levels come first. `Esc` on an expanded card collapses it
+    /// rather than closing the rail, so a nested view is not a way to skip the
+    /// levels the rail already had.
+    #[test]
+    fn the_rails_own_levels_still_come_before_the_view_underneath() {
+        let mut app = with_projects();
+        app.cards = vec![a_card(1, "which port for the API?", true, &["8080"])];
+        app.reconcile_rail();
+        ctrl(&mut app, KeyCode::Char('p'));
+        ctrl(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.rail.expanded);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.expanded, "the card collapsed");
+        assert!(app.rail.focused && app.rail.shown, "and the rail is still the rail");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.shown);
+        assert!(app.panel_focused, "now the catalog underneath has the keys");
+    }
+
+    /// An overlay is always the newest thing on screen, so it closes back onto
+    /// whichever view had the keyboard rather than onto the chat.
+    #[test]
+    fn an_overlay_closes_back_onto_the_view_that_opened_it() {
+        let mut app = with_both_views();
+
+        press(&mut app, KeyCode::Char('?'));
+        assert!(matches!(app.overlay, Overlay::Keymap), "the catalog opened the keymap");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.overlay.is_open());
+        assert!(app.panel_focused, "and the catalog still has the keys");
+        assert!(app.rail.shown, "with the rail still open underneath it");
     }
 
     /// A tap on a project row puts the cursor on it and stops there. Entering a
