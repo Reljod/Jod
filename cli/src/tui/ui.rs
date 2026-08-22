@@ -49,6 +49,11 @@ const MUTED: Color = Color::DarkGray;
 const BAD: Color = Color::Red;
 const GOOD: Color = Color::Green;
 const WARN: Color = Color::Yellow;
+/// A path, an identifier, a command — the spans of an answer that name
+/// something you could go and look at. It shares cyan with the user's own
+/// colour, which the two never collide over: one is a prompt at the left edge
+/// and the other is a word inside a sentence.
+const CODE: Color = Color::Cyan;
 
 /// `NO_COLOR` is not optional: software that adds ANSI colour by default has to
 /// check for it. Read once rather than per span, because `draw()` may not do
@@ -5937,30 +5942,7 @@ pub(super) fn run_glyph(status: &str) -> &'static str {
 
 fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
     let width = area.width.saturating_sub(2).max(1);
-    let mut lines: Vec<Line> = Vec::new();
-    // A run of folded steps is replaced by one line saying how many there were
-    // and which key brings them back, so a transcript never quietly loses
-    // something. The count is of entries rather than of drawn lines: what the
-    // reader is choosing to open is a number of steps, not a number of rows.
-    let mut folded = 0usize;
-    for (i, entry) in app.transcript.iter().enumerate() {
-        if app.hidden(i) {
-            folded += 1;
-            continue;
-        }
-        lines.extend(fold_marker(app, folded, width));
-        folded = 0;
-        lines.extend(render(
-            entry,
-            &Ctx {
-                width,
-                expanded: app.expand_details,
-                frame: app.spinner(),
-                agents: &app.agents,
-            },
-        ));
-    }
-    lines.extend(fold_marker(app, folded, width));
+    let lines = transcript_lines(app, width);
 
     let viewport = area.height.saturating_sub(2).max(1) as usize;
     // `scroll` counts up from the bottom, but Paragraph scrolls down from the
@@ -5977,13 +5959,20 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
     // has no run of its own until it is given one, so the run-based name left
     // it titled plainly `jod` — the one screen where knowing which project you
     // are typing into matters most.
+    //
+    // The kind of chat leads the title, because the three kinds are read
+    // differently and used to be indistinguishable. Watching a delegated run is
+    // somebody else's conversation and typing into it is not how you reply to
+    // it; a project manager is where a project's standing instructions live;
+    // main is the one that is yours. All three said `jod · something`, so the
+    // only way to know which you were in was to remember how you got there.
     let watching = app
         .watching
         .as_deref()
         .and_then(|id| app.agents.iter().find(|a| a.id == id))
-        .map(|a| format!(" jod · {} ", a.name))
-        .or_else(|| app.where_you_are().map(|where_| format!(" jod · {where_} ")))
-        .unwrap_or_else(|| " jod ".to_string());
+        .map(|a| format!(" watching · {} ", a.name))
+        .or_else(|| app.where_you_are().map(|where_| format!(" chat · {where_} ")))
+        .unwrap_or_else(|| " chat ".to_string());
     let title = if app.following() {
         watching
     } else {
@@ -6002,6 +5991,126 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
         area,
     );
     viewport
+}
+
+/// The whole transcript as styled lines, with a blank line between blocks.
+///
+/// Split out of [`draw_transcript`] so the grouping can be tested without a
+/// terminal, and because the spacing rule is the point of the function: the old
+/// loop laid every entry directly under the one before it, so a question, the
+/// six calls that answered it and the answer itself arrived as one unbroken
+/// column of text with nothing for the eye to land on.
+fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let ctx = Ctx {
+        width,
+        expanded: app.expand_details,
+        frame: app.spinner(),
+        agents: &app.agents,
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    // What the last block drawn was, so the next one knows whether it needs a
+    // line of air above it. `None` until something is drawn, because the top of
+    // the transcript is a boundary the reader can already see.
+    let mut prev: Option<Chunk> = None;
+    let mut put = |lines: &mut Vec<Line<'static>>, block: Chunk, body: Vec<Line<'static>>| {
+        if body.is_empty() {
+            return;
+        }
+        if prev.is_some_and(|p| parted(p, block)) {
+            lines.push(Line::from(""));
+        }
+        lines.extend(body);
+        prev = Some(block);
+    };
+
+    // A run of folded steps is replaced by one line saying how many there were
+    // and which key brings them back, so a transcript never quietly loses
+    // something. The count is of entries rather than of drawn lines: what the
+    // reader is choosing to open is a number of steps, not a number of rows.
+    let mut folded = 0usize;
+    for (i, entry) in app.transcript.iter().enumerate() {
+        if app.hidden(i) {
+            folded += 1;
+            continue;
+        }
+        // The marker stands in for the steps it replaced, so it is spaced as
+        // one — a run of steps, with air above it and none between it and the
+        // calls it is drawn among.
+        put(&mut lines, Chunk::Step, fold_marker(app, folded, width));
+        folded = 0;
+        put(&mut lines, Chunk::of(entry), render(entry, &ctx));
+    }
+    put(&mut lines, Chunk::Step, fold_marker(app, folded, width));
+    lines
+}
+
+/// Which visual block an entry belongs to.
+///
+/// Grouping is by kind rather than by turn because a turn is not what anybody
+/// scans a transcript for. The question a reader is asking as they scroll is
+/// "where did it start talking again", and the answer to that is a change of
+/// kind: the calls stopped and the prose began.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Chunk {
+    /// What the user typed.
+    You,
+    /// Assistant prose.
+    Say,
+    /// Reasoning, when it is shown at all.
+    Think,
+    /// One run of steps: the tool calls of a turn, and the collapsed edits
+    /// among them.
+    Step,
+    /// A tool's output. Never parted from the call above it — a line between
+    /// them would read as output belonging to nothing.
+    Out,
+    /// The plan and a delegation: blocks several lines tall that are their own
+    /// unit and would be swallowed inside a run of calls.
+    Card,
+    /// Something Jod said on its own account.
+    Note,
+    /// The line a run ends on.
+    End,
+    /// Harness output we could not classify.
+    Raw,
+}
+
+impl Chunk {
+    fn of(entry: &Entry) -> Chunk {
+        match entry {
+            Entry::You(_) => Chunk::You,
+            Entry::Agent(_) => Chunk::Say,
+            Entry::Thinking(_) => Chunk::Think,
+            Entry::Tool { .. } | Entry::Diff { .. } | Entry::Routing(_) => Chunk::Step,
+            Entry::ToolOut { .. } => Chunk::Out,
+            Entry::Plan(_) | Entry::Delegated { .. } => Chunk::Card,
+            Entry::Notice(_) | Entry::Hint(_) => Chunk::Note,
+            Entry::Done { .. } => Chunk::End,
+            Entry::Raw(_) => Chunk::Raw,
+        }
+    }
+
+    /// Whether two neighbours of this kind sit together with no line between.
+    ///
+    /// True for the kinds that arrive as a series describing one thing: the
+    /// call list of a turn, an answer pushed to the transcript one line at a
+    /// time, a stretch of raw harness output. False for the kinds where each
+    /// entry is a separate utterance — everything a person typed or the agent
+    /// said arrives whole, so two of them in a row are two things, not one.
+    fn packs(self) -> bool {
+        matches!(self, Chunk::Step | Chunk::Note | Chunk::Raw | Chunk::Think)
+    }
+}
+
+/// Whether a line of air goes between a block of kind `prev` and one of `cur`.
+fn parted(prev: Chunk, cur: Chunk) -> bool {
+    if cur == Chunk::Out {
+        return false;
+    }
+    if prev == cur {
+        return !cur.packs();
+    }
+    true
 }
 
 /// The single line standing in for `folded` steps that were not drawn.
@@ -6059,29 +6168,12 @@ fn render(entry: &Entry, ctx: &Ctx) -> Vec<Line<'static>> {
             return render_delegated(id, prompt, dir, ctx)
         }
         Entry::You(t) => ("› ", bold(USER), t.clone()),
-        Entry::Agent(t) => ("", fg(AGENT), t.clone()),
+        Entry::Agent(t) => return render_prose(t, width),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
         Entry::Tool { name, detail, step } => {
-            // The spinner is the whole point of the running state: a command
-            // that takes four minutes used to look exactly like one that had
-            // already finished, so the only way to tell whether anything was
-            // happening was to watch the clock in the header.
-            let (mark, colour) = match step {
-                Step::Running => (format!("{frame} "), WARN),
-                Step::Failed => ("✗ ".to_string(), BAD),
-                Step::Ok => ("⚙ ".to_string(), MUTED),
-            };
-            let body = match detail {
-                Some(d) => format!("{name} · {d}"),
-                None => name.clone(),
-            };
-            return laid_out(&mark, fg(colour), &body, width);
+            return render_call(name, detail.as_deref(), *step, width, frame)
         }
-        // Indented under its call, so output reads as belonging to the tool
-        // above it rather than as the agent speaking.
-        Entry::ToolOut { text, failed } => {
-            ("  └ ", fg(if *failed { BAD } else { MUTED }), text.clone())
-        }
+        Entry::ToolOut { text, failed } => return render_output(text, *failed, width, expanded),
         Entry::Done { text, failed } => {
             let mark = if *failed { "✗ failed" } else { "✓ done" };
             let style = fg(if *failed { BAD } else { GOOD });
@@ -6126,6 +6218,230 @@ fn laid_out(prefix: &str, style: Style, body: &str, width: u16) -> Vec<Line<'sta
             Line::from(vec![Span::styled(lead, style), Span::styled(text, style)])
         })
         .collect()
+}
+
+/// How far assistant prose and tool output are set in from the left edge.
+///
+/// Two columns, which is exactly the width of the markers that lead them, so
+/// the marker sits in the margin and every row of a block starts in the same
+/// column whether it is the first row or the fortieth.
+const PROSE: usize = 2;
+
+/// How many rows of one tool's output are shown while the steps are folded shut.
+///
+/// Enough to see what came back, few enough that a command printing two hundred
+/// lines of test output cannot push the question that prompted it off the top of
+/// the screen. `Ctrl-O` opens the rest, and a failure is never held back at all.
+const OUTPUT_ROWS: usize = 5;
+
+/// A tool call: a status mark, the tool's name, and its argument beside it.
+///
+/// One line, cut rather than wrapped. A tool's argument is a command line or a
+/// blob of JSON, and four rows of reflowed JSON per call is precisely what turns
+/// the steps of a turn into a wall — the reason to have a call line at all is to
+/// be able to skim twenty of them.
+///
+/// The name and the argument are styled apart, and that is the difference this
+/// makes at a glance. `Bash(cargo test)` reads as a name and the thing it was
+/// given; `Bash · cargo test`, all in one colour, reads as one long string.
+fn render_call(
+    name: &str,
+    detail: Option<&str>,
+    step: Step,
+    width: u16,
+    frame: &str,
+) -> Vec<Line<'static>> {
+    // The spinner is the whole point of the running state: a command that takes
+    // four minutes used to look exactly like one that had already finished, so
+    // the only way to tell whether anything was happening was to watch the
+    // clock in the header.
+    let (mark, colour) = match step {
+        Step::Running => (format!("{frame} "), WARN),
+        Step::Failed => ("✗ ".to_string(), BAD),
+        Step::Ok => ("● ".to_string(), GOOD),
+    };
+    let mut spans = vec![
+        Span::styled(mark.clone(), fg(colour)),
+        Span::styled(name.to_string(), bold(AGENT)),
+    ];
+    if let Some(detail) = detail {
+        // The brackets are reserved along with the mark and the name rather
+        // than appended and hoped for, so a long argument loses its own tail
+        // instead of the closing bracket. A line ending `--fea…)` says it was
+        // cut; one ending `--fea` says nothing.
+        let used = columns(&mark) + columns(name) + 2;
+        let room = (width as usize).saturating_sub(used);
+        if room > 1 {
+            let detail = cut(&one_line(detail), room);
+            spans.push(Span::styled(format!("({detail})"), fg(MUTED)));
+        }
+    }
+    vec![Line::from(spans)]
+}
+
+/// What a tool gave back, hung under the call it belongs to.
+///
+/// Held to [`OUTPUT_ROWS`] while the steps are folded, with a line saying how
+/// many rows were kept back and which key opens them — the same key that opens
+/// every other step. A failure is never held back: it is the reason the answer
+/// is about to be wrong, and a truncated one is a bug report you have to go and
+/// reconstruct.
+fn render_output(text: &str, failed: bool, width: u16, expanded: bool) -> Vec<Line<'static>> {
+    let style = fg(if failed { BAD } else { MUTED });
+    let rows = wrap(text, width as usize, PROSE + 2);
+    let held = if expanded || failed {
+        0
+    } else {
+        rows.len().saturating_sub(OUTPUT_ROWS)
+    };
+    let mut lines: Vec<Line<'static>> = rows
+        .into_iter()
+        .take(if held > 0 { OUTPUT_ROWS } else { usize::MAX })
+        .enumerate()
+        .map(|(i, text)| {
+            // The elbow on the first row only. Repeated down forty rows it
+            // stops reading as "this belongs to the call above" and starts
+            // reading as a column of furniture.
+            let lead = if i == 0 { "  ⎿ " } else { "    " };
+            Line::from(vec![
+                Span::styled(lead, fg(MUTED)),
+                Span::styled(text, style),
+            ])
+        })
+        .collect();
+    if held > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("    … {} · Ctrl-O", plural(held, "more line")),
+            fg(MUTED),
+        )));
+    }
+    lines
+}
+
+/// Assistant prose, read as prose rather than as one long paragraph.
+///
+/// The harnesses all write markdown and Jod used to print it verbatim, so a
+/// reply arrived as a single wrapped block with `###` and `**` in it. The three
+/// things worth honouring are the three that carry the structure: a blank line
+/// is a paragraph, a `#` line is a heading, and a `-` line is a bullet.
+/// Everything else is left exactly as it was written, including the leading
+/// spaces of a code block.
+fn render_prose(text: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Emphasis is carried across rows, so a run that straddles a wrap boundary
+    // keeps its styling on both of them.
+    let mut state = Emphasis::default();
+    for raw in text.split('\n') {
+        let lead = raw.chars().take_while(|c| *c == ' ').count();
+        let trimmed = &raw[lead..];
+        if trimmed.is_empty() {
+            // A blank line in the source is a paragraph break, which is the
+            // cheapest readability there is. Never one at the top and never two
+            // in a row: both read as the renderer having dropped something.
+            if lines.last().is_some_and(|l| l.width() > 0) {
+                lines.push(Line::from(""));
+            }
+            continue;
+        }
+        // A heading is never indented, so an indented `#` is a comment in a
+        // code block and is left alone.
+        let heading = lead == 0 && trimmed.starts_with('#');
+        let bullet = ["- ", "* ", "+ ", "• "]
+            .iter()
+            .any(|m| trimmed.starts_with(m));
+        let (body, indent, marker) = if bullet {
+            (&trimmed[2..], PROSE + lead + 2, "• ")
+        } else if heading {
+            // The hashes go the same way the `**` does: they are how the
+            // harness said "bold", not something it wanted printed.
+            (trimmed.trim_start_matches('#').trim_start(), PROSE, "")
+        } else {
+            (raw, PROSE + lead, "")
+        };
+        let style = if heading { bold(AGENT) } else { fg(AGENT) };
+        for (i, row) in wrap(body, width as usize, indent).into_iter().enumerate() {
+            // The first row of the whole message wears the marker; every other
+            // row is padded to the same column. A bullet's own glyph wins over
+            // it, because a bullet is already a marker.
+            let pad = " ".repeat(indent.saturating_sub(marker.chars().count()));
+            let lead = match (lines.is_empty(), i == 0) {
+                (true, true) => "● ".to_string(),
+                (_, true) => format!("{pad}{marker}"),
+                _ => " ".repeat(indent),
+            };
+            lines.push(Line::from(
+                [Span::styled(lead, fg(MUTED))]
+                    .into_iter()
+                    .chain(emphasised(&row, style, &mut state))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
+    lines
+}
+
+/// Whether an emphasis run is still open at the end of a row.
+#[derive(Default, Clone, Copy)]
+struct Emphasis {
+    bold: bool,
+    code: bool,
+}
+
+/// One row of prose, split into spans on the little markdown the harnesses
+/// actually emit: `**bold**` and `` `code` ``.
+///
+/// Applied after wrapping rather than before, so `state` can carry a run across
+/// a wrap boundary. The cost is that the markers were counted when the row was
+/// measured, so a row containing emphasis stops a column or two short of the
+/// edge. That is the right way round — the alternative is a row that overflows
+/// the pane.
+fn emphasised(row: &str, base: Style, state: &mut Emphasis) -> Vec<Span<'static>> {
+    let dressed = |state: &Emphasis| {
+        let style = if state.code { fg(CODE) } else { base };
+        if state.bold {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style
+        }
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        // Which run this character opens or closes, if any. A lone `*` is a
+        // multiplication sign far more often than it is emphasis, so only the
+        // doubled marker counts.
+        let toggle = match c {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                Some(true)
+            }
+            '`' => Some(false),
+            _ => None,
+        };
+        match toggle {
+            Some(is_bold) => {
+                if !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), dressed(state)));
+                }
+                if is_bold {
+                    state.bold = !state.bold;
+                } else {
+                    state.code = !state.code;
+                }
+            }
+            None => run.push(c),
+        }
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, dressed(state)));
+    }
+    // A row that was nothing but markers still has to occupy its row, or the
+    // paragraph above it closes up over it.
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base));
+    }
+    spans
 }
 
 /// The agent's plan, as a block that updates in place.
@@ -7125,7 +7441,7 @@ mod tests {
     }
 
     /// The two boxes are the whole screen, so a `you` box that runs wider than
-    /// the `jod` box above it reads as a rendering slip. They line up.
+    /// the `chat` box above it reads as a rendering slip. They line up.
     ///
     /// Measured off the boxes' own borders rather than by looking for text on
     /// the screen: the `you` title also appears in the keybar, and a
@@ -7136,7 +7452,7 @@ mod tests {
         a.push(Entry::Agent("here is the summary".into()));
         let screen = rendered(&a, 260, 30);
         assert_eq!(
-            box_span(&screen, "┌ jod "),
+            box_span(&screen, "┌ chat "),
             box_span(&screen, "┌ you "),
             "the two boxes must line up:\n{screen}"
         );
@@ -7464,6 +7780,242 @@ mod tests {
         let mut a = app();
         a.agents = vec![agent_line("bbb22222", "audit the deps", "running")];
         assert!(rendered(&a, 100, 12).contains("1 in background"));
+    }
+
+    // ---- how a transcript is laid out ----
+
+    /// The transcript's rows, borders stripped, so a test can assert on the
+    /// blank lines *between* blocks rather than on the text inside them.
+    fn transcript_rows(a: &App, width: u16, height: u16) -> Vec<String> {
+        let screen = rendered(a, width, height);
+        let rows: Vec<&str> = screen.lines().collect();
+        let top = rows
+            .iter()
+            .position(|r| r.contains("┌ chat") || r.contains("┌ watching"))
+            .expect("a transcript box");
+        let bottom = rows[top..]
+            .iter()
+            .position(|r| r.contains('└'))
+            .expect("its bottom border")
+            + top;
+        rows[top + 1..bottom]
+            .iter()
+            .map(|r| {
+                let inner: String = r.chars().filter(|c| *c != '│').collect();
+                inner.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// The rows that carry something, in order, with the blank ones marked —
+    /// which is the shape a spacing test is actually about.
+    fn shape(rows: &[String]) -> Vec<&str> {
+        let end = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1);
+        rows[..end]
+            .iter()
+            .map(|r| if r.is_empty() { "" } else { r.as_str() })
+            .collect()
+    }
+
+    /// The complaint this answers: a question, the calls that answered it and
+    /// the answer arrived as one unbroken column with nothing for the eye to
+    /// land on.
+    #[test]
+    fn a_line_of_air_separates_the_question_from_the_answer() {
+        let mut a = app();
+        a.push(Entry::You("what is the progress of zuma?".into()));
+        a.push(Entry::Agent("Zuma is on its third milestone.".into()));
+        let rows = transcript_rows(&a, 60, 12);
+        let shape = shape(&rows);
+        assert_eq!(shape.len(), 3, "question, air, answer:\n{rows:#?}");
+        assert!(shape[0].contains("what is the progress"), "{shape:#?}");
+        assert_eq!(shape[1], "", "a line between them:\n{rows:#?}");
+        assert!(shape[2].contains("Zuma is on its third"), "{shape:#?}");
+    }
+
+    /// The other half of the rule. Air between blocks is only worth anything if
+    /// there is none *inside* one, and a turn's calls are one block: six tool
+    /// lines double-spaced is the wall again with twice the scrolling.
+    #[test]
+    fn the_calls_of_one_turn_stay_packed_together() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        for name in ["Read", "Grep", "Bash"] {
+            a.push(Entry::Tool {
+                name: name.into(),
+                detail: Some("something".into()),
+                step: Step::Ok,
+            });
+        }
+        let rows = transcript_rows(&a, 60, 12);
+        let shape = shape(&rows);
+        assert_eq!(shape.len(), 3, "three calls and no gaps:\n{rows:#?}");
+        assert!(shape.iter().all(|r| !r.is_empty()), "{rows:#?}");
+    }
+
+    /// Output belongs to the call above it. A line between them would read as
+    /// output belonging to nothing, which is what the elbow is there to deny.
+    #[test]
+    fn a_tools_output_hangs_directly_under_its_call() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.push(Entry::Tool {
+            name: "Bash".into(),
+            detail: Some("cargo test".into()),
+            step: Step::Ok,
+        });
+        a.push(Entry::ToolOut {
+            text: "1235 passed".into(),
+            failed: false,
+        });
+        let rows = transcript_rows(&a, 60, 12);
+        let shape = shape(&rows);
+        assert_eq!(shape.len(), 2, "no gap between them:\n{rows:#?}");
+        assert!(shape[1].contains('⎿'), "hung under the call:\n{rows:#?}");
+        assert!(shape[1].contains("1235 passed"), "{rows:#?}");
+    }
+
+    /// A call is a name and the thing it was given, and telling them apart at a
+    /// glance is the point of the bracket.
+    #[test]
+    fn a_call_names_the_tool_and_brackets_its_argument() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.push(Entry::Tool {
+            name: "Bash".into(),
+            detail: Some("cargo test --all".into()),
+            step: Step::Ok,
+        });
+        let rows = transcript_rows(&a, 60, 12);
+        assert!(rows[0].contains("Bash(cargo test --all)"), "{rows:#?}");
+    }
+
+    /// A long argument loses its own tail rather than the closing bracket: a
+    /// line that stops mid-argument with no `)` does not say it was cut.
+    #[test]
+    fn a_long_argument_is_cut_inside_its_brackets() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.push(Entry::Tool {
+            name: "Bash".into(),
+            detail: Some("cargo test ".repeat(40)),
+            step: Step::Ok,
+        });
+        let rows = transcript_rows(&a, 60, 12);
+        assert_eq!(
+            rows.iter().filter(|r| !r.is_empty()).count(),
+            1,
+            "{rows:#?}"
+        );
+        assert!(rows[0].ends_with("…)"), "cut inside the bracket:\n{rows:#?}");
+        assert!(rows[0].chars().count() <= 60, "{rows:#?}");
+    }
+
+    /// Two hundred lines of test output used to push the question that prompted
+    /// it off the top of the screen.
+    #[test]
+    fn a_long_tool_output_is_held_back_with_a_count_and_a_key() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.push(Entry::Tool {
+            name: "Bash".into(),
+            detail: Some("cargo test".into()),
+            step: Step::Ok,
+        });
+        a.push(Entry::ToolOut {
+            text: (0..40)
+                .map(|i| format!("row {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            failed: false,
+        });
+        let rows = transcript_rows(&a, 60, 40);
+        let shown = rows.iter().filter(|r| r.contains("row ")).count();
+        assert_eq!(shown, OUTPUT_ROWS, "held to the cap:\n{rows:#?}");
+        assert!(
+            rows.iter().any(|r| r.contains("35 more lines · Ctrl-O")),
+            "and says what it kept back:\n{rows:#?}"
+        );
+    }
+
+    /// A failure is the reason the answer is about to be wrong, and a truncated
+    /// one is a bug report the reader has to go and reconstruct.
+    #[test]
+    fn a_failed_tools_output_is_never_held_back() {
+        let mut a = app();
+        a.begin_turn("run-1", 0);
+        a.push(Entry::ToolOut {
+            text: (0..40)
+                .map(|i| format!("row {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            failed: true,
+        });
+        let rows = transcript_rows(&a, 60, 60);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("row ")).count(),
+            40,
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("Ctrl-O")), "{rows:#?}");
+    }
+
+    /// The harnesses all write markdown. Printing it verbatim gave a reply with
+    /// `###` and `**` in it and no paragraphs at all.
+    #[test]
+    fn prose_keeps_its_paragraphs_and_loses_its_markers() {
+        let mut a = app();
+        a.push(Entry::Agent(
+            "## Repository Status\n\nThe tree is **clean** and `cargo test` passes.\n\n\
+             - 91 tests\n- 29 files"
+                .into(),
+        ));
+        let rows = transcript_rows(&a, 60, 20);
+        let shape = shape(&rows);
+        assert!(shape[0].contains("Repository Status"), "{rows:#?}");
+        assert_eq!(shape[1], "", "a paragraph break survives:\n{rows:#?}");
+        assert!(
+            shape[2].contains("clean") && !shape[2].contains("**"),
+            "the markers are style, not text:\n{rows:#?}"
+        );
+        assert!(
+            shape[2].contains("cargo test") && !shape[2].contains('`'),
+            "{rows:#?}"
+        );
+        assert!(
+            shape.iter().any(|r| r.contains("• 91 tests")),
+            "and a bullet is a bullet:\n{rows:#?}"
+        );
+    }
+
+    /// `wrap` protects the leading spaces of a code block on purpose, and the
+    /// prose pass must not undo it — a `def f():` and its body in the same
+    /// column is the bug being avoided.
+    #[test]
+    fn an_indented_block_inside_prose_keeps_its_indentation() {
+        let mut a = app();
+        a.push(Entry::Agent("here:\n\n    def f():\n        return 1".into()));
+        let rows = transcript_rows(&a, 60, 20);
+        let body = rows
+            .iter()
+            .find(|r| r.contains("return 1"))
+            .expect("the body survives");
+        let def = rows.iter().find(|r| r.contains("def f")).expect("the head");
+        let indent = |r: &str| r.chars().take_while(|c| *c == ' ').count();
+        assert!(indent(body) > indent(def), "still nested:\n{rows:#?}");
+    }
+
+    /// The three kinds of chat are read differently and used to be
+    /// indistinguishable: all three said `jod · something`.
+    #[test]
+    fn the_title_says_which_kind_of_chat_this_is() {
+        let mut a = app();
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        a.watching = Some("aaa11111".into());
+        assert!(
+            rendered(&a, 80, 12).contains("watching · port the parser"),
+            "somebody else's conversation says so"
+        );
     }
 
     // ---- folding the steps away ----
@@ -8014,7 +8566,7 @@ mod tests {
         let mut a = app();
         a.push(Entry::Agent("here is the summary".into()));
         let screen = rendered(&a, 200, 24);
-        let top = screen.lines().find(|l| l.contains("jod")).unwrap();
+        let top = screen.lines().find(|l| l.contains("┌ chat ")).unwrap();
         let left = top.chars().position(|c| c == '┌').unwrap();
         let right = top.chars().position(|c| c == '┐').unwrap();
         assert!(left > GUTTER as usize, "the box must be inset: {left}");
@@ -11622,7 +12174,7 @@ mod tests {
             input: Some(serde_json::json!({ "command": "cargo test" })),
         });
         let frame = rendered(&a, 120, 30);
-        assert!(frame.contains("Bash · cargo test"), "{frame}");
+        assert!(frame.contains("Bash(cargo test)"), "{frame}");
         assert!(!frame.contains('±'), "no diff header:\n{frame}");
     }
 
