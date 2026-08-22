@@ -160,6 +160,7 @@ impl Tick for Ticker {
             // here rather than in a fourth field keeps `TickReport` meaning
             // "what went wrong this pass", which is what reads it.
             failed: all.iter().map(|r| r.failed).sum::<usize>() + swept.stopped,
+            judged: all.iter().map(|r| r.judged).sum(),
         })
     }
 }
