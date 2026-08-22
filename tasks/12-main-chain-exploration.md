@@ -829,8 +829,8 @@ cannot, and not retrying on an unrelated turn.
 
 ---
 
-## X13. Main never calls `ask_manager` — the guard that should force it fails open, so the manager tier never runs
-Status: **open — mechanism partly established, see below** · Severity: critical · Owner: —
+## X13. Main never calls `ask_manager` — compaction moves the pin mid-turn, so the guard that should force it fails open
+Status: **open — root cause established: compaction forks the main chat and moves the pin** · Severity: critical · Owner: —
 
 Across every scenario run tonight — thirteen main turns, several of them plainly
 repository work — **main called `ask_manager` exactly zero times.** It used
@@ -875,27 +875,68 @@ newly created `c71f36a9` held the pin — so the caller was, by this comparison,
 not main, and `open_work` went through. `delegations` records it plainly:
 `open_work` at id 58 from conversation `3b1035a4`.
 
-**What is not established, and is the next thing to do.** On a later run main's
-turn *was* in the pinned conversation `c71f36a9`, and `open_work` still went
-through (`delegations` id 61, conversation `c71f36a9`). At the same time a
-further conversation `0a1a280c` appeared — `origin=human`, `agy`,
-`cwd=/home/reljod` — and the work session's parent is *that*, not `c71f36a9`.
-So the delegation row and the conversation tree disagree about who the caller
-was.
+**The cause is compaction, and it is now established rather than guessed.**
+Compacting a conversation does not edit it in place. It **forks it into a new
+conversation** and moves the pin, titling the new row `main`
+(`core/src/conversation.rs:1594-1620`). The comment there explains why the pin
+has to move, and is right about it:
 
-Two candidate explanations, and they need telling apart before anyone writes a
-fix:
+> The pin follows the thread across the switch. `main_conversation` is
+> get-or-create on `pinned = 1`, so a pin left behind on the conversation this
+> switch just compacted away would send the next turn back to the thread that
+> was handed over.
 
-1. **The pin drifts, and the caller is genuinely some other conversation.** A
-   fresh `main` conversation is being created mid-session — one appeared at
-   18:48 during a run — and whichever of them the turn lands in may or may not
-   be the pinned one. What creates them is not yet identified; compaction and
-   the failed `/harness` attempts are both candidates, and the seven-way pile-up
-   suggests this has been happening for a long time.
-2. **The identity the MCP server resolves is not the conversation the turn is
-   recorded under.** This is where X1 bites: an AGY session gets no per-run MCP
-   config, so run and conversation identity are resolved from the process group
-   rather than from the environment Claude Code would have been given.
+So the pin moving is correct. The bug is *when* it moves relative to a turn
+already in flight. **A turn that began before a compaction belongs to the old
+conversation for its whole life, while the pin has already moved to the new
+one.** From that moment `caller_is_main` compares the turn's conversation
+against a different pinned id, returns false, and every main-only guard fails
+open for the rest of that turn.
+
+**The store shows a perfect one-to-one chain.** Every compaction run is followed
+eight to twelve seconds later by a new conversation, forked from the previous
+one and titled `main`:
+
+| `summarise to compact` run | new `main` conversation | gap |
+|---|---|---|
+| 1787423541681 | `3b1035a4` @ 1787423550502 | +9s |
+| 1787424527516 | `c71f36a9` @ 1787424535851 | +8s |
+| 1787424989059 | `0a1a280c` @ 1787424996981 | +8s |
+| 1787425992673 | `2945d706` @ 1787426004731 | +12s |
+
+And `forked_from` links them in one unbroken line, oldest to newest:
+
+```
+8ce8211e → 3035de39 → 85d68207 → d2588dcd → ef0405d8 → 3b1035a4 → c71f36a9 → 0a1a280c → 2945d706
+```
+
+That is the seven-way pile-up explained: it is not drift or corruption, it is
+one chat compacted eight times. It also resolves what looked like a
+contradiction above — the run recorded against `c71f36a9` whose work session
+hangs under `0a1a280c` is a turn that straddled the third compaction.
+
+**Why it fires so often here, which is a second-order consequence of the
+requested configuration.** Main is on `gemini-3.7-flash-medium`. Four
+compactions happened in about forty minutes of ordinary use. On a model with a
+larger context the window between compactions is wide and a turn rarely
+straddles one; on this one it is narrow and turns straddle compactions
+routinely. So the same bug that would be intermittent and baffling elsewhere is
+close to permanent in Reljod's setup — which is why the manager tier was absent
+from *every* scenario rather than from some of them.
+
+**Two fix shapes, and they are not equivalent.** Either resolve "is this main"
+against the thread rather than against the current pin — following `forked_from`
+so a conversation that *was* main and was compacted still counts for the turn
+that was already running — or freeze the answer at the start of a turn and carry
+it. The first is more correct and more work; the second is smaller and leaves
+the question wrong for anything that outlives a turn. Whichever is chosen,
+`caller_is_main` being a single equality against a mutable pin is the thing to
+stop doing.
+
+Worth noting for whoever takes it: all four `summarise to compact` runs are
+recorded `failed`, and X11 applies to them, so do not read those statuses as
+evidence that compaction is broken. At least one of them demonstrably worked —
+the console reported "15518 chars of conversation became 2522".
 
 **Why this is the most important finding in this file.** It is not a wrong
 label or a bad message — an entire designed layer is absent at runtime, on the
@@ -1130,6 +1171,65 @@ Check: start a long main turn, queue a message, kill the doorman run mid-flight,
 and wait a tick. Green is the row back in `queued` and a later doorman reading
 it. Today the row stays `reviewing` and every subsequent message queues behind
 it for ever.
+
+---
+
+## X16. Compaction carries queued deliveries across but not reviewing ones, so a message under judgement is orphaned
+Status: **open** · Severity: high · Owner: —
+
+The other half of why delivery 12 in X15 could never be recovered, and it
+survives the fix for X15 unless that fix is written knowing about it.
+
+Compaction forks the main chat (see X13) and then deliberately carries several
+things across to the new conversation: child conversations, open cards, and
+queued deliveries. The delivery statement is scoped:
+
+```sql
+UPDATE pending_deliveries SET conversation_id = ?2
+  WHERE conversation_id = ?1 AND state = 'queued'
+```
+
+`state = 'queued'` only. Its comment explains the exclusion it *was* thinking
+about — "a delivered one is a record of where it actually went, and moving it
+would make the ledger lie" — which is right. But `reviewing` is neither
+`queued` nor `delivered`. It is a live message mid-judgement, and it is left
+behind.
+
+**Observed, and it explains the permanence in X15.** Delivery 12 was queued
+against conversation `0a1a280c` and put into `reviewing` when its doorman
+started. The next compaction, fifteen seconds later, forked main into
+`2945d706` and moved the pin. Delivery 12 stayed on `0a1a280c` — a conversation
+that is no longer main, is not busy, and that nothing revisits. Two later
+messages, 15 and 16, were queued against `2945d706` after it existed and were
+delivered normally within about thirty seconds.
+
+So the two faults compound and each alone would have been survivable:
+
+1. The doorman died and nothing returned row 12 to `queued` (X15).
+2. Because it was sitting in `reviewing`, the next compaction skipped it and
+   orphaned it onto an abandoned conversation.
+
+**Why this matters to the fix already written for X15.** That fix sweeps
+`reviewing` rows at the top of `tick_deliveries` and at turn end in the console,
+which is the right shape. But a sweep that asks about *the current main* will
+not find a row orphaned onto a previous one — `under_review_for` takes a
+conversation id, and after a compaction the orphan's id is a conversation
+nobody looks at again. The sweep has to either follow the `forked_from` chain
+or ask globally rather than per-conversation.
+
+**And the window is not rare here.** A doorman takes tens of seconds to judge;
+compaction fires every ten minutes or so on `gemini-3.7-flash-medium` (X13). A
+message being judged when a compaction lands is an ordinary Tuesday in this
+configuration, not a corner case.
+
+The narrow fix is to widen the statement to carry `reviewing` rows as well as
+`queued` ones — a message still being judged is exactly as owed to the new
+thread as one still waiting, and the comment's reasoning about not moving
+`delivered` rows does not apply to it.
+
+Check: queue a message into a busy main chat, let a doorman claim it, force a
+compaction before the doorman finishes, and read the row's `conversation_id`.
+Green is the new conversation's id, and the row eventually leaving `reviewing`.
 
 ---
 
