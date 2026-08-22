@@ -43,6 +43,7 @@ pub mod ui;
 mod workspace;
 
 pub use app::{short_duration, AgentLine, App, Entry, Overlay, PromptIntent};
+use app::{COMPACT_AT, CONTEXT_WINDOW};
 pub use workspace::Workspace;
 
 use std::io;
@@ -538,7 +539,12 @@ enum Crossing {
     /// Nothing has been said yet, so there is nothing to summarise and no model
     /// call to pay for. The app simply moves.
     Bare,
-    /// A thread has to be summarised first, by a run on the harness being left.
+    /// The thread crosses as it stands: no summary, no model call, no waiting.
+    /// The ordinary case — see `Store::switch_harness_whole`.
+    Whole { conversation: String },
+    /// The thread is too long to replay into the target, so it has to be
+    /// summarised first by a run on the harness being left. The fallback, and
+    /// the only path that costs a model call.
     Summarise {
         conversation: String,
         /// The transcript to summarise, when the harness cannot be asked to
@@ -2259,13 +2265,48 @@ fn crossing(store: Option<&Store>, app: &App, thread: &Thread, to: HarnessKind) 
     let Some(store) = store else {
         return Crossing::Bare;
     };
-    match summarisable(store, app, thread) {
-        Some((conversation, material)) => Crossing::Summarise {
+    let Some((conversation, material)) = summarisable(store, app, thread) else {
+        return Crossing::Bare;
+    };
+    // The whole thread first, and a summary only when it will not fit. It used
+    // to be the other way round for one reason: the thread had to travel in a
+    // prompt, and nobody had measured whether it would. Measuring it is the
+    // whole change — a summary of a thread that fits is a model call spent to
+    // make the context worse.
+    //
+    // A carrier that cannot be rendered falls through to the summariser rather
+    // than to a crossing that would arrive empty.
+    match store.handoff_text(&conversation) {
+        Ok(carrier) if fits_whole(&carrier) => Crossing::Whole { conversation },
+        _ => Crossing::Summarise {
             conversation,
             material,
         },
-        None => Crossing::Bare,
     }
+}
+
+/// Roughly how many characters of a transcript a token is worth.
+///
+/// Lower than the usual figure for English prose, deliberately. A transcript is
+/// not prose: it carries tool payloads and JSON, which pack fewer characters
+/// into a token than sentences do. Erring low is the safe direction here — it
+/// buys a summary slightly sooner than strictly necessary, and the failure it
+/// avoids is a first turn that dies on a context error.
+const CHARS_PER_TOKEN: usize = 3;
+
+/// Whether a thread can be replayed into another harness whole.
+///
+/// The carried transcript arrives as the first prompt of a fresh session, so
+/// the question is whether it leaves that session room to do any work. The
+/// threshold is the one the context bar already uses to recommend compacting: a
+/// crossing that lands past it has bought nothing, because the thread it just
+/// opened would want compacting on its very first turn.
+///
+/// Measured in characters because a token count is the harness's to report and
+/// there is no session yet to report one.
+fn fits_whole(carrier: &str) -> bool {
+    let budget = (CONTEXT_WINDOW as f64 * COMPACT_AT) as usize * CHARS_PER_TOKEN;
+    carrier.chars().count() <= budget
 }
 
 /// The thread a summariser would be asked about, and the record it has to be
@@ -2320,13 +2361,16 @@ fn lossy_warning(store: &Store, conversation: &str, to: HarnessKind) -> Option<S
         })
 }
 
-/// Start a harness switch: warn about what it costs, and put the harness being
-/// left to work writing the summary that makes it possible.
+/// Start a harness switch: warn about what it costs, and either carry the
+/// thread across as it stands or put the harness being left to work summarising
+/// it first.
 ///
-/// Returns without moving the app when a summary is owed. The switch finishes
-/// in [`finish_crossing`] when that run ends, which is what keeps the screen
-/// alive while a model writes several paragraphs — the alternative was awaiting
-/// a run inside `perform`, which freezes the whole interface, keys included.
+/// Ordinarily nothing is owed and the move finishes here, in [`cross_whole`].
+/// Only a thread too long to replay in one prompt needs a summary, and then this
+/// returns without moving the app: the switch finishes in [`finish_crossing`]
+/// when that run ends, which is what keeps the screen alive while a model writes
+/// several paragraphs. The alternative was awaiting a run inside `perform`,
+/// which freezes the whole interface, keys included.
 async fn begin_crossing(
     jod: &Arc<Jod>,
     app: &mut App,
@@ -2352,6 +2396,16 @@ async fn begin_crossing(
                 "{} from the next turn — nothing had been said, so there was nothing to carry",
                 to.label()
             )));
+        }
+        Crossing::Whole { conversation } => {
+            // `Crossing::Whole` is only ever reached with a store — `crossing`
+            // answers `Bare` without one — so this is the type talking, not a
+            // case that happens.
+            let Some(store) = store else { return };
+            if let Some(warning) = lossy_warning(store, &conversation, to) {
+                app.push(Entry::Notice(warning));
+            }
+            cross_whole(store, app, thread, &conversation, to);
         }
         Crossing::Summarise {
             conversation,
@@ -2710,6 +2764,43 @@ fn finish_crossing(
             ),
             None => "nothing needed compacting".to_string(),
         }
+    )));
+    app.scroll_to_bottom();
+}
+
+/// Hand the thread over as it stands, with no summary in between.
+///
+/// The counterpart of [`finish_crossing`], and the thing worth noticing is that
+/// it has no counterpart *start*. There is no run to wait for, so the switch
+/// takes as long as writing three rows. The summarised path spends a model call
+/// and the time a model takes to write several paragraphs, and what it produces
+/// is strictly less than the thread it replaces.
+fn cross_whole(
+    store: &Store,
+    app: &mut App,
+    thread: &mut Thread,
+    conversation: &str,
+    to: HarnessKind,
+) {
+    let switch = match store.switch_harness_whole(conversation, to, CROSSING) {
+        Ok(switch) => switch,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not hand the conversation over, so it stays where it is: {e}"
+            )));
+            return;
+        }
+    };
+    // The transcript reaches the new harness through its *prompt*, because the
+    // new conversation has no session to be resumed into and nothing in
+    // `runner` can stream one in. See `Store::handoff_text`.
+    let carried = store.handoff_text(&switch.conversation.id).ok();
+    let chars = carried.as_deref().map_or(0, |c| c.chars().count());
+    point_at(app, thread, to, Some(&switch.conversation.id), carried);
+    app.push(Entry::Notice(format!(
+        "handed over to {} — a new conversation carrying the whole thread, {chars} chars of \
+         it, with nothing summarised away",
+        to.label()
     )));
     app.scroll_to_bottom();
 }
@@ -6139,10 +6230,11 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         }
         // Handed straight back rather than applied here. Switching harness used
         // to mean *dropping* the conversation — fresh resume, no session, no
-        // model — with the whole thread sitting in the graph unread. Carrying it
-        // across needs a summary, a summary needs a model, and Jod has no model
-        // client: so the first half of this is a run, and a run belongs to the
-        // loop. `perform` decides whether one is owed at all.
+        // model — with the whole thread sitting in the graph unread. Usually the
+        // thread now crosses as it is, which needs no model and no waiting; only
+        // one too long to replay in a single prompt owes a summary, and a
+        // summary needs a run, and a run belongs to the loop. `perform` decides
+        // which of the two this is.
         Slash::Harness(kind) => return Some(Action::SwitchHarness(kind)),
         // No argument means the harness on screen: it is the one that just
         // refused to run, which is why anybody is typing this.
@@ -8474,15 +8566,70 @@ mod tests {
         );
     }
 
-    /// A thread with something in it owes a summary, and who writes it depends
-    /// on whether the harness being left can still be asked. Immediately after a
-    /// previous switch it cannot — it has no session — so the record has to
-    /// travel in the prompt, and that is exactly the case that would be missed.
+    /// A thread that fits crosses as it is. Summarising it would spend a model
+    /// call, and the time a model takes to write several paragraphs, to arrive
+    /// holding less than it started with.
     #[test]
-    fn a_harness_with_no_session_is_handed_the_record_to_summarise() {
+    fn a_thread_that_fits_crosses_whole_rather_than_paying_for_a_summary() {
+        let s = store();
+        let (app, thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let id = thread.conversation.clone().unwrap();
+
+        assert_eq!(
+            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode),
+            Crossing::Whole { conversation: id }
+        );
+    }
+
+    /// The end of the move, with no run in the middle of it: the app lands on
+    /// the new harness bound to a new conversation, holding every turn as
+    /// carried context, and the thread it left is still where it was.
+    #[test]
+    fn crossing_whole_lands_on_the_new_harness_holding_every_turn() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let was = thread.conversation.clone().unwrap();
+
+        cross_whole(&s, &mut app, &mut thread, &was, HarnessKind::OpenCode);
+
+        assert_eq!(app.harness, HarnessKind::OpenCode);
+        assert_eq!(app.resume, Resume::Fresh, "a session of its own to earn");
+        let now = thread.conversation.clone().expect("bound to the new thread");
+        assert_ne!(now, was, "a new conversation, not a move");
+
+        let carried = thread.carried.clone().expect("context for the first turn");
+        assert!(carried.contains("port the parser"), "{carried}");
+        assert!(carried.contains("ported it"), "{carried}");
+        assert!(
+            carried.contains("not instructions to"),
+            "framed as a record rather than a fresh instruction: {carried}"
+        );
+
+        assert_eq!(
+            s.live_window(&was).unwrap().len(),
+            2,
+            "and the thread it left is still live where it was"
+        );
+        assert!(s.compactions(&was).unwrap().is_empty(), "nothing compacted");
+    }
+
+    /// The fallback is still there for the thread that does not fit. The carried
+    /// transcript arrives as one prompt, so a thread long enough to fill the
+    /// window on arrival has to be summarised instead — and who writes that
+    /// summary depends on whether the harness being left can still be asked.
+    /// Immediately after a previous switch it cannot, because it has no session,
+    /// so the record has to travel in the prompt. That is exactly the case that
+    /// would be missed.
+    #[test]
+    fn a_thread_too_long_to_replay_is_summarised_by_the_harness_holding_it() {
         let s = store();
         let (mut app, thread) = talking_into(&s, HarnessKind::ClaudeCode);
         let id = thread.conversation.clone().unwrap();
+        // Comfortably past the point where replaying it would leave the new
+        // session no room to work in — see `fits_whole`.
+        let long = "x".repeat(CONTEXT_WINDOW as usize * CHARS_PER_TOKEN);
+        s.append_message(&id, jod_core::conversation::NewMessage::user(long.as_str()))
+            .unwrap();
 
         assert_eq!(
             crossing(Some(&s), &app, &thread, HarnessKind::OpenCode),
@@ -8497,7 +8644,7 @@ mod tests {
         let Crossing::Summarise { material, .. } =
             crossing(Some(&s), &app, &thread, HarnessKind::OpenCode)
         else {
-            panic!("a thread with turns in it owes a summary");
+            panic!("a thread too long to replay owes a summary");
         };
         let material = material.expect("nothing to resume, so the record travels");
         assert!(material.contains("port the parser"));
