@@ -1668,11 +1668,30 @@ impl Store {
                 // into a conversation the console no longer shows — and Reljod
                 // would never see the answer to his own question.
                 //
-                // Queued rows only: a delivered one is a record of where it
-                // actually went, and moving it would make the ledger lie.
+                // **Everything still owed, which is `queued` and `reviewing`
+                // both.** A delivered or undeliverable row is a record of where
+                // it actually went, and moving it would make the ledger lie —
+                // that is the whole of why this is filtered at all.
+                //
+                // `reviewing` was added later, and adding it opened this gap:
+                // the filter said `queued` because at the time that was the
+                // only state meaning "still owed", so a message an assistant
+                // was part-way through judging matched neither arm and was left
+                // behind on a conversation nobody opens again. It is exactly as
+                // owed to the new thread as one still waiting — more so, since
+                // somebody typed it while the chat was working and is watching
+                // for the answer.
+                //
+                // Not a corner case in this configuration. A doorman takes tens
+                // of seconds and main compacts itself every few minutes, so a
+                // message being judged when a compaction lands is ordinary.
+                // Observed: delivery 12 entered `reviewing`, the fourth
+                // compaction of the evening forked main fifteen seconds later,
+                // and the row stayed on the dead conversation for the rest of
+                // the night.
                 tx.execute(
                     "UPDATE pending_deliveries SET conversation_id = ?2
-                      WHERE conversation_id = ?1 AND state = 'queued'",
+                      WHERE conversation_id = ?1 AND state IN ('queued', 'reviewing')",
                     params![conversation_id, new_id],
                 )?;
                 // Every bus that has a `main` on its roster follows the pin.

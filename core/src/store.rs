@@ -1875,6 +1875,49 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE pending_deliveries ADD COLUMN reviewed_at_ms INTEGER;
     "#,
     ),
+    (
+    "0033_a_message_being_judged_follows_the_main_chat",
+    r#"
+    -- The fourth of the things that get left behind when main compacts, and the
+    -- only one that could not exist until this release: a message an assistant
+    -- was part-way through reading.
+    --
+    -- `0027` moved `queued` deliveries onto the new thread and was right to. It
+    -- filtered on `queued` because that was then the only state meaning "still
+    -- owed" — `delivered` must not move, since it records where a message
+    -- actually went and moving it would make the ledger lie. `reviewing` is
+    -- neither, so a message being judged when a compaction landed stayed on a
+    -- conversation nobody opens again, and nothing ever looked at it.
+    --
+    -- The fork itself now carries both states, so this is the backfill for rows
+    -- already stranded rather than a rule going forward.
+    --
+    -- Put back to `queued` as well as moved, because whatever was reading them
+    -- is long gone: these rows are only reachable here if the doorman that
+    -- claimed them ended without a verdict, which is the condition
+    -- `Store::release_stale_reviews` sweeps for on every tick. Doing it here too
+    -- means the message is waiting on the right thread the moment the database
+    -- opens, rather than one tick later.
+    --
+    -- Restricted to the main chain, exactly as `0027` is: a `reviewing` row on
+    -- some other conversation belongs to that conversation and is the sweep's
+    -- business, not this migration's.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE pending_deliveries
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1),
+           state = 'queued'
+     WHERE state = 'reviewing'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
@@ -8388,6 +8431,78 @@ mod tests {
         assert_eq!(iso_to_ms("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(iso_to_ms("1970-01-02"), Some(86_400_000));
         assert_eq!(iso_to_ms("not a date"), None);
+    }
+
+    /// `0033` rescues a message that was being judged when main compacted.
+    ///
+    /// The backfill half of the fix — the fork itself now carries `reviewing`
+    /// rows, so this is only for the ones already stranded. Worth a test of its
+    /// own because it is the only path that recovers a message that is lost
+    /// right now on a real machine, and because a migration nobody exercises is
+    /// a migration nobody finds out is wrong.
+    #[test]
+    fn a_message_being_judged_is_moved_onto_the_main_chat_it_was_left_behind_by() {
+        let s = Store::in_memory().unwrap();
+        let old = s
+            .main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        for turn in 0..3 {
+            s.append_prompt(&old, &format!("run-{turn}"), "go").unwrap();
+        }
+        let stranded = s
+            .enqueue_delivery(&old, crate::delivery::Kind::Human, "typed", "STOP")
+            .unwrap();
+        // Somewhere else entirely, being read by somebody else's doorman.
+        let other = s
+            .new_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        let elsewhere = s
+            .enqueue_delivery(&other, crate::delivery::Kind::Human, "typed", "not main")
+            .unwrap();
+
+        s.claim_for_review(&[stranded.id, elsewhere.id]).unwrap();
+        s.continue_as_new(&old, "so far", "full").unwrap();
+        let now = s.pinned_conversation().unwrap().unwrap();
+
+        // Put it back the way a build without the fork fix left it: the row
+        // stays on the conversation that was compacted away.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE pending_deliveries SET conversation_id = ?2 WHERE id = ?1",
+                params![stranded.id, old],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let (_, sql) = MIGRATIONS
+            .iter()
+            .find(|(name, _)| name.starts_with("0033"))
+            .expect("the backfill migration");
+        s.write(|tx| {
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let waiting = s.pending_for(&now).unwrap();
+        assert_eq!(waiting.len(), 1, "the message is owed to the chat that is main now");
+        assert_eq!(waiting[0].id, stranded.id);
+        assert_eq!(
+            waiting[0].state,
+            crate::delivery::State::Queued,
+            "and it is waiting rather than being read, since nothing is reading it"
+        );
+        assert!(
+            s.pending_for(&old).unwrap().is_empty(),
+            "nothing is left on the thread that was compacted away"
+        );
+        assert_eq!(
+            s.under_review_for(&other).unwrap().len(),
+            1,
+            "a review on some other conversation is that conversation's business"
+        );
     }
 
     // ---- the scratch lane and roles -------------------------------------

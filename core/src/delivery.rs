@@ -968,6 +968,60 @@ mod tests {
         );
     }
 
+    /// And so does one an assistant is part-way through reading.
+    ///
+    /// **The state the compaction fork did not know about.** Its filter said
+    /// `queued` because that was the only state meaning "still owed" when it
+    /// was written; `reviewing` matched neither that nor the `delivered` case
+    /// the filter exists to exclude, so a message being judged when a
+    /// compaction landed was left on a conversation nobody opens again. The
+    /// sweep then released it — onto the dead thread, where it was delivered
+    /// into a transcript Reljod is not reading. Two correct-looking pieces, one
+    /// silent hole between them.
+    ///
+    /// Not rare in this configuration, which is why it is pinned rather than
+    /// noted: a doorman takes tens of seconds and main compacts every few
+    /// minutes, so the overlap is ordinary. Observed as delivery 12, which
+    /// entered `reviewing` fifteen seconds before the evening's fourth
+    /// compaction and stayed on the old conversation for the rest of the night.
+    #[test]
+    fn a_message_being_judged_follows_the_main_chat_through_a_compaction() {
+        let s = store();
+        let main = s
+            .main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        for turn in 0..3 {
+            s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+        }
+        let queued = s
+            .enqueue_delivery(&main, Kind::Human, "typed", "STOP — wrong repository")
+            .unwrap();
+        // A doorman has it when the compaction lands.
+        s.claim_for_review(&[queued.id]).unwrap();
+        run_with_status(&s, "doorman-1", "running");
+        s.record_reviewer(&[queued.id], "doorman-1").unwrap();
+
+        s.continue_as_new(&main, "so far", "full").unwrap();
+        let now = s.pinned_conversation().unwrap().unwrap();
+        assert_ne!(now, main, "the pin moved, which is the premise");
+
+        assert_eq!(
+            s.under_review_for(&now).unwrap().len(),
+            1,
+            "a message being read is owed to whichever conversation is main now"
+        );
+        assert!(
+            s.under_review_for(&main).unwrap().is_empty(),
+            "and nothing is left on the thread that was compacted away"
+        );
+
+        // The doorman dies. The sweep releases it onto the *new* thread, which
+        // is the one Reljod is looking at.
+        run_with_status(&s, "doorman-1", "failed");
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.conversations_awaiting_delivery().unwrap(), vec![now]);
+    }
+
     fn conversation(s: &Store) -> String {
         s.new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
             .expect("conversation")

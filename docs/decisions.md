@@ -4327,3 +4327,19 @@ sweep asks one question — is the run that claimed this still running — and p
 back everything where the answer is no. A row with no reviewer recorded goes
 back too: releasing early costs a verdict being ignored and the message arriving
 when the turn ends, and not releasing costs the message.
+
+**A message being judged follows the main chat too.** Compaction forks main and
+moves the pin, and the fork carries everything still owed to the thread across
+with it. That statement filtered on `state = 'queued'`, because when it was
+written that was the only state meaning "still owed" — `delivered` must not
+move, since it records where a message actually went. Adding `reviewing` opened
+a hole between the two arms: a message an assistant was part-way through reading
+matched neither, so it stayed on a conversation nobody opens again. The sweep
+above then released it, correctly, onto the dead thread — where it was delivered
+into a transcript Reljod is not reading. Two correct-looking pieces with a
+silent hole between them, and neither one's tests could see it.
+
+The window is not rare. A doorman takes tens of seconds and main compacts every
+few minutes, so a message being judged when a compaction lands is ordinary
+rather than a corner case. `0033` moves the rows already stranded; the fork
+carries them from now on.
