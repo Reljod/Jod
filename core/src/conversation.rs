@@ -1640,6 +1640,25 @@ impl Store {
                       WHERE parent_conversation_id = ?1 AND id <> ?2",
                     params![conversation_id, new_id],
                 )?;
+                // A question still owed follows the chat it was asked in.
+                //
+                // The rail shows the subtree of the conversation being viewed,
+                // and `ask_question` raises its card on the *asking*
+                // conversation — for main, that is main itself. Left behind,
+                // the card drops off the rail entirely: a blocking question put
+                // to Reljod shortly before a compaction simply disappears, and
+                // main compacts itself.
+                //
+                // Open cards only. An answered or dismissed one is a record of
+                // what was asked and settled where, and moving it would make
+                // the rail's history say a conversation asked something it
+                // never did — the same line `pending_deliveries` draws just
+                // below.
+                tx.execute(
+                    "UPDATE cards SET conversation_id = ?2
+                      WHERE conversation_id = ?1 AND status = 'open'",
+                    params![conversation_id, new_id],
+                )?;
                 // An answer still owed follows the chat it is owed to.
                 //
                 // `Ticker::tick_deliveries` reads `pending_deliveries` and

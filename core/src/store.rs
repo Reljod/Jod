@@ -1677,6 +1677,38 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
        AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
     "#,
     ),
+    (
+    "0028_a_question_still_owed_follows_the_main_chat",
+    r#"
+    -- The fifth and last thing left holding a stale conversation id when main
+    -- compacts, and the same walk as `0025` to `0027`.
+    --
+    -- The rail shows the subtree of the conversation being viewed, and
+    -- `ask_question` raises its card on the conversation doing the asking —
+    -- for main, that is main itself. Compaction moves the pin to a fresh
+    -- conversation and the card stayed behind, so a blocking question put to
+    -- Reljod shortly before a compaction dropped off the rail with nothing
+    -- anywhere reporting it. Main compacts itself when its context fills, so
+    -- nobody has to do anything for this to happen.
+    --
+    -- Open cards only. An answered or dismissed one records what was asked and
+    -- settled where, and moving it would make the history say a conversation
+    -- asked something it never did.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE cards
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE status = 'open'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.

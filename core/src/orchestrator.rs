@@ -2473,7 +2473,71 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
         }
 
-        /// The backfill, for the consoles that have already compacted.
+        /// A question still owed to Reljod follows the chat it was asked in.
+        ///
+        /// The rail shows the subtree of the conversation being viewed, and
+        /// compaction moves the pin to a fresh one. A card raised by main
+        /// itself — which is how `ask_question` reaches Reljod — stayed on the
+        /// thread that was compacted away and dropped off the rail. A blocking
+        /// question asked shortly before a compaction simply disappeared, and
+        /// main compacts itself.
+        #[test]
+        fn an_open_card_on_the_main_chat_survives_its_compaction() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+            for turn in 0..3 {
+                s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+            }
+            s.raise_card(NewCard {
+                conversation_id: main.clone(),
+                title: "which web did you mean".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+            // And one already dealt with, which is history and must stay put.
+            let answered = s
+                .raise_card(NewCard {
+                    conversation_id: main.clone(),
+                    title: "something already settled".into(),
+                    ..NewCard::default()
+                })
+                .unwrap();
+            s.answer_card(answered.id, None, Some("yes")).unwrap();
+
+            s.continue_as_new(&main, "so far", "full").unwrap();
+            let now = s.pinned_conversation().unwrap().unwrap();
+
+            let open: Vec<String> = s
+                .cards(&Query {
+                    subtree_of: Some(now),
+                    ..Query::default()
+                })
+                .unwrap()
+                .iter()
+                .map(|c| c.title.clone())
+                .collect();
+            assert!(
+                open.contains(&"which web did you mean".to_string()),
+                "the question is still owed, so it is still on the rail: {open:?}",
+            );
+
+            // The settled one stays where it happened. Moving it would rewrite
+            // which conversation actually asked and answered it.
+            let stayed: Option<String> = {
+                let conn = s.conn.lock().expect("store lock poisoned");
+                conn.query_row(
+                    "SELECT conversation_id FROM cards WHERE title = ?1",
+                    rusqlite::params!["something already settled"],
+                    |r| r.get(0),
+                )
+                .ok()
+            };
+            assert_eq!(stayed.as_deref(), Some(main.as_str()));
+        }
+
+        /// The backfill, for the consoles that have already compacted."""
         ///
         /// `carry_forward` moves these edges now, but main compacts itself on a
         /// timer, so any console that has been up a while is already carrying
