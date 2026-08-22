@@ -86,6 +86,26 @@ impl NodeId {
     }
 }
 
+/// What a project row is called.
+///
+/// Its name, unless another catalogued repository answers to the same one — in
+/// which case the directory it sits in comes too. Two checkouts both called
+/// `web` are otherwise two identical rows whose only difference is an id
+/// nobody reads, on the screen whose job is saying which repository work is
+/// happening in.
+///
+/// The same qualifier the projects panel uses, deliberately: two screens
+/// naming one thing differently is worse than either name.
+fn label_for(project: &crate::projects::Project, shared: &HashSet<String>) -> String {
+    if !shared.contains(&project.name) {
+        return project.name.clone();
+    }
+    match project.path.parent().and_then(|p| p.file_name()) {
+        Some(dir) => format!("{} in {}", project.name, dir.to_string_lossy()),
+        None => project.name.clone(),
+    }
+}
+
 /// One row, already flattened for rendering.
 ///
 /// `Serialize` so the HTTP API can hand the *same* forest to a browser that the
@@ -503,6 +523,20 @@ impl Store {
         // a lookup per work, so the row can say where its agent is actually
         // writing without costing a query per redraw.
         let leases = self.held_leases_by_work()?;
+        // Names more than one catalogued repository answers to. Two checkouts
+        // both called `web` are two rows the tree cannot tell apart, and the
+        // id is the only thing that differs — so the row carries the same
+        // qualifier the projects panel does, and the two screens agree.
+        let shared_names: HashSet<String> = {
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut twice: HashSet<String> = HashSet::new();
+            for p in &projects {
+                if !seen.insert(p.name.as_str()) {
+                    twice.insert(p.name.clone());
+                }
+            }
+            twice
+        };
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
@@ -743,7 +777,7 @@ impl Store {
                 parent: None,
                 kind: NodeKind::Project,
                 depth: 0,
-                label: project.name.clone(),
+                label: label_for(&project, &shared_names),
                 summary: project.notes.clone(),
                 running: false,
                 status: None,
@@ -1249,8 +1283,61 @@ mod tests {
         assert!(store().forest().unwrap().is_empty());
     }
 
+    /// Two repositories with one name are two rows a person can tell apart.
+    ///
+    /// The fleet labelled a project by its bare name, so two checkouts both
+    /// called `web` drew as two identical rows whose only difference was an id
+    /// nobody reads — on the screen whose whole job is saying which repository
+    /// work is happening in. The projects panel had already been taught this;
+    /// the tree had not, and two screens naming one thing differently is worse
+    /// than either name.
+    #[test]
+    fn two_projects_with_one_name_are_told_apart_on_the_fleet() {
+        use crate::projects::NewProject;
+
+        let s = store();
+        let base = format!("/tmp/jod-tree-shared-{}", std::process::id());
+        for side in ["one", "two"] {
+            let dir = format!("{base}/{side}/web");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = s.add_project(NewProject::at(&dir)).unwrap();
+            let work = s.create_work_in("do a thing", Some(&p.id)).unwrap();
+            s.set_work_title(&work.id, "a thing").unwrap();
+            session(&s, &work.id, None, "engineer");
+        }
+        // And one whose name nothing shares, which must be left alone.
+        let solo = format!("{base}/solo");
+        std::fs::create_dir_all(&solo).unwrap();
+        let p = s.add_project(NewProject::at(&solo)).unwrap();
+        let work = s.create_work_in("solo work", Some(&p.id)).unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        let labels: Vec<String> = s
+            .forest()
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.kind == NodeKind::Project)
+            .map(|n| n.label)
+            .collect();
+
+        assert!(
+            labels.contains(&"web in one".to_string()),
+            "the first says where it is: {labels:?}",
+        );
+        assert!(
+            labels.contains(&"web in two".to_string()),
+            "and so does the second: {labels:?}",
+        );
+        assert!(
+            labels.contains(&"solo".to_string()),
+            "a name nothing shares is not qualified: {labels:?}",
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// A closed work belongs to its own repository, not to whatever row the
-    /// live pass happened to leave the cursor on.
+    /// live pass happened to leave the cursor on."""
     ///
     /// `fleet(All)` reads the live forest and then appends a second, closed
     /// one, and `condense` walks the concatenation with running state — the
