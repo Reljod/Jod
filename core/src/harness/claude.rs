@@ -79,6 +79,19 @@ impl Harness for ClaudeCode {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
         }
+        // How hard to think, when somebody has said. `claude --help` on 2.1.220
+        // spells it `--effort <level>` and takes all five of Jod's levels, so
+        // `flag_value` never refuses one here — it is asked anyway, because the
+        // rule it enforces is per harness and a reader of this file should not
+        // have to know which of the three this is.
+        //
+        // Nothing at all when `effort` is `None`, which is every spawn until a
+        // role says otherwise. That is the property the whole feature rests on:
+        // an unconfigured machine gets the argv it got yesterday.
+        if let Some(level) = req.effort.and_then(|e| e.flag_value(HarnessKind::ClaudeCode)) {
+            args.push(ArgPart::lit("--effort"));
+            args.push(ArgPart::lit(level));
+        }
         match &req.resume {
             Resume::Fresh => {}
             Resume::Last => args.push(ArgPart::lit("--continue")),
@@ -214,22 +227,49 @@ impl Harness for ClaudeCode {
             args.push(ArgPart::lit(path.to_string_lossy()));
             args.push(ArgPart::lit("--strict-mcp-config"));
         }
-        // Standing permission, and the channel that can ask for more.
+        // Standing permission, the channel that can ask for more, and the
+        // refusal to wait.
         //
-        // Only for a policy that actually stops to ask. `Bypass` approves
-        // everything before a hook could contribute anything, so installing one
-        // there would spawn a process per tool call to answer a question nobody
-        // asked. `Plan` refuses the whole class of writes by design, and a
-        // grant must not be a way around a mode whose entire job is that
-        // nothing changes.
-        if let (Some(run_id), true) = (
-            &req.run_id,
-            matches!(
-                req.permission,
-                PermissionPolicy::Ask | PermissionPolicy::AcceptEdits
-            ),
-        ) {
-            if let Ok(Some(path)) = write_settings(run_id) {
+        // Two independent reasons to write a settings document, and a run can
+        // have one, both or neither:
+        //
+        // * **The mode stops to ask.** `Ask` and `AcceptEdits` need the hook to
+        //   reach a person at all. `Bypass` approves everything before a hook
+        //   could contribute anything, so an approval hook there would spawn a
+        //   process per tool call to answer a question nobody asked, and `Plan`
+        //   refuses the whole class of writes by design — a grant must not be
+        //   the way around a mode whose entire job is that nothing changes.
+        // * **The run hands work to other agents.** Then it must not sit and
+        //   watch for the answer, in *any* mode including `auto`, because the
+        //   answer arrives on its own. That refusal is the only thing such a
+        //   document carries when the mode does not ask.
+        //
+        // A run that is neither still gets no document, exactly as before.
+        //
+        // **The `auto` half rests on a measurement, not on an assumption.**
+        // `docs/harness-support.md` recorded the open question — whether a hook
+        // that answers `deny` is still obeyed once `--dangerously-skip-
+        // permissions` is on — because until now Jod never installed a hook in
+        // that mode. Measured against claude 2.1.231 with a stand-in hook that
+        // denies `Bash`: the tool call was refused, the hook's own sentence
+        // came back as the tool result, and the run reported
+        // `permission_denials: [{"tool_name": "Bash", ...}]`. The model then
+        // explained the refusal in its own words rather than retrying, which is
+        // the behaviour the wording of the refusal is written for.
+        //
+        // **This is Claude Code only, and that is the honest limit.** `Bash`
+        // belongs to the harness, so Jod's MCP server never sees the call and
+        // has nothing to refuse; a `PreToolUse` hook is the only place Jod gets
+        // a say. OpenCode and AGY have no equivalent, so for them the same rule
+        // is preamble wording and nothing more. Main runs on Claude Code in
+        // practice, which is why the narrow fix is still worth having.
+        let asks = matches!(
+            req.permission,
+            PermissionPolicy::Ask | PermissionPolicy::AcceptEdits
+        );
+        let refuses_waiting = req.tools.is_some_and(|t| t.may_delegate());
+        if let (Some(run_id), true) = (&req.run_id, asks || refuses_waiting) {
+            if let Ok(Some(path)) = write_settings(run_id, asks, refuses_waiting) {
                 args.push(ArgPart::lit("--settings"));
                 args.push(ArgPart::lit(path.to_string_lossy()));
             }
@@ -543,17 +583,25 @@ const APPROVAL_WAIT_SECS: u64 = 60;
 /// modes denied silently and the refusal reached the model as a failed tool
 /// call it read as its own mistake. A `PreToolUse` hook is the only way into
 /// that decision on this build — there is no `--permission-prompt-tool` — so
-/// the document carries two things:
+/// the document carries two things when `asks` is set:
 ///
 /// * **`permissions.allow`**, the standing grants in Claude Code's own rule
 ///   syntax, so the harness answers what it can without spawning anything.
 /// * **the hook**, which catches the rest and is the only path that can reach a
 ///   person.
 ///
+/// `refuses_waiting` puts one more decision in that same hook, for a run that
+/// delegates: `sleep` and poll loops are denied and told why. It stands alone —
+/// a run in `auto` gets a document holding nothing but that.
+///
 /// Best-effort by construction. A run whose settings could not be written is a
 /// run that behaves exactly as it did before this existed, which is the right
 /// failure: the alternative is refusing to start over a convenience.
-fn write_settings(run_id: &str) -> crate::error::Result<Option<std::path::PathBuf>> {
+fn write_settings(
+    run_id: &str,
+    asks: bool,
+    refuses_waiting: bool,
+) -> crate::error::Result<Option<std::path::PathBuf>> {
     // The running executable, not a name on PATH — the same argument
     // `mcp_config` makes: a daemon started from a build directory must point
     // its children at *that* binary.
@@ -567,10 +615,24 @@ fn write_settings(run_id: &str) -> crate::error::Result<Option<std::path::PathBu
     // answer without spawning a hook, while the hook itself reads the live
     // table every call. A grant made mid-run therefore takes effect at once
     // rather than at the next spawn.
-    let grants = crate::store::Store::open(&crate::paths::db_path())
-        .and_then(|store| store.grants())
-        .unwrap_or_default();
-    let doc = settings_doc(&grants, &exe.to_string_lossy(), run_id, APPROVAL_WAIT_SECS);
+    //
+    // Not read at all for a mode that does not ask: a grant means nothing to
+    // `auto`, which allows everything anyway, and handing one to `plan` would
+    // be the way around the mode that this file has always refused to build.
+    let grants = match asks {
+        true => crate::store::Store::open(&crate::paths::db_path())
+            .and_then(|store| store.grants())
+            .unwrap_or_default(),
+        false => vec![],
+    };
+    let doc = settings_doc(
+        &grants,
+        &exe.to_string_lossy(),
+        run_id,
+        APPROVAL_WAIT_SECS,
+        asks,
+        refuses_waiting,
+    );
     let dir = crate::paths::run_dir(run_id);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("settings.json");
@@ -585,18 +647,35 @@ fn settings_doc(
     exe: &str,
     run_id: &str,
     wait: u64,
+    asks: bool,
+    refuses_waiting: bool,
 ) -> Value {
     let allow: Vec<String> = grants.iter().map(rule_for).collect();
+    let mut command = format!("{exe} approve-hook --run {run_id} --wait {wait}");
+    if refuses_waiting {
+        command.push_str(" --refuse-waiting");
+    }
+    // Which run holds which access, and which mode it is under, is known here
+    // and nowhere else: a hook is a fresh process that inherits neither. Both
+    // travel on the command line for the same reason `--run` does.
+    if !asks {
+        command.push_str(" --never-ask");
+    }
     serde_json::json!({
         "permissions": { "allow": allow },
         "hooks": {
             "PreToolUse": [{
-                // Every tool, not just `Bash`. A matcher naming one tool leaves
-                // the rest on the old silent-denial path.
-                "matcher": "*",
+                // Every tool when the mode asks: a matcher naming one tool
+                // leaves the rest on the old silent-denial path.
+                //
+                // `Bash` alone when it does not, because then the hook has one
+                // job and `Bash` is the only tool it can happen to. Matching
+                // `*` there would spawn a process in front of every `Read` in
+                // an `auto` run to decide nothing.
+                "matcher": if asks { "*" } else { "Bash" },
                 "hooks": [{
                     "type": "command",
-                    "command": format!("{exe} approve-hook --run {run_id} --wait {wait}"),
+                    "command": command,
                     // Above Jod's own wait, so the decision that lands is Jod's
                     // rather than the harness killing the hook mid-question.
                     "timeout": wait + 20,
@@ -696,6 +775,7 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::{Effort, Role};
     use std::path::PathBuf;
 
     fn req(permission: PermissionPolicy, model: Option<&str>) -> SpawnRequest {
@@ -754,6 +834,52 @@ mod tests {
     fn no_roots_means_no_directory_flag() {
         let args = flat(&req(PermissionPolicy::Bypass, None));
         assert!(!args.iter().any(|a| a == "--add-dir"));
+    }
+
+    /// SPEC check 29. `claude --help` on 2.1.220 spells reasoning effort
+    /// `--effort <level>`, so a role that asks for `high` says so on the
+    /// command line and nowhere else — no environment variable is involved.
+    #[test]
+    fn an_effort_level_reaches_claude_code_as_its_own_flag() {
+        let mut r = req(PermissionPolicy::Bypass, None);
+        r.effort = Some(Effort::High);
+        let args = flat(&r);
+        let at = args
+            .iter()
+            .position(|a| a == "--effort")
+            .expect("a level that was asked for must reach the command line");
+        assert_eq!(args[at + 1], "high");
+    }
+
+    /// The two levels this harness alone has. They are passed as asked rather
+    /// than folded into `high`, because Claude Code is the one harness that
+    /// knows the words.
+    #[test]
+    fn the_top_two_levels_are_passed_through_here() {
+        for level in [Effort::XHigh, Effort::Max] {
+            let mut r = req(PermissionPolicy::Bypass, None);
+            r.effort = Some(level);
+            let args = flat(&r);
+            let at = args.iter().position(|a| a == "--effort").unwrap();
+            assert_eq!(args[at + 1], level.as_str());
+        }
+    }
+
+    /// The other half of check 29, and the one that keeps an empty `roles`
+    /// table honest: with no level asked for, the flag is absent entirely and
+    /// the argv is the argv this adapter produced before roles existed.
+    #[test]
+    fn no_effort_level_means_no_effort_flag_and_no_other_change() {
+        let plain = req(PermissionPolicy::Bypass, Some("sonnet"));
+        assert!(plain.effort.is_none(), "the default asks for nothing");
+        let args = flat(&plain);
+        assert!(!args.iter().any(|a| a == "--effort"));
+
+        // And a request that merely carries a role tag is the same request:
+        // the tag is spent at the spawn seam and never reaches a harness.
+        let mut tagged = plain.clone();
+        tagged.role = Some(Role::Scratch);
+        assert_eq!(flat(&tagged), args);
     }
 
     /// `--add-dir` is variadic — `claude --help` spells it
@@ -1040,6 +1166,8 @@ mod tests {
             "/usr/local/bin/jod",
             "run-1",
             60,
+            true,
+            false,
         );
         let allow: Vec<&str> = doc["permissions"]["allow"]
             .as_array()
@@ -1054,7 +1182,7 @@ mod tests {
     /// hook while somebody is still deciding and the answer lands nowhere.
     #[test]
     fn the_harness_waits_longer_than_the_question_it_is_holding_open() {
-        let doc = settings_doc(&[], "/usr/local/bin/jod", "run-7", 60);
+        let doc = settings_doc(&[], "/usr/local/bin/jod", "run-7", 60, true, false);
         let hook = &doc["hooks"]["PreToolUse"][0]["hooks"][0];
         assert!(
             hook["timeout"].as_u64().unwrap() > 60,
@@ -1069,13 +1197,18 @@ mod tests {
         assert_eq!(doc["hooks"]["PreToolUse"][0]["matcher"], "*");
     }
 
-    /// **The hook belongs to the modes that stop to ask, and to no others.**
+    /// **The approval hook belongs to the modes that stop to ask, and to no
+    /// others.**
     ///
     /// `Bypass` has already approved everything before a hook could contribute,
     /// so installing one there buys a process per tool call and no decision.
     /// `Plan` refuses the whole class of writes on purpose, and a standing
     /// grant must never become the way around a mode whose entire job is that
     /// nothing changes.
+    ///
+    /// The run here delegates nothing, which is the other half of the promise:
+    /// a run that got no settings document before the refusal-to-wait existed
+    /// still gets none.
     #[test]
     fn only_the_modes_that_ask_carry_the_approval_hook() {
         for policy in [PermissionPolicy::Ask, PermissionPolicy::AcceptEdits] {
@@ -1087,14 +1220,125 @@ mod tests {
             );
         }
         for policy in [PermissionPolicy::Plan, PermissionPolicy::Bypass] {
-            let mut r = req(policy, None);
-            r.run_id = Some("run-settings".into());
-            assert!(
-                !flat(&r).contains(&"--settings".to_string()),
-                "{policy:?} was given an approval hook it has no use for"
-            );
+            for tools in [None, Some(super::super::ToolAccess::ReadOnly)] {
+                let mut r = req(policy, None);
+                r.run_id = Some("run-settings".into());
+                r.tools = tools;
+                assert!(
+                    !flat(&r).contains(&"--settings".to_string()),
+                    "{policy:?} at {tools:?} was given a hook it has no use for"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-settings"));
+    }
+
+    /// The settings document this request produces, read back off disk.
+    ///
+    /// Read rather than rebuilt, because the thing under test is what the
+    /// harness will be handed — a document built correctly and pointed at by
+    /// the wrong path is still a run with no rules.
+    fn settings_written_for(r: &SpawnRequest) -> Option<Value> {
+        let args = flat(r);
+        let at = args.iter().position(|a| a == "--settings")?;
+        let raw = std::fs::read_to_string(&args[at + 1]).expect("the document it named");
+        Some(serde_json::from_str(&raw).expect("a document the harness could read"))
+    }
+
+    /// **A run that hands work to other agents is refused its waiting commands
+    /// in every mode, `auto` included.**
+    ///
+    /// This is the one that matters. The bug is main busy-waiting on a run it
+    /// has just delegated, and main's default mode is `auto` — the mode Jod
+    /// wrote no settings document for at all, so the rule would have been
+    /// installed everywhere except where it was needed.
+    #[test]
+    fn a_run_that_delegates_is_told_not_to_wait_in_every_mode() {
+        for policy in PermissionPolicy::ALL {
+            for access in [
+                super::super::ToolAccess::Delegate,
+                super::super::ToolAccess::Orchestrate,
+            ] {
+                let id = format!("run-waiting-{}-{}", policy.as_str(), access.as_str());
+                let mut r = req(policy, None);
+                r.run_id = Some(id.clone());
+                r.tools = Some(access);
+                let doc = settings_written_for(&r)
+                    .unwrap_or_else(|| panic!("{policy:?} at {access:?} got no settings document"));
+                let hook = &doc["hooks"]["PreToolUse"][0]["hooks"][0];
+                assert!(
+                    hook["command"].as_str().unwrap().contains("--refuse-waiting"),
+                    "{policy:?} at {access:?} was left able to poll: {hook}"
+                );
+                let _ = std::fs::remove_dir_all(crate::paths::run_dir(&id));
+            }
+        }
+    }
+
+    /// A run that cannot delegate has nothing to wait for, so it keeps every
+    /// command it had. `sleep 5` in a build script is ordinary work.
+    #[test]
+    fn a_run_that_delegates_nothing_keeps_its_waiting_commands() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.run_id = Some("run-waiting-readonly".into());
+        r.tools = Some(super::super::ToolAccess::ReadOnly);
+        let doc = settings_written_for(&r).expect("ask still asks");
+        let hook = &doc["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert!(!hook["command"].as_str().unwrap().contains("--refuse-waiting"));
+
+        // And in `auto` it gets no document at all, which is check 8's other
+        // half: read-only work is untouched by any of this.
+        let mut r = req(PermissionPolicy::Bypass, None);
+        r.run_id = Some("run-waiting-readonly".into());
+        r.tools = Some(super::super::ToolAccess::ReadOnly);
+        assert!(settings_written_for(&r).is_none());
+        let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-waiting-readonly"));
+    }
+
+    /// **A mode that never asks must not start asking.**
+    ///
+    /// Installing the hook in `auto` to carry the refusal puts Jod in front of
+    /// a tool call it was not in front of before. If that hook then raised
+    /// approval cards, every call in an unattended run would stop for a minute
+    /// waiting on an answer nobody is there to give — the block this whole
+    /// change exists to remove, rebuilt one tool call at a time. Hence
+    /// `--never-ask`, and no standing grants to reason about either.
+    #[test]
+    fn the_refusal_does_not_turn_auto_into_a_mode_that_asks() {
+        let mut r = req(PermissionPolicy::Bypass, None);
+        r.run_id = Some("run-waiting-auto".into());
+        r.tools = Some(super::super::ToolAccess::Orchestrate);
+        let doc = settings_written_for(&r).expect("an orchestrating run is given the refusal");
+        let entry = &doc["hooks"]["PreToolUse"][0];
+        assert!(entry["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--never-ask"));
+        assert_eq!(
+            doc["permissions"]["allow"].as_array().unwrap().len(),
+            0,
+            "a mode that allows everything was handed grants to allow it with"
+        );
+        // One job, one tool. Matching `*` here would spawn a process in front
+        // of every `Read` to decide nothing.
+        assert_eq!(entry["matcher"], "Bash");
+        let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-waiting-auto"));
+    }
+
+    /// A run that both asks and delegates gets both, and the approval half
+    /// still covers every tool.
+    #[test]
+    fn a_delegating_run_that_also_asks_gets_both_decisions() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.run_id = Some("run-waiting-ask".into());
+        r.tools = Some(super::super::ToolAccess::Orchestrate);
+        let doc = settings_written_for(&r).expect("ask carries the hook");
+        let entry = &doc["hooks"]["PreToolUse"][0];
+        let command = entry["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("--refuse-waiting"));
+        assert!(!command.contains("--never-ask"), "ask means ask");
+        assert_eq!(entry["matcher"], "*");
+        let _ = std::fs::remove_dir_all(crate::paths::run_dir("run-waiting-ask"));
     }
 
     /// the same one this test has always had; it now covers four modes rather

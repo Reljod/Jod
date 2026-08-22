@@ -28,6 +28,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -36,7 +37,7 @@ use serde_json::{json, Value};
 use crate::cards::{Card, CardKind, Importance, NewCard, Source, Status};
 use crate::delivery;
 use crate::event::AgentEvent;
-use crate::harness::{default_name, ToolAccess};
+use crate::harness::{default_name, Role, ToolAccess};
 use crate::orchestrator::Delegation;
 use crate::schedule::{Goal, GoalState, Schedule, ScheduleState};
 use crate::secrets;
@@ -199,6 +200,36 @@ pub fn catalogue() -> Vec<Tool> {
                     )
                 }),
                 &[],
+            ),
+        },
+        Tool {
+            name: "ask_assistant",
+            description:
+                "Hand an instruction to a fresh assistant and come straight back. This is the \
+                 main chat's one verb: the assistant is the layer that decides whether the \
+                 instruction needs a repository, a one-shot agent, or nothing but an answer, \
+                 and it does that in a conversation nobody is typing into.\n\n\
+                 Returns as soon as the assistant's run has started, never when it has \
+                 finished, and never with the answer. The answer reaches you later as a card \
+                 on your rail. Do not wait for it and do not poll for it.\n\n\
+                 Pass Reljod's words through exactly as he said them. Do not summarise them, \
+                 do not rewrite them, and do not resolve which project he meant — the project \
+                 is already settled before your turn starts, and the assistant reads the same \
+                 words with the same context beside them.\n\n\
+                 Every call starts a new assistant. There is no standing one to reach, on \
+                 purpose: a standing assistant would make each instruction wait for the one \
+                 before it.",
+            // The line every tool that starts an agent sits on. The power an
+            // unattended run should hold least of is the power to create more
+            // unattended runs, and this creates one that can create more.
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "instruction": text(
+                        "What Reljod asked for, in his own words, passed through unchanged."
+                    )
+                }),
+                &["instruction"],
             ),
         },
         Tool {
@@ -956,6 +987,25 @@ pub struct Server {
     /// is the honest refusal. There is deliberately no way to set it from a
     /// tool call.
     identity: Identity,
+    /// How many times this run has looked at the fleet.
+    ///
+    /// **This lives on the server because, for a run Jod started, the server
+    /// *is* the turn.** The harness spawns `jod mcp` as its own child and a
+    /// run's process exits when its turn ends, so the server dies with it: one
+    /// server, one run, one turn. That is exactly the span A4 wants to allow
+    /// one look in. Keeping the count in the database instead would need a turn
+    /// boundary nothing writes down, and keeping it per-run-for-ever would
+    /// refuse the first `list_agents` of every turn after the first.
+    ///
+    /// The identity check in [`Server::refuse_a_second_look`] is what keeps
+    /// that true. A session somebody opened by hand holds one server across
+    /// many turns, and counting its looks would refuse the second one of the
+    /// afternoon; it is also not the thing this rule exists for, which is a
+    /// router burning an unattended turn on a poll loop.
+    ///
+    /// An atomic rather than a `Mutex<usize>` because [`Server::call`] takes
+    /// `&self` and the only operation is a count.
+    fleet_looks: AtomicUsize,
 }
 
 impl Server {
@@ -971,6 +1021,7 @@ impl Server {
             access: ToolAccess::ReadOnly,
             max_permission: PermissionPolicy::Ask,
             identity: Identity::Unknown,
+            fleet_looks: AtomicUsize::new(0),
         }
     }
 
@@ -1046,6 +1097,7 @@ impl Server {
         }
         match name {
             "list_agents" => self.list_agents(args).await,
+            "ask_assistant" => self.ask_assistant(args).await,
             "delegate" => self.delegate(args).await,
             "continue_agent" => self.continue_agent(args).await,
             "stop_agent" => self.stop_agent(args).await,
@@ -1087,7 +1139,49 @@ impl Server {
 
     // ---- agents ---------------------------------------------------------
 
+    /// One look at the fleet per turn, and the second call is refused.
+    ///
+    /// **A4, at the tool boundary rather than in a preamble.** The failure this
+    /// exists for is written down in `tasks/01-routing.md` R4: a run that had
+    /// handed work over sat calling `list_agents` again and again, waiting for
+    /// a child it could not hurry, and spent forty-two seconds and thirty-nine
+    /// cents mostly asleep before ending without the answer. Prose telling it
+    /// not to is advice, and this is a rule the model talks itself past every
+    /// time, because looking once more always feels like diligence.
+    ///
+    /// The first call is a legitimate decision — who is free, what is running.
+    /// The second call inside one turn cannot be: nothing the caller is waiting
+    /// for arrives by being looked at, and everything it is waiting for arrives
+    /// on its own as a card or a message.
+    ///
+    /// Two bounds, and both are about where the reason stops.
+    ///
+    /// **Only the levels that can start work.** A read-only run cannot hand
+    /// anything over, so it has nothing to be waiting for; polling the fleet
+    /// from there is somebody's dashboard, not a router burning a turn.
+    ///
+    /// **Only a run Jod started.** That is what makes this server one turn —
+    /// see [`Server::fleet_looks`]. A session opened by hand keeps one server
+    /// across an afternoon, and refusing its second `list_agents` would be
+    /// enforcing a per-turn budget against something that is not a turn.
+    fn refuse_a_second_look(&self) -> Result<(), ToolError> {
+        if !self.access.may_delegate() || self.run().is_none() {
+            return Ok(());
+        }
+        if self.fleet_looks.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        Err(ToolError::Refused(
+            "you have already looked at the fleet this turn, and nothing has changed that a \
+             second look would tell you. Whatever you are waiting for arrives on its own — a \
+             card on the rail, or a message that starts a turn of yours — and not by being \
+             watched for. Act on what the first call said, or return and say what you did."
+                .into(),
+        ))
+    }
+
     async fn list_agents(&self, args: &Value) -> Result<String, ToolError> {
+        self.refuse_a_second_look()?;
         let running_only = opt_bool(args, "running_only").unwrap_or(false);
         let limit = opt_usize(args, "limit")?.unwrap_or(20);
         // What a manager asks with, so it reads its own project rather than the
@@ -1138,7 +1232,38 @@ impl Server {
             .as_ref()
             .and_then(|s| s.router_run_ids().ok())
             .unwrap_or_default();
+        // Which runs are scratch, and which conversation each of them wrote
+        // into. Both halves are needed: the flag keeps a scratch row out of the
+        // engineer answer, and the conversation is what the reuse candidates
+        // below are named by.
+        let scratch_runs = store
+            .as_ref()
+            .and_then(|s| s.scratch_runs().ok())
+            .unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // The scratch sessions recent enough to be worth continuing, most
+        // recently active first.
+        //
+        // A window of zero is reuse switched off, and it is a real setting
+        // rather than a degenerate case — it is the way back to a fresh session
+        // per instruction if reuse turns out badly. Asking the store for
+        // candidates "since the beginning of time" would be the opposite
+        // answer, so the window is checked before the query and not inside it.
+        let reuse_window_minutes = store
+            .as_ref()
+            .and_then(|s| s.scratch_reuse_window_minutes().ok())
+            .unwrap_or(0);
+        let scratch_candidates: Vec<String> = match reuse_window_minutes > 0 {
+            false => Vec::new(),
+            true => store
+                .as_ref()
+                .and_then(|s| {
+                    s.scratch_reuse_candidates(now_ms - reuse_window_minutes * 60_000)
+                        .ok()
+                })
+                .unwrap_or_default(),
+        };
 
         let keep = |a: &&crate::service::AgentSummary| {
             if running_only && a.status != AgentStatus::Running {
@@ -1193,6 +1318,7 @@ impl Server {
                     stalled_for_ms,
                     busy: a.status == AgentStatus::Running && stalled_for_ms.is_none(),
                     free: is_free(a),
+                    scratch: scratch_runs.contains_key(&a.id),
                 }
             })
             .collect();
@@ -1200,11 +1326,41 @@ impl Server {
         // Computed over everything the filter matched rather than over the page,
         // because a free engineer that fell off the end of `limit` is still the
         // right answer and its run id is all `continue_agent` needs.
+        //
+        // **Scratch is excluded, and leaving it in is a real bug rather than a
+        // tidiness point.** `is_free` matches a finished scratch session as
+        // happily as an engineer — completed, with a session id, not a router —
+        // so a lookup that finished five minutes ago would land here and be
+        // advertised by the sentence below as an agent that "already holds this
+        // checkout". It holds no checkout at all. Scratch has its own list and
+        // its own sentence, a few lines down, saying something close to the
+        // opposite.
         let idle: Vec<&str> = agents
             .iter()
             .filter(keep)
-            .filter(|a| is_free(a))
+            .filter(|a| is_free(a) && !scratch_runs.contains_key(&a.id))
             .map(|a| a.id.as_str())
+            .collect();
+
+        // The scratch half, in the store's order — most recently active first,
+        // which is the order the caller reads it in to find the session that
+        // was talking about what it is about to ask.
+        //
+        // Named by conversation and answered by run, because that is how the
+        // two sides are keyed: a scratch conversation may have been continued
+        // more than once, so the run to continue is its newest, and the store
+        // has already established that the newest one finished cleanly with a
+        // session to resume.
+        let scratch_idle: Vec<&str> = scratch_candidates
+            .iter()
+            .filter_map(|conversation| {
+                agents
+                    .iter()
+                    .filter(keep)
+                    .filter(|a| scratch_runs.get(&a.id) == Some(conversation))
+                    .max_by_key(|a| a.created_at_ms)
+                    .map(|a| a.id.as_str())
+            })
             .collect();
         // Stalled counted separately from busy, because they lead to the same
         // tool call for opposite reasons and saying "busy" about a wedged run
@@ -1238,6 +1394,31 @@ impl Server {
             ),
         };
 
+        // **The scratch sentence says close to the opposite of the engineer
+        // one, and that is the point of having two.**
+        //
+        // `reuse` above tells the caller to prefer a free agent "for any
+        // instruction here, including one on a different subject", which is
+        // right for an engineer: what it is worth reusing for is the warm
+        // checkout, and every instruction in that repository benefits from it
+        // whatever the subject. A scratch session has no checkout. The only
+        // thing it carries that a fresh one would not is the subject it was
+        // talking about, so reusing it across subjects buys nothing and
+        // muddles what it knows. One sentence covering both cases would have
+        // to be vague enough to be wrong about one of them.
+        let scratch_reuse = scratch_idle.first().map(|run_id| {
+            format!(
+                "`{run_id}` is a scratch session that has finished recently — read its \
+                 `last_message` to see what it was doing. Continue it with `continue_agent` \
+                 **only if this instruction carries on that same subject**. It holds no \
+                 checkout, so what it is worth reusing for is what it was already talking \
+                 about, and nothing else. A different subject gets a new session with \
+                 `delegate`, beside it. Never wait for a scratch session that is still \
+                 running — one that is busy is not on this list, and the answer to it being \
+                 busy is a new session, not a delay."
+            )
+        });
+
         // How many there were to choose from. The database is the authority on
         // that — this process only ever reads back the newest few hundred runs,
         // so counting what it holds would understate a busy box — but it can
@@ -1257,6 +1438,8 @@ impl Server {
             hidden,
             idle,
             reuse,
+            scratch_idle,
+            scratch_reuse,
             // Spelled out as well as counted. The caller is a model deciding
             // whether it has seen every agent it might reuse, and a bare number
             // does not say what to do about it.
@@ -1267,6 +1450,30 @@ impl Server {
     }
 
     async fn delegate(&self, args: &Value) -> Result<String, ToolError> {
+        let req = self.delegate_request(args)?;
+
+        if !self.jod.supervisor_available() {
+            return Err(ToolError::Refused(
+                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
+            ));
+        }
+
+        let tools = req.tools.unwrap_or(ToolAccess::ReadOnly);
+        self.spawn_delegated(req, tools).await
+    }
+
+    /// Everything `delegate` decides before anything is spawned.
+    ///
+    /// Split out so the request can be inspected without a harness on the
+    /// machine. What it carries is four rungs of precedence and three refusals,
+    /// and the only way to check any of it through `delegate` itself would be
+    /// to launch a real model and read back what it was launched with.
+    fn delegate_request(&self, args: &Value) -> Result<SpawnRequest, ToolError> {
+        // Main lost this one along with `ask_manager` and `open_work`. It kept
+        // `delegate` for as long as it was allowed to answer repo-less
+        // questions itself; now that branch belongs to the assistant, and so
+        // does the verb that serves it.
+        self.refuse_routing_from_main("delegate")?;
         let prompt = required_str(args, "prompt")?;
         if prompt.trim().is_empty() {
             return Err(ToolError::BadParams("`prompt` is empty".into()));
@@ -1282,12 +1489,17 @@ impl Server {
 
         // The route around `open_work`'s refusal, closed.
         //
-        // Main keeps `delegate` for genuinely repo-less one-shots — without it
-        // it could not answer "what's the weather in Manila" without opening a
-        // work. But `delegate` takes a `cwd`, so a model that has just been
-        // refused `open_work` and still wants to help will point one at the
-        // checkout, and it will feel entirely reasonable at the time. That is
-        // the rule routed around, silently.
+        // The assistant keeps `delegate` for genuinely repo-less one-shots —
+        // without it, "what's the weather in Manila" could not be handled
+        // without opening a work. But `delegate` takes a `cwd`, so a model that
+        // wants to help with something about a repository will point one at the
+        // checkout rather than call `ask_manager`, and it will feel entirely
+        // reasonable at the time. That is the rule routed around, silently.
+        //
+        // Main is refused `delegate` outright above, so the caller this catches
+        // now is the assistant. Both are still tested, because the check that
+        // matters is which conversations may not start work beside a manager,
+        // and main is one of them whatever else refuses it first.
         //
         // Refused only when the directory is a *catalogued* project. That is
         // the same test `open_work`'s refusal rests on and it keeps the honest
@@ -1296,7 +1508,7 @@ impl Server {
         if let Ok(store) = self.store() {
             if let Ok(Some(project)) = store.project_for_path(&cwd) {
                 if let Ok(raiser) = self.raiser() {
-                    if self.caller_is_main(&raiser) {
+                    if self.caller_is_main(&raiser) || self.caller_is_assistant(&raiser) {
                         return Err(ToolError::Refused(format!(
                             "`{}` is {}'s checkout, and a run started there is repository work \
                              however small the prompt looks. Call `ask_manager` with project \
@@ -1311,13 +1523,7 @@ impl Server {
             }
         }
 
-        if !self.jod.supervisor_available() {
-            return Err(ToolError::Refused(
-                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
-            ));
-        }
-
-        let req = SpawnRequest {
+        Ok(SpawnRequest {
             name: opt_str(args, "name").unwrap_or_else(|| default_name(&prompt)),
             harness,
             prompt,
@@ -1337,8 +1543,31 @@ impl Server {
             permission,
             resume: Resume::Fresh,
             tools: Some(tools),
+            // A one-shot errand is what the `scratch` role names, and this is
+            // the spawn the roles panel most obviously targets: a lookup does
+            // not need the model an engineer needs.
+            //
+            // Only when the call named no harness. An explicit argument
+            // outranks the row, and `harness` above has already had the default
+            // substituted into it, so this is the last point that still knows
+            // the difference.
+            role: opt_str(args, "harness").is_none().then_some(Role::Scratch),
             ..SpawnRequest::default()
-        };
+        })
+    }
+
+    /// Start the run `delegate_request` described, and write down the three
+    /// things that make it findable afterwards: who asked for it, that it is
+    /// scratch, and the address it answers on.
+    ///
+    /// The half of `delegate` that cannot happen without a harness on the
+    /// machine, kept apart from the half that can so the decisions above are
+    /// testable on their own.
+    async fn spawn_delegated(
+        &self,
+        req: SpawnRequest,
+        tools: ToolAccess,
+    ) -> Result<String, ToolError> {
         let agent = self
             .jod
             .spawn_agent(req)
@@ -1350,6 +1579,34 @@ impl Server {
         // orchestrator's own `jod main` listed the handoff *to* it and never
         // one of the agents it started.
         self.record_handoff("delegate", &agent.id, true);
+        // What `delegate` starts is a scratch session, and this is where it is
+        // marked as one — B1. Everything downstream keys on the column: the
+        // sweep that archives a finished scratch row and deletes it later, and
+        // the reuse candidates `list_agents` offers the assistant. Without this
+        // there are no scratch rows at all, and both read as working while
+        // finding nothing.
+        //
+        // Best-effort, like the handoff above and for the same reason: a
+        // delegation that happened and was recorded badly is a smaller problem
+        // than one refused over bookkeeping. The cost of it failing is a row
+        // that never tidies itself away, which is visible and fixable.
+        if let Ok(store) = self.store() {
+            match store.conversation_for_run(&agent.id) {
+                Ok(Some(conversation)) => {
+                    if let Err(e) = store.mark_ephemeral(&conversation) {
+                        eprintln!("[jod] could not mark {conversation} ephemeral: {e}");
+                    }
+                }
+                // The run has not written into a conversation yet. Nothing to
+                // mark; the sweep leaves an unmarked row alone, which is the
+                // safe direction to be wrong in.
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "[jod] could not resolve the conversation for {}: {e}",
+                    agent.id
+                ),
+            }
+        }
         // And the way back. A delegated run belongs to no work and therefore to
         // no addressing scope, so until this existed every bus tool it called
         // answered `run ... is not a member of any team or work` — measured, in
@@ -1518,10 +1775,39 @@ impl Server {
         // Keep the follow-up in the same conversation the first turn opened, so
         // the transcript reads as one thread rather than as two runs that
         // happen to share a session id.
-        let conversation = match self.store()?.conversation_for_run(&run_id) {
-            Ok(Some(id)) => RunConversation::Existing(id),
-            _ => RunConversation::New,
+        let existing = self.store()?.conversation_for_run(&run_id).ok().flatten();
+        let conversation = match &existing {
+            Some(id) => RunConversation::Existing(id.clone()),
+            None => RunConversation::New,
         };
+
+        // **Which role this is depends on what is being continued.** A
+        // follow-up to an engineer is an engineer; a follow-up to a scratch
+        // session is scratch, and that is the whole of A6 — the assistant
+        // reaches for this tool rather than `delegate` when a recent errand was
+        // already on the subject. Tagging every continuation `engineer` would
+        // put a lookup on the model an engineer needs, which is the opposite of
+        // what the panel is for.
+        //
+        // No harness question here: this resumes a session, and `apply_role`
+        // leaves a resumed request's harness alone, because a session id means
+        // nothing to a program that did not mint it.
+        let scratch = existing
+            .as_ref()
+            .and_then(|id| self.store().ok().and_then(|s| s.is_ephemeral(id).ok()))
+            .unwrap_or(false);
+
+        // A scratch conversation that had been archived is working again, so it
+        // belongs back in the fleet. Archived means "finished and out of the
+        // way", not "closed" — it archives itself once more when this run ends.
+        // Unconditional and best-effort: clearing a null `archived_at_ms` is a
+        // no-op, so there is nothing to be careful about and nothing worth
+        // refusing a follow-up over.
+        if let (Some(id), Ok(store)) = (&existing, self.store()) {
+            if let Err(e) = store.unarchive_conversation(id) {
+                eprintln!("[jod] could not bring {id} back to the fleet: {e}");
+            }
+        }
 
         let req = SpawnRequest {
             name: agent.name.clone(),
@@ -1535,6 +1821,10 @@ impl Server {
             permission: agent.permission,
             resume: Resume::Session(session),
             tools: Some(tools),
+            role: Some(match scratch {
+                true => Role::Scratch,
+                false => Role::Engineer,
+            }),
             ..SpawnRequest::default()
         };
         let next = self
@@ -2267,25 +2557,160 @@ impl Server {
         }
     }
 
-    /// Refuse a repository-shaped call from the main chat, naming `ask_manager`.
+    /// Which conversation holds the project pointer this caller is really
+    /// setting.
     ///
-    /// Main routes and answers. Anything touching a repository goes through
-    /// that project's manager, because a manager is only worth having if it is
-    /// the one conversation that has seen everything that ever happened in its
-    /// repository — and work started around it is work it does not know about.
-    fn refuse_repository_work_from_main(
-        &self,
-        raiser: &Raiser,
-        tool: &str,
-    ) -> Result<(), ToolError> {
-        if !self.caller_is_main(raiser) {
+    /// Its own, for everybody except an assistant. An assistant's conversation
+    /// is opened for one instruction and never read again, so a sticky pointer
+    /// written there is discarded at the end of the turn that wrote it — and
+    /// the pointer's entire purpose is that the *next* instruction inherits it.
+    /// Main is where it has to land, and main is the assistant's parent.
+    ///
+    /// Falls back to the caller's own conversation when there is no parent,
+    /// which is a database that has no main chat yet. Writing it somewhere is
+    /// better than dropping it, and the row is harmless where it lands.
+    fn sticky_conversation(&self, raiser: &Raiser) -> String {
+        if !self.caller_is_assistant(raiser) {
+            return raiser.conversation_id.clone();
+        }
+        self.store()
+            .ok()
+            .and_then(|s| s.parent_conversation(&raiser.conversation_id).ok().flatten())
+            .unwrap_or_else(|| raiser.conversation_id.clone())
+    }
+
+    /// Whether the run calling this is an assistant.
+    ///
+    /// Read off `conversations.origin`, which [`Store::open_assistant_conversation`]
+    /// wrote when the conversation was created — so, like
+    /// [`Server::caller_is_main`], it is sender identity the caller cannot argue
+    /// with. An unreadable origin means "not an assistant", for the same reason
+    /// an unresolvable identity means "not main": failing closed here would
+    /// refuse ordinary agents over a database read.
+    fn caller_is_assistant(&self, raiser: &Raiser) -> bool {
+        let Ok(store) = self.store() else {
+            return false;
+        };
+        matches!(
+            store.conversation_origin(&raiser.conversation_id),
+            Ok(Some(origin)) if origin == crate::orchestrator::ASSISTANT_ORIGIN
+        )
+    }
+
+    /// Hand one instruction to a brand new assistant, and return at once.
+    ///
+    /// **The one thing this must never do is wait.** It is called inside main's
+    /// turn, and main's turn is the console: every millisecond spent here is a
+    /// millisecond Reljod cannot type into the box. So it starts the run and
+    /// returns its id, and the assistant's answer comes back later as a card.
+    ///
+    /// A fresh conversation on every call, never a standing one. That is A1,
+    /// and it is the whole reason this design removes the block rather than
+    /// moving it: a standing assistant would serialise, so instruction two
+    /// would wait behind instruction one exactly as it waits behind main's turn
+    /// today.
+    ///
+    /// **An assistant may not ask for an assistant.** Nothing bounds that
+    /// recursion — an assistant that finds handing over easier than deciding
+    /// would produce another one, which would produce another — and there is
+    /// nothing it buys, because an assistant already holds every verb the one
+    /// it would start would hold. This is beyond what the spec asks for and it
+    /// is cheap; the refusal says which verb to use instead, since a rule that
+    /// only says no leaves the model guessing at what yes is.
+    async fn ask_assistant(&self, args: &Value) -> Result<String, ToolError> {
+        let instruction = required_str(args, "instruction")?;
+        if instruction.trim().is_empty() {
+            return Err(ToolError::BadParams(
+                "`instruction` is what the assistant is being asked to deal with, and an \
+                 empty one would start a run with nothing to act on"
+                    .into(),
+            ));
+        }
+        if let Ok(raiser) = self.raiser() {
+            if self.caller_is_assistant(&raiser) {
+                return Err(ToolError::Refused(
+                    "you are the assistant, so there is nobody below you to ask. Nothing \
+                     bounds a chain of assistants asking each other, and it buys nothing — \
+                     you already hold every tool one you started would hold. Decide it here: \
+                     `ask_manager` for anything touching a repository, `delegate` for a \
+                     one-shot that needs none, or answer it yourself."
+                        .into(),
+                ));
+            }
+        }
+
+        if !self.jod.supervisor_available() {
+            return Err(ToolError::Refused(
+                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
+            ));
+        }
+
+        // No `harness` argument, and no way to ask for one. The assistant is a
+        // layer rather than a one-off errand, so which harness and model run it
+        // is a standing setting — Epic C's `roles` row — and not something the
+        // model picks per call. Until that lands it is the default, which is
+        // what every other spawn here already does.
+        let assisted = crate::orchestrator::hand_to_assistant(
+            &self.jod,
+            &instruction,
+            HarnessKind::ClaudeCode,
+            default_cwd(),
+            self.max_permission,
+        )
+        .await
+        .map_err(|e| ToolError::Refused(format!("could not start an assistant: {e}")))?;
+
+        // Written down so main's own transcript shows what it did with the
+        // instruction. `link_child` is false: `hand_to_assistant` has already
+        // hung the new conversation under main, and re-parenting it here would
+        // do the same work twice with one more chance of getting it wrong.
+        self.record_handoff("ask_assistant", &assisted.run_id, false);
+
+        as_json(&json!({
+            "run_id": assisted.run_id,
+            "name": assisted.name,
+            "conversation_id": assisted.conversation_id,
+            "note": "running. It decides what happens to that instruction and raises a card on \
+                     your rail when it has. Do not wait for it and do not look for it: a card \
+                     arrives whether or not anybody is watching, and anything it starts \
+                     underneath it answers you by starting a turn of yours.",
+        }))
+    }
+
+    /// Refuse a routing call from the main chat, naming `ask_assistant`.
+    ///
+    /// **Main only delegates.** It hands the instruction to an assistant and
+    /// comes back; it does not route it, does not choose a project, and does
+    /// not answer it. So all three verbs that make something happen —
+    /// `ask_manager`, `delegate` and `open_work` — are refused here.
+    ///
+    /// This is enforcement rather than advice, and it has to be, because the
+    /// rule is one a helpful model talks itself past. The refusal that used to
+    /// live here covered `open_work` alone and named `ask_manager` as the way
+    /// forward, which was right while main still routed. It does not any more:
+    /// routing costs a model turn, main's turn is the console's, and a console
+    /// that thinks is a console Reljod cannot type into.
+    ///
+    /// Keyed on identity and never on access level, which is the only thing
+    /// that works: [`ToolAccess`] is a ladder, so lowering main below
+    /// `Orchestrate` to take `delegate` away would take `schedule_create` and
+    /// `goal_create` with it, and those stay with main on purpose.
+    ///
+    /// A caller Jod cannot identify is not main. A run Jod did not start has no
+    /// pinned conversation to be, and refusing everything unidentifiable would
+    /// break `jod run` against its own MCP server.
+    fn refuse_routing_from_main(&self, tool: &str) -> Result<(), ToolError> {
+        let Ok(raiser) = self.raiser() else {
+            return Ok(());
+        };
+        if !self.caller_is_main(&raiser) {
             return Ok(());
         }
         Err(ToolError::Refused(format!(
-            "`{tool}` is not the main chat's to call. Anything touching a repository goes to \
-             that project's manager: call `ask_manager` with the project and Reljod's \
-             instruction, and it will decide whether to continue an agent or open new work. \
-             It answers onto your rail, so hand it over and come straight back."
+            "`{tool}` is not the main chat's to call. Everything Reljod says goes to \
+             `ask_assistant`, in his own words and in one call, and the assistant works out \
+             whether it needs a repository, an agent, or nothing but an answer. It reports \
+             onto your rail, so hand it over and come straight back."
         )))
     }
 
@@ -2301,6 +2726,9 @@ impl Server {
     /// instruction at a repository nobody chose, and it reads as perfectly
     /// ordinary in the manager that receives it.
     async fn ask_manager(&self, args: &Value) -> Result<String, ToolError> {
+        // Main used to be the caller this tool was written for, and is now the
+        // one caller it refuses. Reaching a manager is the assistant's job.
+        self.refuse_routing_from_main("ask_manager")?;
         let wanted = required_str(args, "project")?;
         let instruction = required_str(args, "instruction")?;
         if instruction.trim().is_empty() {
@@ -2310,10 +2738,16 @@ impl Server {
                     .into(),
             ));
         }
+        // `None` rather than a default, because `hand_to_manager` has to know
+        // whether anybody actually named a harness: an argument in the call
+        // outranks the `manager` role's row, and a default that has already
+        // been substituted is indistinguishable from a choice.
         let harness = match opt_str(args, "harness") {
-            Some(h) => parse_harness(&h)
-                .ok_or_else(|| ToolError::BadParams(format!("unknown harness `{h}`")))?,
-            None => HarnessKind::ClaudeCode,
+            Some(h) => Some(
+                parse_harness(&h)
+                    .ok_or_else(|| ToolError::BadParams(format!("unknown harness `{h}`")))?,
+            ),
+            None => None,
         };
         let store = self.store()?;
 
@@ -2376,24 +2810,49 @@ impl Server {
              the exact name of one of them.",
         )?;
 
+        // An assistant switches the *main chat's* project, not its own.
+        //
+        // The whole value of this tool is that the next instruction inherits
+        // what this one resolved. An assistant's conversation is thrown away
+        // when its turn ends, so a switch written there is a switch nobody
+        // keeps: the next instruction opens a fresh assistant, which inherits
+        // from main, which was never told. Main used to hold the routing
+        // decision and therefore held this too; the decision moved down a layer
+        // and the pointer it sets did not, because there is nowhere down here
+        // for a pointer to live.
+        let target = self.sticky_conversation(&raiser);
+
         // A switch away from an inferred project is Reljod's correction
         // arriving late, so the guess it replaces is marked as taken back.
         let previous = store
-            .current_project(&raiser.conversation_id)
+            .current_project(&target)
             .map_err(|e| ToolError::Refused(format!("could not read the current project: {e}")))?;
         if previous.as_ref().is_some_and(|p| p.id != project.id) {
-            let _ = store.mark_resolution_corrected(&raiser.conversation_id);
+            let _ = store.mark_resolution_corrected(&target);
         }
 
         store
             .set_current_project(
-                &raiser.conversation_id,
+                &target,
                 Some(&project.id),
                 &reason,
                 crate::projects::How::Human,
                 &reason,
             )
             .map_err(|e| ToolError::Refused(format!("could not switch project: {e}")))?;
+        // And on the caller's own row when that is a different one, so
+        // `project_current` inside this same turn agrees with what was just
+        // set. Best-effort: the pointer that outlives the turn is the one
+        // above, and it has already been written.
+        if target != raiser.conversation_id {
+            let _ = store.set_current_project(
+                &raiser.conversation_id,
+                Some(&project.id),
+                &reason,
+                crate::projects::How::Human,
+                &reason,
+            );
+        }
 
         as_json(&json!({
             "project": project.name,
@@ -2680,7 +3139,7 @@ impl Server {
     /// onto a tree it has nothing to do with.
     async fn open_work(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
-        self.refuse_repository_work_from_main(&raiser, "open_work")?;
+        self.refuse_routing_from_main("open_work")?;
         let instruction = required_str(args, "instruction")?;
         let harness = match opt_str(args, "harness") {
             Some(h) => parse_harness(&h)
@@ -2766,6 +3225,10 @@ impl Server {
             .with_permission(permission)
             .under(raiser.conversation_id);
         opening.tools = tools;
+        // The first session on a work is an engineer. Dropped when the call
+        // named a harness, for the reason `delegate` drops it: an argument in
+        // the tool call is the highest rung of the four.
+        opening.role = opt_str(args, "harness").is_none().then_some(Role::Engineer);
         if let Some(model) = opt_str(args, "model") {
             opening = opening.with_model(model);
         }
@@ -3531,6 +3994,15 @@ struct AgentPage<'a> {
     /// two different tool calls and the reason for the choice is the half that
     /// keeps being lost.
     reuse: String,
+    /// Scratch sessions recent enough to pick up again, most recently active
+    /// first. Kept apart from `idle` because the rule for reusing one is not
+    /// the rule for reusing an engineer — see `scratch_reuse`.
+    scratch_idle: Vec<&'a str>,
+    /// The scratch half of "who should this instruction go to", when there is
+    /// anything on that list. Absent when there is not, so the caller is not
+    /// handed a sentence about an empty set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scratch_reuse: Option<String>,
     /// What to do about `hidden`, when there is anything to do. Absent
     /// otherwise, so its presence alone is the signal.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3586,6 +4058,15 @@ struct AgentView<'a> {
     /// to resume. That is what an idle engineer looks like in this system,
     /// because a run's process exits when its turn ends.
     free: bool,
+    /// A scratch session — a one-shot errand the assistant started, with no
+    /// work and no checkout.
+    ///
+    /// Carried on the row because `free` alone reads the same for a scratch
+    /// session and an engineer, and what to do about the two is different
+    /// enough that the caller has to be able to tell them apart. `idle` and
+    /// `reuse` are the engineer answer and exclude these; `scratch_idle` and
+    /// `scratch_reuse` are theirs.
+    scratch: bool,
 }
 
 /// Where a schedule runs when nobody said. The server's own directory, which is
@@ -4137,8 +4618,14 @@ mod tests {
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 14] = [
+    const DELEGATE_TOOLS: [&str; 15] = [
         "delegate",
+        // Starting an assistant starts an agent, and one holding this same
+        // level. Main runs at `Orchestrate`, which is above it, so main is
+        // shown it; nothing below `delegate` is, which is the point — an
+        // unattended run must not be able to start something that can start
+        // more unattended runs.
+        "ask_assistant",
         // Resuming a manager starts an agent, so it sits on the same line as
         // every other tool that does. It is main's usual verb, and main runs at
         // `Orchestrate`, which is above this.
@@ -5653,7 +6140,7 @@ mod tests {
         use crate::projects::NewProject;
 
         /// A catalogued project on a real directory, plus a store.
-        fn with_project(dir: &str) -> (Arc<Store>, crate::projects::Project) {
+        pub(super) fn with_project(dir: &str) -> (Arc<Store>, crate::projects::Project) {
             let store = Arc::new(Store::in_memory().unwrap());
             std::fs::create_dir_all(dir).unwrap();
             let project = store
@@ -5663,7 +6150,7 @@ mod tests {
         }
 
         /// A run bound to a conversation, which is what `raiser` reads.
-        fn run_in(store: &Store, conversation: &str, run_id: &str) {
+        pub(super) fn run_in(store: &Store, conversation: &str, run_id: &str) {
             store.append_prompt(conversation, run_id, "do the thing").unwrap();
         }
 
@@ -5697,7 +6184,7 @@ mod tests {
                 .id()
         }
 
-        fn kill_group(pgid: u32) {
+        pub(super) fn kill_group(pgid: u32) {
             unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
             let mut status: libc::c_int = 0;
             unsafe { libc::waitpid(pgid as i32, &mut status, 0) };
@@ -5708,7 +6195,7 @@ mod tests {
         /// The whole `AgentSummary` and not a stub: `rehydrate` deserialises
         /// `runs.summary` into one and *skips the row* when it cannot, so a
         /// thin fixture produces an empty fleet and a test that proves nothing.
-        fn running_run(store: &Store, run_id: &str, name: &str) -> u32 {
+        pub(super) fn running_run(store: &Store, run_id: &str, name: &str) -> u32 {
             let pgid = a_living_group();
             let summary = crate::service::AgentSummary {
                 id: run_id.into(),
@@ -5752,7 +6239,7 @@ mod tests {
         /// `session` is a parameter rather than always present because the two
         /// cases are genuinely different: a completed run with a session id can
         /// be continued, and one without cannot, however free it looks.
-        fn finished_run(store: &Store, run_id: &str, name: &str, session: Option<&str>) {
+        pub(super) fn finished_run(store: &Store, run_id: &str, name: &str, session: Option<&str>) {
             let summary = crate::service::AgentSummary {
                 id: run_id.into(),
                 name: name.into(),
@@ -6018,12 +6505,17 @@ mod tests {
             std::fs::remove_dir_all(&base).ok();
         }
 
-        /// Check 13. Refused at the tool boundary, not by prompt wording — the
-        /// server resolves the calling run itself, so the caller cannot argue
-        /// about its identity. And the refusal names the verb to use instead: a
-        /// rule that only says no leaves the model guessing at what yes is.
+        /// Refused at the tool boundary, not by prompt wording — the server
+        /// resolves the calling run itself, so the caller cannot argue about
+        /// its identity. And the refusal names the verb to use instead: a rule
+        /// that only says no leaves the model guessing at what yes is.
+        ///
+        /// The verb it names has changed. It was `ask_manager` while main still
+        /// routed; main routes nothing now, so what it is sent to is
+        /// `ask_assistant` and the assistant decides whether a manager is what
+        /// this needs.
         #[tokio::test]
-        async fn open_work_from_the_main_chat_is_refused_and_names_ask_manager() {
+        async fn open_work_from_the_main_chat_is_refused_and_names_ask_assistant() {
             let store = Arc::new(Store::in_memory().unwrap());
             let main = store
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
@@ -6042,7 +6534,7 @@ mod tests {
 
             assert!(is_error_result(&answer), "{answer}");
             let said = said(&answer);
-            assert!(said.contains("ask_manager"), "{said}");
+            assert!(said.contains("ask_assistant"), "{said}");
             assert!(said.contains("not the main chat's to call"), "{said}");
         }
 
@@ -6295,20 +6787,29 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
         }
 
-        /// The route around the rule, closed. A model just refused `open_work`
-        /// and still wanting to help will reach for `delegate` with the
-        /// checkout as `cwd`, and it feels entirely reasonable at the time.
+        /// The route around the rule, closed, one layer down from where it used
+        /// to be.
+        ///
+        /// A model that wants to help with something about a repository and has
+        /// `delegate` in its hand will reach for it with the checkout as `cwd`
+        /// rather than call `ask_manager`, and it feels entirely reasonable at
+        /// the time. That caller was main; it is the assistant now, because
+        /// main holds no `delegate` at all. The hole is the same hole and it
+        /// moved with the verb.
         #[tokio::test]
-        async fn delegate_at_a_known_projects_checkout_is_refused_from_main() {
-            let dir = format!("/tmp/jod-mgr-delegate-{}", std::process::id());
+        async fn delegate_at_a_known_projects_checkout_is_refused_from_the_assistant() {
+            let dir = format!("/tmp/jod-asst-delegate-{}", std::process::id());
             let (store, _) = with_project(&dir);
-            let main = store
+            store
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
                 .unwrap();
-            run_in(&store, &main, "run-main");
+            let assistant = store
+                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
-                .with_access(ToolAccess::Orchestrate)
-                .for_run("run-main");
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
 
             let answer = call(
                 &server,
@@ -6324,20 +6825,23 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
         }
 
-        /// And the honest case still works. Removing `delegate` from main
-        /// outright would leave it unable to answer "what's the weather in
+        /// And the honest case still works. Refusing every `delegate` from the
+        /// assistant would leave it unable to answer "what's the weather in
         /// Manila" without opening a work, which is the thing this whole
         /// design is trying to stop.
         #[tokio::test]
-        async fn delegate_somewhere_that_is_not_a_project_is_still_mains_to_call() {
+        async fn delegate_somewhere_that_is_not_a_project_is_still_the_assistants_to_call() {
             let store = Arc::new(Store::in_memory().unwrap());
-            let main = store
+            store
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
                 .unwrap();
-            run_in(&store, &main, "run-main");
+            let assistant = store
+                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
-                .with_access(ToolAccess::Orchestrate)
-                .for_run("run-main");
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
 
             let answer = call(
                 &server,
@@ -6350,6 +6854,11 @@ mod tests {
             assert!(
                 !said.contains("ask_manager"),
                 "a repo-less one-shot must not be routed into a manager: {said}"
+            );
+            assert!(
+                !said.contains("not the main chat's to call"),
+                "an assistant is not main, and the refusal that stops main must not \
+                 catch it: {said}"
             );
         }
 
@@ -6482,6 +6991,575 @@ mod tests {
             );
             kill_group(pgid);
             std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    // ---- the assistant layer ----------------------------------------------
+    //
+    // Main hands every instruction to an assistant and comes straight back, and
+    // the assistant is what decides where it goes. These tests are the two
+    // halves of that: the refusals that stop main deciding anything, and the
+    // reuse answer `list_agents` gives an assistant about the scratch sessions
+    // underneath it.
+
+    mod assistant {
+        use super::managers::{finished_run, kill_group, run_in, running_run};
+        use super::*;
+        use crate::store::SCRATCH_REUSE_WINDOW_MINUTES_KEY;
+
+        /// A store with a main chat and one run inside it, which is what
+        /// `caller_is_main` reads.
+        fn main_chat() -> (Arc<Store>, String) {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &main, "run-main");
+            (store, main)
+        }
+
+        fn main_server(store: &Arc<Store>) -> Server {
+            Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-main")
+        }
+
+        /// A scratch conversation hanging under main, with one run in it.
+        ///
+        /// Hung under main on purpose: `scratch_reuse_candidates` walks down
+        /// from the pinned conversation, so a scratch row that belongs to
+        /// nobody is not a candidate however recent it is.
+        fn scratch_under(store: &Store, parent: &str, run_id: &str) -> String {
+            let conversation = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            store.mark_ephemeral(&conversation).unwrap();
+            store.set_conversation_parent(&conversation, parent).unwrap();
+            run_in(store, &conversation, run_id);
+            conversation
+        }
+
+        /// Push a conversation's last activity into the past, so a window can
+        /// be shown to exclude it without a test that waits an hour.
+        fn last_active_at(store: &Store, conversation: &str, at_ms: i64) {
+            store
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE conversations SET updated_at_ms = ?2 WHERE id = ?1",
+                        rusqlite::params![conversation, at_ms],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        fn page(answer: &Value) -> Value {
+            serde_json::from_str(&said(answer)).expect("list_agents answers with JSON")
+        }
+
+        /// Every `delegate` is tagged `scratch`, which is what makes the roles
+        /// panel do anything at all.
+        ///
+        /// The machinery Epic C built reads [`SpawnRequest::role`], and a
+        /// request that carries none reads no row and changes nothing. So a
+        /// person could set `scratch` to a cheap model, watch a lookup start,
+        /// and see it launch on the frontier model anyway — a settings screen
+        /// wired to nothing, which is worse than one that is not there.
+        ///
+        /// Asserted on the request rather than on a launched process: what
+        /// `delegate` decides is now a function of its own, so this needs no
+        /// harness on the machine and no model call.
+        #[tokio::test]
+        async fn a_delegated_run_is_tagged_as_scratch() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::Delegate);
+
+            let req = server
+                .delegate_request(&json!({ "prompt": "what is the weather in Manila" }))
+                .expect("an ordinary delegate");
+
+            assert_eq!(req.role, Some(Role::Scratch));
+        }
+
+        /// And an explicit harness argument outranks the row.
+        ///
+        /// `SpawnRequest::harness` is a `HarnessKind` rather than an `Option`,
+        /// so "the caller asked for Claude Code" and "the caller asked for
+        /// nothing" arrive at `apply_role` as the same value — and the roles
+        /// table sits exactly between them. The call site is the last place
+        /// that still knows the difference, so dropping the tag here is how the
+        /// top rung of the precedence stays the top rung.
+        #[tokio::test]
+        async fn naming_a_harness_on_delegate_outranks_the_scratch_role() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::Delegate);
+
+            let req = server
+                .delegate_request(&json!({ "prompt": "look it up", "harness": "open_code" }))
+                .expect("an explicit harness");
+
+            assert_eq!(req.harness, HarnessKind::OpenCode);
+            assert_eq!(
+                req.role, None,
+                "the `scratch` row would be free to change the harness back"
+            );
+        }
+
+        /// Check 25. An empty `roles` table changes no spawn.
+        ///
+        /// The promise the whole of Epic C rests on: a machine whose owner
+        /// never opens the panel must behave exactly as it did before the panel
+        /// existed. Asserted by running the real resolution over a real store
+        /// with no rows in it and comparing the request with itself.
+        #[tokio::test]
+        async fn an_empty_roles_table_changes_nothing_about_a_delegated_spawn() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::Delegate);
+
+            let before = server
+                .delegate_request(&json!({ "prompt": "what is the weather in Manila" }))
+                .expect("an ordinary delegate");
+            assert!(
+                store.role_list().unwrap().is_empty(),
+                "the premise: nobody has configured anything"
+            );
+
+            let mut after = before.clone();
+            crate::service::apply_role(&store, &mut after);
+
+            assert_eq!(after.harness, before.harness);
+            assert_eq!(after.model, before.model);
+            assert_eq!(after.effort, before.effort);
+            assert_eq!(after.permission, before.permission);
+        }
+
+        /// Check 4. Main's own verb for a repository is gone, and the refusal
+        /// says which one replaced it.
+        #[tokio::test]
+        async fn ask_manager_from_mains_run_is_refused_and_names_ask_assistant() {
+            let (store, _) = main_chat();
+            let server = main_server(&store);
+
+            let answer = call(
+                &server,
+                "ask_manager",
+                json!({ "project": "tetris", "instruction": "fix the tests" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("`ask_assistant`"), "{said}");
+            assert!(said.contains("not the main chat's to call"), "{said}");
+            // Refused before the project is even looked up, so a main chat
+            // naming a project that exists gets the same answer as one naming a
+            // project that does not.
+            assert!(
+                !said.contains("no project"),
+                "the identity refusal has to come first, or which refusal main \
+                 gets depends on whether it happened to name a real project: {said}"
+            );
+        }
+
+        /// Check 5. The same rule, through the other verb. Two tests rather
+        /// than one because a refusal wired into `ask_manager` alone would pass
+        /// the test above while leaving main able to start an agent directly.
+        #[tokio::test]
+        async fn delegate_from_mains_run_is_refused_and_names_ask_assistant() {
+            let (store, _) = main_chat();
+            let server = main_server(&store);
+
+            let answer = call(
+                &server,
+                "delegate",
+                json!({ "prompt": "what is the weather in Manila", "cwd": "/tmp" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("`ask_assistant`"), "{said}");
+            assert!(said.contains("not the main chat's to call"), "{said}");
+        }
+
+        /// Check 6. And the layer below is not caught by it.
+        ///
+        /// The half that matters: a refusal keyed on something broader than
+        /// identity — the access level, say — would pass both tests above and
+        /// leave the assistant unable to do the only job it has.
+        ///
+        /// It asks for a project that does not exist, so the answer comes back
+        /// without starting a manager. What is being asserted is which refusal
+        /// arrives, and "no project called that" is proof the identity rule let
+        /// the call through to the lookup.
+        #[tokio::test]
+        async fn ask_manager_from_an_assistants_run_is_not_refused_for_being_main() {
+            let (store, _) = main_chat();
+            let assistant = store
+                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &assistant, "run-assistant");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+
+            let said = said(
+                &call(
+                    &server,
+                    "ask_manager",
+                    json!({ "project": "nothing-is-called-this", "instruction": "fix the tests" }),
+                )
+                .await,
+            );
+
+            assert!(
+                !said.contains("not the main chat's to call"),
+                "the assistant is refused the one verb it exists to call: {said}"
+            );
+            assert!(
+                said.contains("no project"),
+                "the call reached the project lookup, which is what proves it was \
+                 not stopped at the identity gate: {said}"
+            );
+        }
+
+        /// An assistant may not ask for an assistant.
+        ///
+        /// Beyond what the spec asks for, and cheap. Nothing bounds a chain of
+        /// assistants handing an instruction to each other — handing over is
+        /// always easier than deciding — and it buys nothing, because an
+        /// assistant already holds every tool the one it started would hold.
+        #[tokio::test]
+        async fn an_assistant_may_not_ask_for_another_assistant() {
+            let (store, _) = main_chat();
+            let assistant = store
+                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &assistant, "run-assistant");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+
+            let answer = call(
+                &server,
+                "ask_assistant",
+                json!({ "instruction": "work out what to do about this" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("nobody below you to ask"), "{said}");
+            // A refusal that only says no leaves the model guessing at what yes
+            // is, and the guess it would make here is to try again.
+            assert!(said.contains("`ask_manager`"), "{said}");
+            assert!(said.contains("`delegate`"), "{said}");
+        }
+
+        /// An assistant's `project_switch` reaches the main chat.
+        ///
+        /// Its own conversation is opened for one instruction and thrown away,
+        /// so a sticky pointer written there is discarded by the end of the
+        /// turn that wrote it — and the whole value of the pointer is that the
+        /// *next* instruction inherits what this one resolved. Main used to
+        /// hold the routing decision and set this itself; the decision moved
+        /// down a layer and there is nowhere down here for a pointer to live.
+        ///
+        /// Without this, an assistant that correctly works out Reljod meant a
+        /// different repository is right once and forgotten, and the next
+        /// dictated sentence inherits the stale answer. That failure is
+        /// invisible: the instruction lands in another repository's manager and
+        /// reads as perfectly ordinary there.
+        #[tokio::test]
+        async fn an_assistants_project_switch_lands_on_the_main_chat() {
+            let dir = format!("/tmp/jod-asst-switch-{}", std::process::id());
+            let (store, project) = super::managers::with_project(&dir);
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let assistant = store
+                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &assistant, "run-assistant");
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+
+            let answer = call(
+                &server,
+                "project_switch",
+                json!({ "project": "tetris", "reason": "he named the tetris thing" }),
+            )
+            .await;
+            assert!(!is_error_result(&answer), "{answer}");
+
+            assert_eq!(
+                store.current_project(&main).unwrap().map(|p| p.id),
+                Some(project.id.clone()),
+                "the main chat never learned what the assistant resolved, so the next \
+                 instruction inherits the stale project"
+            );
+            // And the assistant's own row agrees, so `project_current` inside
+            // this same turn does not contradict the call that just succeeded.
+            assert_eq!(
+                store.current_project(&assistant).unwrap().map(|p| p.id),
+                Some(project.id)
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// Check 7. One look at the fleet per turn.
+        ///
+        /// The first call is a decision — who is free, what is running. The
+        /// second cannot be: nothing the caller is waiting for arrives by being
+        /// looked at. `tasks/01-routing.md` R4 is what this exists for, where a
+        /// run polled `list_agents` between `sleep`s for forty-two seconds and
+        /// ended without the answer.
+        #[tokio::test]
+        async fn a_second_list_agents_in_one_turn_is_refused_and_the_first_is_not() {
+            let (store, _) = main_chat();
+            let server = main_server(&store);
+
+            let first = call(&server, "list_agents", json!({})).await;
+            assert!(
+                !is_error_result(&first),
+                "the first look is legitimate: {first}"
+            );
+
+            let second = call(&server, "list_agents", json!({})).await;
+            assert!(is_error_result(&second), "{second}");
+            let said = said(&second);
+            assert!(said.contains("already looked at the fleet this turn"), "{said}");
+            assert!(
+                said.contains("arrives on its own"),
+                "the refusal has to say why waiting is pointless, or it reads as \
+                 an arbitrary quota: {said}"
+            );
+        }
+
+        /// And the rule stops where its reason stops.
+        ///
+        /// A read-only run cannot start anything, so it is not a router burning
+        /// a turn on a poll loop — it is somebody's dashboard, and refusing it
+        /// a second read would be a rule with no failure behind it.
+        #[tokio::test]
+        async fn a_read_only_run_may_look_at_the_fleet_as_often_as_it_likes() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::ReadOnly);
+            for _ in 0..3 {
+                let answer = call(&server, "list_agents", json!({})).await;
+                assert!(!is_error_result(&answer), "{answer}");
+            }
+        }
+
+        /// And a session somebody opened by hand is not a turn.
+        ///
+        /// It holds one server for as long as the person keeps it open, so a
+        /// per-turn budget counted here would refuse the second `list_agents`
+        /// of the afternoon. It is also not what the rule is for: nothing is
+        /// waiting on it and nobody is paying for a turn it spends looking.
+        #[tokio::test]
+        async fn a_session_that_is_not_a_run_may_look_at_the_fleet_more_than_once() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            // No `for_run`: this is `jod mcp` started by hand.
+            let server = Server::new(Jod::with_store(store)).with_access(ToolAccess::Orchestrate);
+            for _ in 0..3 {
+                let answer = call(&server, "list_agents", json!({})).await;
+                assert!(!is_error_result(&answer), "{answer}");
+            }
+        }
+
+        /// Check 10. A finished scratch session inside the window is offered,
+        /// and the same session outside it is not.
+        #[tokio::test]
+        async fn a_completed_scratch_session_is_offered_inside_the_window_and_not_outside_it() {
+            let (store, main) = main_chat();
+            store
+                .set_setting(SCRATCH_REUSE_WINDOW_MINUTES_KEY, "60")
+                .unwrap();
+            let scratch = scratch_under(&store, &main, "run-scratch");
+            finished_run(&store, "run-scratch", "lookup", Some("scratch-session"));
+
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+            let inside = page(&call(&server, "list_agents", json!({})).await);
+            assert_eq!(
+                inside["scratch_idle"],
+                json!(["run-scratch"]),
+                "a scratch session that finished a moment ago is the one to continue: {inside}"
+            );
+
+            // The same row, last active two hours ago. Nothing about it has
+            // changed except the clock.
+            let two_hours_ago = chrono::Utc::now().timestamp_millis() - 2 * 60 * 60 * 1000;
+            last_active_at(&store, &scratch, two_hours_ago);
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+            let outside = page(&call(&server, "list_agents", json!({})).await);
+            assert_eq!(
+                outside["scratch_idle"],
+                json!([]),
+                "an hour-old window still offered a two-hour-old session: {outside}"
+            );
+            assert!(
+                outside["scratch_reuse"].is_null(),
+                "and the sentence about it should be gone with it: {outside}"
+            );
+        }
+
+        /// Check 11. A *running* scratch session is never offered.
+        ///
+        /// The regression guard on rebuilding the block one layer down. If the
+        /// only session on the right subject is busy, the answer is a new one
+        /// beside it; reuse that waits for a session to free up is the exact
+        /// thing this whole design removes.
+        #[tokio::test]
+        async fn a_running_scratch_session_is_never_offered_for_reuse() {
+            let (store, main) = main_chat();
+            store
+                .set_setting(SCRATCH_REUSE_WINDOW_MINUTES_KEY, "60")
+                .unwrap();
+            scratch_under(&store, &main, "run-scratch");
+            let pgid = running_run(&store, "run-scratch", "lookup");
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+            let page = page(&call(&server, "list_agents", json!({})).await);
+
+            assert_eq!(
+                page["scratch_idle"],
+                json!([]),
+                "a busy scratch session was offered as something to continue, which \
+                 is the block rebuilt one layer down: {page}"
+            );
+            assert!(page["scratch_reuse"].is_null(), "{page}");
+            kill_group(pgid);
+        }
+
+        /// Check 12. The cross-talk guard.
+        ///
+        /// `is_free` matches a finished scratch session exactly as happily as
+        /// an engineer — completed, with a session id, not a router — so
+        /// without the exclusion a lookup that finished five minutes ago lands
+        /// in `idle` and the engineer sentence tells the caller it "already
+        /// holds this checkout". It holds no checkout at all.
+        #[tokio::test]
+        async fn a_completed_scratch_session_is_absent_from_the_engineer_answer() {
+            let (store, main) = main_chat();
+            let scratch = scratch_under(&store, &main, "run-scratch");
+            finished_run(&store, "run-scratch", "lookup", Some("scratch-session"));
+
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+            let page = page(&call(&server, "list_agents", json!({})).await);
+
+            assert_eq!(
+                page["idle"],
+                json!([]),
+                "a scratch row reached the engineer idle list: {page}"
+            );
+            let reuse = page["reuse"].as_str().expect("a reuse sentence is always written");
+            assert!(
+                !reuse.contains("run-scratch"),
+                "and the engineer sentence offered it: {reuse}"
+            );
+            assert!(
+                reuse.contains("nothing to reuse"),
+                "with no engineer at all the honest answer is that there is none: {reuse}"
+            );
+            // The row is still on the page, and it says what it is.
+            let row = page["agents"]
+                .as_array()
+                .expect("agents is a list")
+                .iter()
+                .find(|a| a["run_id"] == "run-scratch")
+                .expect("the scratch row is still listed");
+            assert_eq!(row["scratch"], json!(true), "{row}");
+            assert_eq!(
+                store.conversation_origin(&scratch).unwrap().as_deref(),
+                Some("human"),
+                "a `delegate`d scratch conversation is not an assistant's own"
+            );
+        }
+
+        /// Check 13. Reuse switched off.
+        ///
+        /// The way back to a fresh session per instruction if reuse turns out
+        /// badly, so it has to be a real setting rather than a degenerate one —
+        /// zero minutes must offer nothing, not everything since the epoch.
+        #[tokio::test]
+        async fn a_reuse_window_of_zero_offers_nothing() {
+            let (store, main) = main_chat();
+            store
+                .set_setting(SCRATCH_REUSE_WINDOW_MINUTES_KEY, "0")
+                .unwrap();
+            scratch_under(&store, &main, "run-scratch");
+            finished_run(&store, "run-scratch", "lookup", Some("scratch-session"));
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+            let page = page(&call(&server, "list_agents", json!({})).await);
+
+            assert_eq!(page["scratch_idle"], json!([]), "{page}");
+            assert!(page["scratch_reuse"].is_null(), "{page}");
+        }
+
+        /// Check 14. The two sentences say opposite things, and they have to.
+        ///
+        /// An engineer is worth reusing for its warm checkout, which any
+        /// instruction in that repository benefits from whatever the subject. A
+        /// scratch session has no checkout: the only thing it carries is the
+        /// subject it was talking about, so reusing it across subjects buys
+        /// nothing and muddles what it knows. One sentence covering both would
+        /// have to be vague enough to be wrong about one of them.
+        #[tokio::test]
+        async fn the_scratch_sentence_says_same_subject_where_the_engineer_one_says_any() {
+            let (store, main) = main_chat();
+            store
+                .set_setting(SCRATCH_REUSE_WINDOW_MINUTES_KEY, "60")
+                .unwrap();
+            scratch_under(&store, &main, "run-scratch");
+            finished_run(&store, "run-scratch", "lookup", Some("scratch-session"));
+
+            // An engineer beside it: an ordinary conversation with a finished
+            // run and a session to resume.
+            let engineer = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &engineer, "run-engineer");
+            finished_run(&store, "run-engineer", "engineer", Some("engineer-session"));
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-assistant");
+            let page = page(&call(&server, "list_agents", json!({})).await);
+
+            assert_eq!(page["idle"], json!(["run-engineer"]), "{page}");
+            assert_eq!(page["scratch_idle"], json!(["run-scratch"]), "{page}");
+
+            let engineer_says = page["reuse"].as_str().expect("always written");
+            let scratch_says = page["scratch_reuse"].as_str().expect("there is a candidate");
+            assert!(
+                engineer_says.contains("including one on a different subject"),
+                "the engineer sentence stopped saying any subject will do: {engineer_says}"
+            );
+            assert!(
+                scratch_says.contains("only if this instruction carries on that same subject"),
+                "the scratch sentence does not say same-subject-only: {scratch_says}"
+            );
+            assert!(
+                scratch_says.contains("Never wait"),
+                "and it has to carry the rule that a busy one is not worth waiting \
+                 for, since that is the one the caller is most tempted by: {scratch_says}"
+            );
         }
     }
 

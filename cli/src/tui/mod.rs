@@ -33,6 +33,7 @@ mod fleet;
 mod mention;
 mod picker;
 mod rail;
+mod roles;
 mod secret;
 pub mod sessions;
 mod text;
@@ -57,10 +58,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
-use jod_core::harness::ToolAccess;
+use jod_core::harness::{Role, ToolAccess};
 use jod_core::schedule::{GoalState, ScheduleState};
 use jod_core::service::{AgentStatus, RunConversation};
-use jod_core::store::Store;
+use jod_core::store::{RoleField, Store};
 use jod_core::{AgentEvent, HarnessKind, Jod, Model, PermissionPolicy, Resume, SpawnRequest};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -324,6 +325,25 @@ pub enum Action {
         id: Option<String>,
         name: String,
     },
+    /// Hold a scratch row on the fleet, or let it go.
+    ///
+    /// Carries a **run** id, because that is what a loose row is — a scratch
+    /// conversation belongs to no work and so never becomes a node. The
+    /// conversation behind it is looked up where the store is, which is the one
+    /// place that can.
+    ///
+    /// Letting go is not only an update. A row that already satisfies B2 is
+    /// archived on the spot rather than left for the sweep a minute later, so
+    /// the key does what it looks like it did.
+    KeepRun(String),
+    /// Write one column of one role, or clear it back to inherit with `None`.
+    SetRole {
+        role: Role,
+        field: jod_core::store::RoleField,
+        value: Option<String>,
+    },
+    /// Clear a whole role back to inheriting everything.
+    ResetRole(Role),
     /// A verb the screens offer and the store cannot carry out yet. Named
     /// rather than silently ignored, and naming the missing call rather than
     /// apologising, so the gap is a to-do and not a mystery.
@@ -1846,6 +1866,11 @@ async fn perform(
         Action::ToggleHook(name) => on_store(jod, app, |store| toggle_hook(store, &name)),
         Action::DeleteHook(name) => on_store(jod, app, |store| delete_hook(store, &name)),
         Action::Forget(subject) => on_store(jod, app, |store| forget_about(store, &subject)),
+        Action::KeepRun(run) => on_store(jod, app, move |store| keep_run(store, &run, now)),
+        Action::SetRole { role, field, value } => on_store(jod, app, move |store| {
+            set_role(store, role, field, value.as_deref())
+        }),
+        Action::ResetRole(role) => on_store(jod, app, move |store| reset_role(store, role)),
         // Both card verbs go through `on_store` like every other store verb,
         // and the sentence they hand back is the whole feature: `Store::
         // answer_card` writes the answer *and* a pending delivery in one
@@ -2425,6 +2450,7 @@ async fn spawn_summariser(
         },
         // No Jod verbs. This run answers a question, it does not act.
         tools: None,
+        role: summariser_role(intent),
         ..SpawnRequest::default()
     };
     // Detached: its prompt is a request to summarise, and recording that in the
@@ -2450,6 +2476,26 @@ async fn spawn_summariser(
             )));
             false
         }
+    }
+}
+
+/// Which layer of the chain of command a summarising run belongs to.
+///
+/// A compaction is housekeeping: it summarises a transcript so the next turn
+/// starts smaller, which is exactly the work C1 put on that role so it can be
+/// moved to a cheaper model. Tagging it lets the `housekeeping` row fill in the
+/// model and the effort level, and an empty `roles` table still spawns it
+/// exactly as before.
+///
+/// A handover is deliberately left untagged. Its whole point is that the summary
+/// is written by the harness being *left* — asking the new one to summarise a
+/// thread it has never seen is the bug that flow exists to fix — and a role that
+/// names a harness would move it, because [`jod_core::service::apply_role`]
+/// rewrites the harness of any spawn that is starting fresh.
+fn summariser_role(intent: Summarising) -> Option<Role> {
+    match intent {
+        Summarising::Compaction { .. } => Some(Role::Housekeeping),
+        Summarising::Handover(_) => None,
     }
 }
 
@@ -2974,6 +3020,107 @@ fn toggle_hook(store: &Store, name: &str) -> String {
         Ok(true) => format!("{name} is on"),
         Ok(false) => format!("no webhook called {name}"),
         Err(e) => format!("could not change {name}: {e}"),
+    }
+}
+
+/// `k` on a loose row: hold this scratch session on the fleet, or let it go.
+///
+/// **Letting go archives it there and then, when it already qualifies.** Not
+/// blindly: the row is archived only if `scratch_ready_to_archive` names it,
+/// which is the same query and therefore the same three conditions the sweep
+/// obeys — the run completed, every delivery landed, and it is neither held nor
+/// already archived. Re-stating those conditions here would be a second copy of
+/// the rule, and the copy is the one that would go stale. A session whose answer
+/// is still queued therefore stays on the screen, which is the whole reason the
+/// membership check is here rather than an unconditional archive.
+///
+/// Skipping the immediate archive would still work — the sweep takes it inside a
+/// minute — but a key that appears to do nothing for a minute is a key people
+/// press twice.
+///
+/// The hop through [`Store::conversation_for_run`] is unavoidable. A loose row
+/// carries a run id and nothing else, while holding and archiving are both
+/// things done to a conversation.
+fn keep_run(store: &Store, run: &str, now_ms: i64) -> String {
+    let conversation = match store.conversation_for_run(run) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return "that run wrote into no conversation, so there is nothing to keep".to_string()
+        }
+        Err(e) => return format!("could not find what {run} was writing into: {e}"),
+    };
+    // An ordinary conversation is never swept, so there is nothing to keep it
+    // from. Said rather than done: `held` on a row nothing reads would be a key
+    // that appeared to work and changed nothing anybody could see.
+    match store.is_ephemeral(&conversation) {
+        Ok(false) => {
+            return "that row is an ordinary session rather than a scratch one — nothing \
+                    sweeps it away, so there is nothing to keep it from"
+                .to_string()
+        }
+        Ok(true) => {}
+        Err(e) => return format!("could not read {conversation}: {e}"),
+    }
+    let held = match store.is_held(&conversation) {
+        Ok(held) => held,
+        Err(e) => return format!("could not read {conversation}: {e}"),
+    };
+    if !held {
+        return match store.set_held(&conversation, true) {
+            Ok(()) => "kept — this one stays on the fleet, and no sweep will take it".to_string(),
+            Err(e) => format!("could not keep it: {e}"),
+        };
+    }
+    if let Err(e) = store.set_held(&conversation, false) {
+        return format!("could not let it go: {e}");
+    }
+    let ready = match store.scratch_ready_to_archive() {
+        Ok(ready) => ready,
+        // Let go, and that much is true and worth saying. The archive is the
+        // sweep's job as well, so it happens on the next tick either way.
+        Err(e) => return format!("let go, but could not tell whether it is finished: {e}"),
+    };
+    if !ready.contains(&conversation) {
+        return "let go — it is not finished yet, so it stays on the fleet until it is"
+            .to_string();
+    }
+    match store.archive_conversation(&conversation, now_ms) {
+        Ok(()) => "let go, and archived — `z` on the fleet brings it back".to_string(),
+        Err(e) => format!("let go, but could not archive it: {e}"),
+    }
+}
+
+/// Write one column of one role.
+///
+/// The sentence says what happens *next* rather than what happened, because
+/// that is the part people get wrong about this screen: a role decides what is
+/// spawned from now on and touches nothing already running.
+fn set_role(store: &Store, role: Role, field: RoleField, value: Option<&str>) -> String {
+    let name = role.as_str();
+    match store.role_set(name, field, value) {
+        Ok(()) => match value {
+            Some(value) => format!(
+                "{name} will be spawned with {} {value} from now on — the runs already \
+                 going are untouched",
+                field.as_str()
+            ),
+            None => format!(
+                "{name} inherits its {} again — whatever the caller and the conversation say",
+                field.as_str()
+            ),
+        },
+        Err(e) => format!("could not set {name}'s {}: {e}", field.as_str()),
+    }
+}
+
+fn reset_role(store: &Store, role: Role) -> String {
+    let name = role.as_str();
+    match store.role_reset(name) {
+        Ok(()) => format!(
+            "{name} inherits everything again, which is where every role starts — the runs \
+             already going are untouched"
+        ),
+        Err(e) => format!("could not reset {name}: {e}"),
     }
 }
 
@@ -4440,6 +4587,14 @@ fn on_workspace_key(
             return action;
         }
     }
+    // The roles chooser, for the reason the preview pane is above the spine:
+    // `↑` and `↓` belong to whatever is on top, and a list you are choosing from
+    // that moves the row underneath it is a list you cannot read.
+    if ws == Workspace::Roles && app.choosing.is_some() {
+        if let Some(action) = on_role_chooser_key(app, key) {
+            return action;
+        }
+    }
 
     let ids = app.row_ids(ws);
     let page = viewport.max(1) as isize;
@@ -4528,6 +4683,7 @@ fn on_workspace_key(
         Workspace::Tasks => on_task_key(app, key),
         Workspace::Activity => on_activity_key(app, key),
         Workspace::Team => on_team_key(app, key),
+        Workspace::Roles => on_roles_key(app, key),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
 }
@@ -4582,6 +4738,126 @@ fn on_preview_wheel(app: &mut App, shape: ui::Preview, notches: i32) {
     app.preview_scroll = at.saturating_add(notches.saturating_mul(3)).clamp(0, last) as u16;
 }
 
+/// The roles panel's own verbs, while no chooser is open over it.
+///
+/// Four letters for the four columns, `⏎` for "ask me which column", and `r` to
+/// stop configuring this layer altogether. Nothing here reaches the store: the
+/// letters open a list, and only accepting a row in that list produces an
+/// [`Action`] — see [`on_role_chooser_key`].
+fn on_roles_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    let row = app.selected_role()?;
+    let open = |app: &mut App, field| {
+        app.choosing = Some(roles::Choosing::Value {
+            role: row.role,
+            field,
+            // The row's *own* harness rather than the console's. An effort level
+            // is a word only some harnesses know, and which of them will run
+            // this role is decided by this row and not by whatever the chat box
+            // happens to be on.
+            options: roles::options(field, row.harness_kind(), &app.models),
+            selected: 0,
+        });
+        None
+    };
+    match key.code {
+        KeyCode::Enter => {
+            app.choosing = Some(roles::Choosing::Field {
+                role: row.role,
+                selected: 0,
+            });
+            None
+        }
+        KeyCode::Char('h') => open(app, RoleField::Harness),
+        KeyCode::Char('m') => open(app, RoleField::Model),
+        KeyCode::Char('t') => open(app, RoleField::Thinking),
+        KeyCode::Char('p') => open(app, RoleField::Permission),
+        // Nothing to clear is said rather than done, because a key that
+        // silently succeeds at doing nothing is one you press again wondering
+        // whether it worked.
+        KeyCode::Char('r') if !row.configured => {
+            app.push(Entry::Notice(format!(
+                "`{}` already inherits everything, so there is nothing to reset",
+                row.role.as_str()
+            )));
+            None
+        }
+        KeyCode::Char('r') => Some(Action::ResetRole(row.role)),
+        _ => None,
+    }
+}
+
+/// The chooser's keys, while one is open over the roles panel.
+///
+/// `Some` means it took the key, on the same terms as [`on_preview_key`]. It
+/// runs *above* the list spine because the two keys it needs — `↑` and `↓` — are
+/// the two the rows underneath would otherwise answer, and a list you are
+/// choosing from that moves the cursor out from under itself is one you cannot
+/// use.
+fn on_role_chooser_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+    let choosing = app.choosing.as_mut()?;
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            choosing.step(-1);
+            Some(None)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            choosing.step(1);
+            Some(None)
+        }
+        // Swallowed rather than passed down. They step the *rows* underneath,
+        // and a chooser that was opened for `manager` while the highlight walks
+        // off to `engineer` is a screen saying it is about to change one thing
+        // and changing another.
+        KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => Some(None),
+        KeyCode::Esc => {
+            app.choosing = None;
+            Some(None)
+        }
+        KeyCode::Enter => {
+            let action = match choosing {
+                // The first of two stages: which column. Naming it opens the
+                // list of what that column will take, which is exactly what the
+                // letter on the key bar would have opened.
+                roles::Choosing::Field { role, selected } => {
+                    let role = *role;
+                    let field = roles::FIELDS[*selected % roles::FIELDS.len()];
+                    // The harness of the role this chooser was opened *for*,
+                    // not of whatever the cursor is on. They are the same row
+                    // today and the lookup says which one it means.
+                    let harness = app
+                        .role_rows()
+                        .into_iter()
+                        .find(|row| row.role == role)
+                        .and_then(|row| row.harness_kind());
+                    app.choosing = Some(roles::Choosing::Value {
+                        role,
+                        field,
+                        options: roles::options(field, harness, &app.models),
+                        selected: 0,
+                    });
+                    None
+                }
+                roles::Choosing::Value {
+                    role,
+                    field,
+                    options,
+                    selected,
+                } => {
+                    let chosen = options.get(*selected)?.clone();
+                    let action = Action::SetRole {
+                        role: *role,
+                        field: *field,
+                        value: chosen.value,
+                    };
+                    app.choosing = None;
+                    Some(action)
+                }
+            };
+            Some(action)
+        }
+        _ => None,
+    }
+}
 /// The tree's own keys. `Some` means the tree took the key.
 ///
 /// Returns `Option<Option<Action>>` for the reason [`on_chord`] does: the outer
@@ -4613,6 +4889,24 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             // node it found instead — which is not the row that is highlighted.
             KeyCode::Left | KeyCode::Char(' ') => return handled(None),
             _ => {}
+        }
+    }
+    // `k` in the pane below the tree, where the rows are scratch sessions: keep
+    // this one, or let it go. Answered before the cursor keys because it takes a
+    // letter one of them already has, and the collision is deliberate — B4 of
+    // `docs/spec-unblock-main-and-roles.md` asks for `k keep`, and the pane is
+    // three rows tall with `↑` and `↓` right
+    // there. `j` still steps down and both arrows still work; what a person
+    // loses is `k`-as-up in a box small enough to cross with one arrow.
+    if app.loose_selected().is_some() && key.code == KeyCode::Char('k') {
+        let run = app
+            .tree
+            .selected
+            .as_ref()
+            .filter(|id| fleet::is_loose(id))
+            .map(|id| id.id.clone());
+        if let Some(run) = run {
+            return handled(Some(Action::KeepRun(run)));
         }
     }
     match key.code {
@@ -4694,6 +4988,27 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
         KeyCode::Char('C') => {
             let forest = app.forest.clone();
             app.tree.collapse_all(&forest);
+            handled(None)
+        }
+        // The scratch archives. Off by default and off again after looking,
+        // because a pane holding every question ever asked is one people stop
+        // reading.
+        //
+        // This key used to widen the *works* filter and bring archived scratch
+        // rows back along with the closed works, one switch for one intention.
+        // The works toggle is gone, so the reveal is the lane's alone now and
+        // the notice says only what still happens. See
+        // `fleet::TreeState::show_archived_scratch`.
+        KeyCode::Char('z') => {
+            app.tree.show_archived_scratch = !app.tree.show_archived_scratch;
+            app.push(Entry::Notice(
+                if app.tree.show_archived_scratch {
+                    "the scratch sessions that have been put away are shown, and marked"
+                } else {
+                    "archived scratch sessions hidden"
+                }
+                .into(),
+            ));
             handled(None)
         }
         // `x` — stop tracking the repository the cursor is on.
@@ -4849,6 +5164,7 @@ fn selected_label(app: &App, ws: Workspace) -> Option<String> {
         Workspace::Tasks => app.selected_board_task().map(|t| t.id),
         Workspace::Activity => app.selected_activity().map(|a| a.id.clone()),
         Workspace::Team => app.selected_task().map(|t| t.id.clone()),
+        Workspace::Roles => app.selected_role().map(|r| r.role.as_str().to_string()),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
 }
@@ -6641,12 +6957,14 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // untracked from the fleet, or archived by another session, leaves the
     // cursor naming a project nothing draws.
     app.reconcile_catalog();
-    let tree = data::forest(jod);
+    let tree = data::forest(jod, app.tree.show_archived_scratch);
     app.forest = tree.nodes;
     app.closed_works = tree.closed;
     app.work_of = tree.works;
     app.tree_runs = tree.runs;
     app.run_of = tree.run_of;
+    app.scratch = tree.scratch;
+    app.roles = data::roles(jod);
     let rows = app.tree_rows();
     app.tree.reconcile(&rows);
     // Said once, and only while there is something being watched. Every session
@@ -12003,6 +12321,444 @@ mod tests {
         .await;
 
         assert!(app.schedules.is_empty());
+    }
+
+    /// The scratch lane, as the pane below the tree sees it.
+    ///
+    /// Every one of these runs against a real store, because the whole of `k` is
+    /// three store calls in a particular order and a screen-only fixture would
+    /// assert the order rather than the result.
+    mod scratch_lane {
+        use super::*;
+        use jod_core::conversation::NewMessage;
+
+        /// A scratch session with one run in it, and the run's own row on the
+        /// fleet so the loose pane has something to draw.
+        fn scratch(s: &RealStore, run: &str, status: &str) -> String {
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.mark_ephemeral(&c.id).unwrap();
+            s.save_run(&jod_core::store::StoredRun {
+                id: run.into(),
+                name: format!("scratch {run}"),
+                harness: "claude_code".into(),
+                status: status.into(),
+                cwd: "/tmp".into(),
+                session_id: None,
+                pid: None,
+                pgid: None,
+                created_at_ms: 1,
+                summary: serde_json::json!({}),
+            })
+            .unwrap();
+            s.append_message(
+                &c.id,
+                NewMessage::new(jod_core::conversation::Role::Assistant, "done").from_run(run),
+            )
+            .unwrap();
+            c.id
+        }
+
+        /// Check 22. Keeping a row and then letting it go is one key pressed
+        /// twice, and the second press archives it on the spot rather than
+        /// leaving it for a sweep a minute later.
+        #[tokio::test]
+        async fn k_keeps_a_finished_scratch_row_and_then_lets_it_go_and_archives_it() {
+            let s = store();
+            let c = scratch(&s, "r1", "completed");
+            let jod = jod_with(s);
+            let s = jod.store().unwrap().clone();
+            let mut app = app_on(HarnessKind::ClaudeCode);
+
+            let keep = Action::KeepRun("r1".into());
+            perform(&jod, &mut app, &options(), &mut Thread::default(), keep.clone()).await;
+            assert!(s.is_held(&c).unwrap(), "the first press did not keep it");
+            assert!(
+                s.scratch_lane(jod_core::works::Filter::Live)
+                    .unwrap()
+                    .archived
+                    .is_empty(),
+                "keeping a row must not archive it"
+            );
+            let said = last_notice(&app);
+            assert!(said.contains("kept"), "{said}");
+
+            perform(&jod, &mut app, &options(), &mut Thread::default(), keep).await;
+            assert!(!s.is_held(&c).unwrap(), "the second press did not let it go");
+            assert!(
+                s.scratch_lane(jod_core::works::Filter::All)
+                    .unwrap()
+                    .archived
+                    .contains("r1"),
+                "letting go of a finished row did not archive it there and then"
+            );
+            let said = last_notice(&app);
+            assert!(said.contains("archived"), "{said}");
+        }
+
+        /// The reason the membership check exists. A session whose answer has
+        /// not reached whoever asked for it is not finished, whatever its run
+        /// says, and letting go of it must leave it on the screen.
+        #[tokio::test]
+        async fn letting_go_of_a_row_whose_answer_is_still_queued_archives_nothing() {
+            let s = store();
+            let c = scratch(&s, "r1", "completed");
+            s.enqueue_delivery(
+                &c,
+                jod_core::delivery::Kind::CardAnswer,
+                "r1",
+                "here is the answer you asked for",
+            )
+            .unwrap();
+            s.set_held(&c, true).unwrap();
+            let jod = jod_with(s);
+            let s = jod.store().unwrap().clone();
+            let mut app = app_on(HarnessKind::ClaudeCode);
+
+            perform(
+                &jod,
+                &mut app,
+                &options(),
+                &mut Thread::default(),
+                Action::KeepRun("r1".into()),
+            )
+            .await;
+
+            assert!(!s.is_held(&c).unwrap(), "it was let go");
+            assert!(
+                s.scratch_lane(jod_core::works::Filter::All)
+                    .unwrap()
+                    .archived
+                    .is_empty(),
+                "a row with a queued answer was hidden before the answer landed"
+            );
+            let said = last_notice(&app);
+            assert!(said.contains("not finished yet"), "{said}");
+        }
+
+        /// Nothing sweeps an ordinary session, so there is nothing to keep it
+        /// from. Said rather than done: `held` on a row nothing reads would be a
+        /// key that appeared to work and changed nothing.
+        #[tokio::test]
+        async fn k_on_a_row_that_is_not_scratch_says_so_and_writes_nothing() {
+            let s = store();
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.save_run(&jod_core::store::StoredRun {
+                id: "r1".into(),
+                name: "port the parser".into(),
+                harness: "claude_code".into(),
+                status: "completed".into(),
+                cwd: "/tmp".into(),
+                session_id: None,
+                pid: None,
+                pgid: None,
+                created_at_ms: 1,
+                summary: serde_json::json!({}),
+            })
+            .unwrap();
+            s.append_message(
+                &c.id,
+                NewMessage::new(jod_core::conversation::Role::Assistant, "done").from_run("r1"),
+            )
+            .unwrap();
+            let jod = jod_with(s);
+            let s = jod.store().unwrap().clone();
+            let mut app = app_on(HarnessKind::ClaudeCode);
+
+            perform(
+                &jod,
+                &mut app,
+                &options(),
+                &mut Thread::default(),
+                Action::KeepRun("r1".into()),
+            )
+            .await;
+
+            assert!(!s.is_held(&c.id).unwrap(), "an ordinary session was held");
+            let said = last_notice(&app);
+            assert!(said.contains("ordinary session"), "{said}");
+        }
+
+        /// Check 23. Archiving is not deleting: the row leaves the pane and
+        /// comes back under `z`.
+        #[tokio::test]
+        async fn an_archived_scratch_row_is_hidden_from_the_loose_pane_and_shown_under_z() {
+            let s = store();
+            let c = scratch(&s, "r1", "completed");
+            s.archive_conversation(&c, 1_000).unwrap();
+            let jod = jod_with(s);
+            let mut app = with_a_loose_run(&jod, "r1");
+
+            assert!(
+                !app.tree.show_archived_scratch,
+                "the fleet opens without the archives"
+            );
+            assert!(
+                app.loose_rows().is_empty(),
+                "an archived scratch row is still being drawn"
+            );
+
+            app.tree.show_archived_scratch = true;
+            refresh_workspaces(&jod, &mut app);
+            let shown: Vec<&str> = app.loose_rows().iter().map(|a| a.id.as_str()).collect();
+            assert_eq!(shown, ["r1"], "`z` did not bring it back");
+            assert!(
+                app.scratch.archived.contains("r1"),
+                "and it is marked, so the row says it has been put away"
+            );
+        }
+
+        /// Holding a row is how a person says it must stay on the screen, so no
+        /// filter may take it off again.
+        #[tokio::test]
+        async fn a_held_row_is_never_hidden_whatever_the_filter_says() {
+            let s = store();
+            let c = scratch(&s, "r1", "completed");
+            s.archive_conversation(&c, 1_000).unwrap();
+            s.set_held(&c, true).unwrap();
+            let jod = jod_with(s);
+            let app = with_a_loose_run(&jod, "r1");
+
+            let shown: Vec<&str> = app.loose_rows().iter().map(|a| a.id.as_str()).collect();
+            assert_eq!(shown, ["r1"], "holding it did not keep it on the screen");
+            assert!(app.scratch.hidden.is_empty());
+            assert!(app.scratch.held.contains("r1"));
+        }
+
+        /// A held row that has finished says why it is still there, or it reads
+        /// as a sweep that failed. One still working needs no explanation.
+        #[tokio::test]
+        async fn why_held_appears_only_for_a_held_row_whose_run_has_stopped() {
+            let s = store();
+            let done = scratch(&s, "r1", "completed");
+            let working = scratch(&s, "r2", "running");
+            s.set_held(&done, true).unwrap();
+            s.set_held(&working, true).unwrap();
+            let jod = jod_with(s);
+            let mut app = with_a_loose_run(&jod, "r1");
+            app.agents.push(agent_line("r2", None));
+            refresh_workspaces(&jod, &mut app);
+
+            assert!(
+                app.scratch.why_held.contains_key("r1"),
+                "the finished row explains nothing"
+            );
+            assert!(
+                !app.scratch.why_held.contains_key("r2"),
+                "a row that is still working is on the screen because it is running"
+            );
+        }
+
+        /// A fleet with a tree, one loose run in the pane below it, and the
+        /// scratch lane loaded off the same store the rest of the screen reads.
+        fn with_a_loose_run(jod: &Arc<Jod>, run: &str) -> App {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.agents = vec![agent_line(run, None)];
+            // A node, so the fleet draws the tree and therefore the pane below
+            // it. `loose_rows` only exists on that half of the screen.
+            app.forest = vec![jod_core::tree::Node {
+                id: jod_core::tree::NodeId::project("p1"),
+                parent: None,
+                kind: jod_core::tree::NodeKind::Project,
+                depth: 0,
+                label: "a project".into(),
+                summary: String::new(),
+                running: false,
+                status: None,
+                stalled_for_ms: None,
+                cards: 0,
+                blocked: 0,
+                stalled: 0,
+                colour: "cyan".into(),
+                branch: None,
+                worktree: None,
+                expanded: true,
+                has_children: false,
+            }];
+            refresh_workspaces(jod, &mut app);
+            app
+        }
+    }
+
+    /// The roles panel: the chain of command, and what each layer of it is
+    /// spawned on.
+    mod roles_panel {
+        use super::*;
+
+        fn on_the_panel(jod: &Arc<Jod>) -> App {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            refresh_workspaces(jod, &mut app);
+            app.go(Workspace::Roles);
+            app.reconcile();
+            app
+        }
+
+        /// `/roles` is the way in, because all nine digits are spoken for.
+        #[test]
+        fn the_command_opens_the_panel() {
+            assert_eq!(
+                command::parse("/roles"),
+                Some(command::Slash::Open(Workspace::Roles))
+            );
+        }
+
+        /// Check 30, through the screen rather than through `roles::rows`: the
+        /// cursor lands on `main`, and all six layers are rows you can reach.
+        #[tokio::test]
+        async fn the_panel_lists_all_six_roles_with_main_first() {
+            let app = on_the_panel(&jod_with(store()));
+            assert_eq!(
+                app.row_ids(Workspace::Roles),
+                [
+                    "main",
+                    "assistant",
+                    "scratch",
+                    "manager",
+                    "engineer",
+                    "housekeeping"
+                ]
+            );
+            assert_eq!(app.selected_role().unwrap().role, Role::Main);
+        }
+
+        /// `m` opens the model list rather than writing anything, and choosing
+        /// from it is what produces the write.
+        #[tokio::test]
+        async fn choosing_a_model_writes_it_to_the_role_under_the_cursor() {
+            let jod = jod_with(store());
+            let s = jod.store().unwrap().clone();
+            let mut app = on_the_panel(&jod);
+            app.models = HarnessKind::ClaudeCode.models();
+            let first = app.models[0].id.clone();
+
+            assert_eq!(press(&mut app, KeyCode::Char('m')), None, "it opens a list");
+            // Past `inherit`, onto the first model the harness named.
+            press(&mut app, KeyCode::Down);
+            let action = press(&mut app, KeyCode::Enter).expect("choosing writes");
+            assert_eq!(
+                action,
+                Action::SetRole {
+                    role: Role::Main,
+                    field: RoleField::Model,
+                    value: Some(first.clone()),
+                }
+            );
+            assert!(app.choosing.is_none(), "the list closes behind the choice");
+
+            perform(&jod, &mut app, &options(), &mut Thread::default(), action).await;
+            assert_eq!(
+                s.role_get("main").unwrap().unwrap().model.as_deref(),
+                Some(first.as_str())
+            );
+            let said = last_notice(&app);
+            assert!(said.contains("already going are untouched"), "{said}");
+        }
+
+        /// `Esc` closes the list and changes nothing, which is what makes the
+        /// four letters safe to press to find out what they offer.
+        #[tokio::test]
+        async fn leaving_the_list_alone_writes_nothing() {
+            let mut app = on_the_panel(&jod_with(store()));
+            press(&mut app, KeyCode::Char('h'));
+            assert!(app.choosing.is_some());
+            assert_eq!(press(&mut app, KeyCode::Esc), None);
+            assert!(app.choosing.is_none());
+            assert_eq!(app.workspace, Workspace::Roles, "and it stays on the panel");
+        }
+
+        /// `⏎` asks which column first, so the four letters are a shortcut
+        /// rather than the only way in.
+        #[tokio::test]
+        async fn enter_asks_which_column_and_then_what_to_put_in_it() {
+            let mut app = on_the_panel(&jod_with(store()));
+            press(&mut app, KeyCode::Enter);
+            assert!(matches!(
+                app.choosing,
+                Some(roles::Choosing::Field { role: Role::Main, .. })
+            ));
+            press(&mut app, KeyCode::Enter);
+            assert!(matches!(
+                app.choosing,
+                Some(roles::Choosing::Value {
+                    field: RoleField::Harness,
+                    ..
+                })
+            ));
+        }
+
+        /// `r` clears the row back to inheriting everything.
+        #[tokio::test]
+        async fn r_resets_a_configured_role_and_says_so_on_one_that_already_inherits() {
+            let s = store();
+            s.role_set("main", RoleField::Model, Some("claude-opus-5"))
+                .unwrap();
+            let jod = jod_with(s);
+            let s = jod.store().unwrap().clone();
+            let mut app = on_the_panel(&jod);
+
+            let action = press(&mut app, KeyCode::Char('r')).expect("there is something to clear");
+            assert_eq!(action, Action::ResetRole(Role::Main));
+            perform(&jod, &mut app, &options(), &mut Thread::default(), action).await;
+            assert_eq!(s.role_get("main").unwrap(), None);
+
+            assert_eq!(
+                press(&mut app, KeyCode::Char('r')),
+                None,
+                "nothing left to clear"
+            );
+            let said = last_notice(&app);
+            assert!(said.contains("already inherits"), "{said}");
+        }
+
+        /// The effort list is filtered by the row's own harness, not by the
+        /// console's. `xhigh` is Claude Code's word and reaches no other
+        /// harness, so offering it on an AGY row would be offering a setting
+        /// that is dropped at spawn.
+        #[tokio::test]
+        async fn xhigh_is_offered_on_a_claude_code_row_and_not_on_an_agy_one() {
+            let offered = |harness: &str| {
+                let s = store();
+                s.role_set("main", RoleField::Harness, Some(harness)).unwrap();
+                let jod = jod_with(s);
+                let mut app = on_the_panel(&jod);
+                press(&mut app, KeyCode::Char('t'));
+                match app.choosing.take() {
+                    Some(roles::Choosing::Value { options, .. }) => options
+                        .into_iter()
+                        .filter_map(|c| c.value)
+                        .collect::<Vec<_>>(),
+                    other => panic!("expected a list of levels, got {other:?}"),
+                }
+            };
+            assert!(offered("claude_code").contains(&"xhigh".to_string()));
+            assert!(!offered("agy").contains(&"xhigh".to_string()));
+            assert_eq!(offered("open_code"), ["low", "medium", "high", "xhigh", "max"]);
+        }
+    }
+
+    /// The compaction run is housekeeping — summarising a transcript so the next
+    /// turn starts smaller is exactly the work that does not need a frontier
+    /// model. A handover is deliberately not tagged: its summary has to be
+    /// written by the harness being left, and a role naming a harness would move
+    /// it.
+    #[test]
+    fn the_compaction_spawn_carries_the_housekeeping_role() {
+        assert_eq!(
+            summariser_role(Summarising::Compaction { asked: true }),
+            Some(Role::Housekeeping)
+        );
+        assert_eq!(
+            summariser_role(Summarising::Compaction { asked: false }),
+            Some(Role::Housekeeping)
+        );
+        assert_eq!(
+            summariser_role(Summarising::Handover(HarnessKind::OpenCode)),
+            None,
+            "a handover must summarise on the harness it is leaving"
+        );
     }
 
     // ---- the fleet tree ----

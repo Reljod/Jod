@@ -30,6 +30,22 @@
 //! run. A crash, a locked database or a missing argument must degrade to the
 //! old behaviour rather than to a wedged run, which is why almost everything
 //! here ends in "say nothing and let the harness decide".
+//!
+//! ## The fourth way out: refusing to wait
+//!
+//! A run that hands work to other agents must never sit and watch for the
+//! answer. It arrives on its own, as a card. `--refuse-waiting` turns on one
+//! extra check in front of everything above: a `Bash` call that sleeps or polls
+//! is denied outright, and the refusal says why so the model reads a rule
+//! rather than a malfunction.
+//!
+//! **This is Claude Code only, and that is a limit rather than an oversight.**
+//! `Bash` belongs to the harness, not to Jod, so Jod's MCP server never sees
+//! the call and has nothing to refuse. A `PreToolUse` hook is the only place in
+//! the run where Jod gets a say about it. OpenCode and AGY have no equivalent
+//! hook, so for those two the same rule is preamble wording and nothing more.
+//! Main runs on Claude Code in practice, which is why the narrow fix is still
+//! worth having.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -68,7 +84,17 @@ const POLL: Duration = Duration::from_millis(400);
 /// `run_id` is baked into the hook's command line by the launcher, because a
 /// hook is a fresh process that inherits nothing useful about which run it
 /// belongs to and a card with no run on it is a card nobody can trace.
-pub async fn hook(jod: Arc<Jod>, run_id: Option<String>, wait: u64) -> Result<()> {
+///
+/// `refuse_waiting` and `never_ask` are baked in for the same reason: which
+/// access level the run holds and which permission mode it is under are the
+/// launcher's knowledge, and this process has no way back to either.
+pub async fn hook(
+    jod: Arc<Jod>,
+    run_id: Option<String>,
+    wait: u64,
+    refuse_waiting: bool,
+    never_ask: bool,
+) -> Result<()> {
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
     let Ok(payload) = serde_json::from_str::<Value>(&raw) else {
@@ -84,6 +110,25 @@ pub async fn hook(jod: Arc<Jod>, run_id: Option<String>, wait: u64) -> Result<()
         return Ok(());
     }
     let subject = subject_of(&tool, payload.get("tool_input"));
+
+    // Ahead of the grants, deliberately. A standing grant is somebody having
+    // said "yes, run that" once; it is not permission to stop the turn. If the
+    // order were the other way round, one `Bash(sleep:*)` grant would switch
+    // this rule off for every run that ever holds it.
+    //
+    // Ahead of the store, too, so a refusal that needs no database still lands
+    // when the database is unreadable.
+    if refuse_waiting && tool == "Bash" && waits(&subject) {
+        deny(WAITING_REFUSAL);
+        return Ok(());
+    }
+    // Nobody to ask. The run is in a mode that never stops for a question, and
+    // this hook is installed only for the refusal above — raising a card here
+    // would put the block back exactly where it was taken out, one tool call at
+    // a time.
+    if never_ask {
+        return Ok(());
+    }
 
     let Some(store) = jod.store() else {
         return Ok(());
@@ -278,6 +323,131 @@ fn subject_of(tool: &str, input: Option<&Value>) -> String {
         .to_string()
 }
 
+/// What the model is told when a waiting command is refused.
+///
+/// It names the reason, because a refusal the model cannot explain is one it
+/// works around. Told only "denied", a model retries the same idea in a
+/// different shell; told that the answer is coming to it, it returns and reads
+/// the answer. The last sentence is the instruction — everything before it is
+/// why that instruction is not a punishment.
+const WAITING_REFUSAL: &str = "Jod refuses waiting commands for a run that can hand work to \
+                               other agents. `sleep`, `until` and `while` hold this turn open \
+                               watching for something that arrives on its own: anything you \
+                               delegated comes back later as a card on the rail, not from a \
+                               shell, and nothing you can poll here will tell you sooner. Hand \
+                               the work over and return now — say what you started, and stop. If \
+                               you were waiting on something local instead, run the check once \
+                               and report what it said.";
+
+/// The words that mean "stop here and watch".
+///
+/// `sleep` is the whole of it in practice. `until` and `while` are how the same
+/// poll gets written when a bare sleep feels too blunt — the recorded instance
+/// this rule exists for is
+/// `until [ "$(jod agents --json | grep -c <id>)" = "0" ]; do sleep 5; done`,
+/// forty-two seconds and thirty-nine cents spent to learn nothing.
+const WAITING_WORDS: [&str; 3] = ["sleep", "until", "while"];
+
+/// Shell words that introduce another command rather than being one.
+///
+/// After `do` comes the body of a loop, after `then` the body of a branch, and
+/// the word that follows is in command position just as much as the first word
+/// of the line. Without this, `for f in *; do sleep 1; done` reads as a `for`
+/// and nothing else.
+const CONTINUES: [&str; 6] = ["do", "then", "else", "elif", "if", "!"];
+
+/// Whether this `Bash` command waits.
+///
+/// **The matcher is the whole decision, so here is the reasoning.** It matches
+/// a word only in *command position* — the first word of the command line, and
+/// the first word after every operator that starts another command (`;`, `&`,
+/// `|`, a newline, an opening parenthesis) or after one of [`CONTINUES`]. It
+/// compares the last path segment of that word, so `/bin/sleep` counts and
+/// `./sleep_test.py` does not.
+///
+/// The alternative was matching the word anywhere in the string, and it is the
+/// worse failure. Too narrow a matcher leaves the poll loop running, which is
+/// the bug staying unfixed. Too broad a matcher denies `grep sleep log.txt`,
+/// `python sleep_test.py` and `cat notes/sleep.md` — ordinary work, refused for
+/// containing five letters — and a rule that fires on those does not read as a
+/// rule. It reads as Jod being broken, and the model's correct response to a
+/// broken tool is to route around it. So the matcher is the narrow one, and it
+/// covers every shape of the loop that was actually observed.
+///
+/// Quotes are honoured while scanning, so a separator inside `echo "a; sleep"`
+/// is text rather than the start of a command. The word itself is compared with
+/// its quotes stripped, because `"sleep" 5` does sleep.
+///
+/// It does not chase evasion. A command that reaches a wait through `eval`, a
+/// variable or a script written a line earlier gets through, and that is
+/// deliberate: at that point the model is not tripping over the rule, it is
+/// working around one it has read, and the answer to that is the preamble and
+/// the transcript rather than a longer regex.
+fn waits(command: &str) -> bool {
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    // The next word starts a command. True at the beginning of the line and
+    // after every operator that ends one.
+    let mut at_command = true;
+
+    /// End the word being read, and say whether it was one that waits.
+    fn close(word: &mut String, at_command: &mut bool) -> bool {
+        let done = std::mem::take(word);
+        if done.is_empty() || !*at_command {
+            return false;
+        }
+        let name = done.rsplit('/').next().unwrap_or(&done);
+        if WAITING_WORDS.contains(&name) {
+            return true;
+        }
+        // `TZ=UTC sleep 5` is a sleep. An assignment in command position is a
+        // prefix to the command, not the command, so the next word is still the
+        // one that runs. Recognised by shell's own rule: a name, then `=`,
+        // before any slash.
+        let assignment = done
+            .split_once('=')
+            .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/'));
+        if !assignment && !CONTINUES.contains(&done.as_str()) {
+            *at_command = false;
+        }
+        false
+    }
+
+    for c in command.chars() {
+        if escaped {
+            word.push(c);
+            escaped = false;
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' | '"' => quote = Some(c),
+            ';' | '&' | '|' | '\n' | '(' | ')' => {
+                if close(&mut word, &mut at_command) {
+                    return true;
+                }
+                at_command = true;
+            }
+            c if c.is_whitespace() => {
+                if close(&mut word, &mut at_command) {
+                    return true;
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    close(&mut word, &mut at_command)
+}
+
 fn allow(reason: &str) {
     decision("allow", reason);
 }
@@ -333,6 +503,65 @@ mod tests {
     fn an_unfamiliar_payload_has_no_subject_rather_than_a_guessed_one() {
         assert_eq!(subject_of("Whatever", Some(&json!({ "zork": "1" }))), "");
         assert_eq!(subject_of("Whatever", None), "");
+    }
+
+    /// The two commands that were actually recorded, from one turn of main's
+    /// that spent forty-two seconds and thirty-nine cents learning nothing.
+    #[test]
+    fn the_loop_that_blocked_main_is_refused() {
+        assert!(waits("sleep 45; echo waited"));
+        assert!(waits(
+            r#"until [ "$(jod agents --json | grep -c a2e4f620)" = "0" ]; do sleep 5; done"#
+        ));
+    }
+
+    #[test]
+    fn a_poll_written_as_a_while_loop_is_refused_too() {
+        assert!(waits("while true; do jod agents; sleep 2; done"));
+        // The wait need not be first. Anything after `&&`, `;` or `|` starts a
+        // command of its own.
+        assert!(waits("jod agents && sleep 10"));
+        assert!(waits("echo starting; sleep 10"));
+        // A loop body reached through `do`, whose head is not itself a wait.
+        assert!(waits("for i in 1 2 3; do sleep 1; done"));
+        // A wait inside a substitution still runs.
+        assert!(waits("echo $(sleep 5)"));
+        // A path to the same program is the same program.
+        assert!(waits("/bin/sleep 5"));
+        // An environment assignment is a prefix, not the command.
+        assert!(waits("TZ=UTC sleep 5"));
+    }
+
+    /// **The false-positive guard, and it is the half that costs more to get
+    /// wrong.** Five letters in a filename, a pattern or a path are not a wait,
+    /// and an agent refused those cannot do its job — which reads as Jod being
+    /// broken rather than as a rule, and the right response to a broken tool is
+    /// to route around it.
+    #[test]
+    fn an_ordinary_command_that_merely_says_sleep_is_allowed() {
+        assert!(!waits("ls"));
+        assert!(!waits("grep -rn sleep core/src"));
+        assert!(!waits("python sleep_test.py"));
+        assert!(!waits("cat docs/sleep.md"));
+        assert!(!waits("./scripts/sleep_test.sh --all"));
+        assert!(!waits("cargo test --workspace -- sleep"));
+        // A separator inside quotes is text, not the start of a command.
+        assert!(!waits(r#"echo "first; sleep later""#));
+        assert!(!waits(r#"git commit -m "stop the sleep loop""#));
+        // `while` and `until` as arguments, not as the shape of the command.
+        assert!(!waits("grep -c while build.log"));
+        assert!(!waits("rg 'until' docs/"));
+        // The escaped semicolon `find` needs is part of the argument.
+        assert!(!waits(r"find . -name '*.log' -exec grep -l sleep {} \;"));
+    }
+
+    /// A denial the model cannot explain is one it works around. This asserts
+    /// the refusal carries the reason and the instruction, not just a verdict.
+    #[test]
+    fn the_refusal_says_why_and_what_to_do_instead() {
+        assert!(WAITING_REFUSAL.contains("card"));
+        assert!(WAITING_REFUSAL.contains("delegated"));
+        assert!(WAITING_REFUSAL.contains("return now"));
     }
 
     #[test]

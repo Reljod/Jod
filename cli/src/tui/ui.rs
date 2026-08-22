@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use jod_core::team::MemberStatus;
+use jod_core::store::RoleField;
 use jod_core::PermissionPolicy;
 
 use super::app::{
@@ -34,6 +35,7 @@ use super::fleet;
 use super::mention;
 use super::picker;
 use super::rail;
+use super::roles;
 use super::secret;
 use super::text;
 use super::workspace::Workspace;
@@ -3888,6 +3890,7 @@ fn draw_workspace(f: &mut Frame, app: &App, area: Rect) -> Preview {
         Workspace::Tasks => draw_tasks(f, app, area),
         Workspace::Activity => draw_activity(f, app, area),
         Workspace::Team => draw_team(f, app, area),
+        Workspace::Roles => draw_roles(f, app, area),
         Workspace::Chat => {}
     }
     Preview::default()
@@ -4463,16 +4466,56 @@ fn fleet_row<'a>(
     // `port the p` at the design width. It is cut with an ellipsis
     // now, and the marker beside it is reserved first.
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let marker = if watched { "  \u{2190} on screen" } else { "" };
-    let (name, marked) = fit_row(used, &a.name, marker, inner);
+    let marker = if watched {
+        "  \u{2190} on screen".to_string()
+    } else {
+        scratch_marker(app, &a.id)
+    };
+    let (name, marked) = fit_row(used, &a.name, &marker, inner);
     spans.push(Span::styled(
         name,
-        if chosen { bold(USER) } else { fg(AGENT) },
+        // An archived scratch row is drawn shut, the way a closed work is: it is
+        // on the screen because `z` asked for it, not because anything is
+        // happening on it.
+        if chosen {
+            bold(USER)
+        } else if app.scratch.archived.contains(&a.id) {
+            fg(MUTED)
+        } else {
+            fg(AGENT)
+        },
     ));
     if marked {
-        spans.push(Span::styled(marker.to_string(), fg(USER)));
+        spans.push(Span::styled(marker, fg(USER)));
     }
     Line::from(spans)
+}
+
+/// What a scratch row says about itself beside its name, if anything.
+///
+/// Three states and they are ordered by how much they need explaining.
+///
+/// A held row whose run has **stopped** gets the whole sentence, because that is
+/// the row that otherwise looks like a sweep that failed: everything else on the
+/// screen is there because it is running, and this one is there because somebody
+/// said so. Core writes that sentence — see [`jod_core::tree::ScratchLane`] — and
+/// it is deliberately not written for a held row that is still working, where
+/// `kept` alone says everything there is to say.
+///
+/// An archived row says so too. It is only drawn at all because `z` asked for
+/// the archives, and a row that looks live but cannot be continued is worse than
+/// one that says it has been put away.
+fn scratch_marker(app: &App, run: &str) -> String {
+    if let Some(why) = app.scratch.why_held.get(run) {
+        return format!("  {why}");
+    }
+    if app.scratch.held.contains(run) {
+        return "  kept".to_string();
+    }
+    if app.scratch.archived.contains(run) {
+        return "  put away".to_string();
+    }
+    String::new()
 }
 
 /// How tall the loose pane may grow before the tree starts losing rows.
@@ -4536,7 +4579,13 @@ fn draw_loose(f: &mut Frame, app: &App, area: Rect, runs: &[&super::AgentLine]) 
                 .borders(Borders::ALL)
                 .border_style(fg(border))
                 .title(title)
-                .title_bottom(fit_verbs(" in no work — jod ls ", area.width)),
+                // `k keep` is printed here rather than on the fleet's key bar,
+                // and that is the honest place for it: `k` steps the cursor up
+                // everywhere else on this screen and means *keep* only while
+                // the cursor is in this box. A bar that advertised it across
+                // the whole fleet would be teaching a key that does something
+                // else two rows higher.
+                .title_bottom(fit_verbs(" in no work · k keep ", area.width)),
         ),
         area,
     );
@@ -5304,6 +5353,189 @@ fn draw_schedules(f: &mut Frame, app: &App, area: Rect) {
     }
 
     f.render_widget(page(Workspace::Schedules, app, lines, area.width), area);
+}
+
+/// The chain of command, and what each layer of it is spawned on.
+///
+/// Drawn as a tree because the nesting *is* the information: `main` hands to
+/// `assistant`, which hands to `scratch` and `manager`, which hands to
+/// `engineer`. `Store::role_list` answers alphabetically and cannot say any of
+/// that — see [`roles::rows`], which is where the shape lives.
+///
+/// `●` is a role somebody has configured and `○` is one inheriting everything,
+/// which is every role until this screen is opened.
+fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
+    let rows = app.role_rows();
+    let selected = app
+        .list(Workspace::Roles)
+        .index(&app.row_ids(Workspace::Roles));
+    let width = area.width.saturating_sub(2) as usize;
+    // Declared drop order: permission → thinking → model. The harness stays,
+    // because a model name means nothing without knowing whose it is.
+    let show_permission = width >= 74;
+    let show_thinking = width >= 58;
+    let show_model = width >= 44;
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut header = vec![format!("  {:<20}", "role"), format!("{:<12}", "harness")];
+    if show_model {
+        header.push(format!("{:<16}", "model"));
+    }
+    if show_thinking {
+        header.push(format!("{:<8}", "think"));
+    }
+    if show_permission {
+        header.push(format!("{:<8}", "permission"));
+    }
+    lines.push(Line::from(Span::styled(header.concat(), fg(MUTED))));
+
+    for (i, row) in rows.iter().enumerate() {
+        let chosen = i == selected;
+        // The branch and the name share one column, so the tree keeps its shape
+        // whatever a role is called.
+        let name = format!("{}{}", row.branch, row.role.as_str());
+        let mut spans = vec![
+            Span::styled(if chosen { "▸" } else { " " }, fg(USER)),
+            Span::styled(
+                format!("{} ", if row.configured { "●" } else { "○" }),
+                fg(if row.configured { USER } else { MUTED }),
+            ),
+            Span::styled(
+                format!("{:<18}", cut(&name, 18)),
+                if chosen { bold(USER) } else { fg(AGENT) },
+            ),
+            cell(row, RoleField::Harness, 12),
+        ];
+        if show_model {
+            spans.push(cell(row, RoleField::Model, 16));
+        }
+        if show_thinking {
+            spans.push(cell(row, RoleField::Thinking, 8));
+        }
+        if show_permission {
+            spans.push(cell(row, RoleField::Permission, 8));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Said on the screen rather than left to be found out. A settings panel
+    // whose changes do not touch what you are looking at is one people assume
+    // is broken.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", roles::WHEN_IT_TAKES_EFFECT),
+        fg(MUTED),
+    )));
+
+    if let Some(row) = app.selected_role() {
+        if roles::variant_caveat_applies(&row) {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", roles::OPENCODE_VARIANT_CAVEAT),
+                fg(MUTED),
+            )));
+        }
+    }
+
+    if let Some(choosing) = &app.choosing {
+        lines.push(Line::from(""));
+        lines.push(rule(width));
+        lines.extend(chooser_lines(app, choosing));
+    }
+
+    f.render_widget(page(Workspace::Roles, app, lines, area.width), area);
+}
+
+/// One column of a role's row: the value, or the dash that says it inherits.
+///
+/// Muted when it inherits, so a screen of defaults reads as a screen of
+/// defaults at a glance rather than as a table you have to compare cell by
+/// cell.
+fn cell(row: &roles::Row, field: RoleField, width: usize) -> Span<'static> {
+    let text = row.cell(field);
+    let colour = if row.value(field).is_some() {
+        AGENT
+    } else {
+        MUTED
+    };
+    Span::styled(format!("{:<width$}", cut(text, width.saturating_sub(1))), fg(colour))
+}
+
+/// The list of values open over the panel, drawn inside the same box.
+///
+/// Inside rather than floating over the table, because the table is what you
+/// are choosing *for*: a box covering the row you are editing would hide the
+/// value you are about to replace.
+fn chooser_lines<'a>(app: &App, choosing: &roles::Choosing) -> Vec<Line<'a>> {
+    let role = choosing.role();
+    let mut lines = vec![Line::from(Span::styled(
+        match choosing {
+            roles::Choosing::Field { .. } => format!("  {} — which of these?", role.as_str()),
+            roles::Choosing::Value { field, .. } => {
+                format!("  {} — {}", role.as_str(), field.as_str())
+            }
+        },
+        bold(AGENT),
+    ))];
+    let at = choosing.selected();
+    match choosing {
+        // The four columns, each showing what it holds now, so choosing one is
+        // reading the row as well as picking from it.
+        roles::Choosing::Field { .. } => {
+            let row = app.role_rows().into_iter().find(|r| r.role == role);
+            for (i, field) in roles::FIELDS.into_iter().enumerate() {
+                let now = match &row {
+                    Some(row) => row.cell(field),
+                    None => roles::INHERIT,
+                };
+                lines.push(option_line(i == at, field.as_str(), now));
+            }
+        }
+        roles::Choosing::Value { field, options, .. } => {
+            for (i, choice) in options.iter().enumerate() {
+                lines.push(option_line(i == at, &choice.label, &choice.what));
+            }
+            // Whose names these are, when that is not the obvious answer.
+            //
+            // The list is whatever the harness *this console is on* said it
+            // accepts, because that is the one Jod has already asked and asking
+            // another means running its binary and waiting up to fifteen
+            // seconds on a keypress. A row that names a different harness is
+            // therefore being offered the wrong vocabulary, and saying so beats
+            // a list that looks authoritative and is not — the name still goes
+            // through verbatim, so anything can be set here.
+            if *field == RoleField::Model {
+                let row = app.role_rows().into_iter().find(|r| r.role == role);
+                let theirs = row.and_then(|r| r.harness_kind());
+                if theirs.is_some_and(|kind| kind != app.harness) {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "    these are {}'s names, and this row runs on {} — \
+                             a name typed here is passed through as it is",
+                            app.harness.label(),
+                            theirs.expect("just matched").label()
+                        ),
+                        fg(MUTED),
+                    )));
+                }
+            }
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ move  ⏎ choose  Esc leave it alone",
+        fg(MUTED),
+    )));
+    lines
+}
+
+fn option_line<'a>(chosen: bool, label: &str, what: &str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(if chosen { "  ▸ " } else { "    " }, fg(USER)),
+        Span::styled(
+            format!("{:<20}", cut(label, 19)),
+            if chosen { bold(USER) } else { fg(AGENT) },
+        ),
+        Span::styled(what.to_string(), fg(MUTED)),
+    ])
 }
 
 /// A goal is a schedule with a **denominator**: "done when" is a checklist, so
@@ -6994,7 +7226,7 @@ mod tests {
     use crate::tui::PromptIntent;
     use jod_core::cards::NewCard;
     use jod_core::store::Store as RealStore;
-    use jod_core::team::{Member, Post, Scope, Sent, TeamTask};
+    use jod_core::team::{Member, TeamTask};
     use jod_core::{HarnessKind, Resume};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -7044,6 +7276,118 @@ mod tests {
         assert!(
             frame.contains("fleet"),
             "with the screen it belongs to still under it: {frame}"
+        );
+    }
+
+    /// Check 30, on the screen. The chain of command is the drawing, so the
+    /// nesting has to survive the renderer: `assistant` is indented under
+    /// `main`, `engineer` under `manager`, and `housekeeping` back at the root.
+    #[test]
+    fn the_roles_panel_draws_the_chain_of_command() {
+        let mut a = app();
+        a.go(Workspace::Roles);
+        a.reconcile();
+        let frame = rendered(&a, 120, 30);
+
+        // Anchored on the row's own glyph, because the status bar and the
+        // detail text also say words like `main` and the first matching line
+        // would not be a row of this table.
+        let indent = |name: &str| -> usize {
+            let row = frame
+                .lines()
+                .find(|l| l.contains('○') && l.contains(name))
+                .unwrap_or_else(|| panic!("`{name}` is not drawn:\n{frame}"));
+            // Cells, not bytes. The border, the glyph and the branch are all
+            // multi-byte, so a byte offset would say `main` is further right
+            // than `housekeeping` purely because it has a `▸` in front of it.
+            let at = row.find(name).expect("the row holds the name");
+            row[..at].chars().count()
+        };
+        assert!(
+            indent("assistant") > indent("main"),
+            "assistant is not drawn under main:\n{frame}"
+        );
+        assert!(
+            indent("engineer") > indent("manager"),
+            "engineer is not drawn under manager:\n{frame}"
+        );
+        assert_eq!(
+            indent("housekeeping"),
+            indent("main"),
+            "nothing delegates to housekeeping, so it belongs at the root:\n{frame}"
+        );
+    }
+
+    /// A column nobody has set says *inherit* rather than sitting empty, which
+    /// would read as a value that failed to load.
+    #[test]
+    fn an_unconfigured_role_draws_a_dash_in_every_column() {
+        let mut a = app();
+        a.go(Workspace::Roles);
+        a.reconcile();
+        let frame = rendered(&a, 120, 30);
+        let row = frame
+            .lines()
+            .find(|l| l.contains('○') && l.contains("main"))
+            .unwrap_or_else(|| panic!("{frame}"));
+        assert_eq!(
+            row.matches(roles::INHERIT).count(),
+            4,
+            "all four columns inherit on a machine nobody has configured:\n{frame}"
+        );
+        assert!(
+            frame.contains("already going are untouched"),
+            "the panel has to say when an edit takes effect:\n{frame}"
+        );
+    }
+
+    /// The list a letter opens is drawn inside the panel rather than over the
+    /// row being edited — the value you are replacing has to stay readable.
+    #[test]
+    fn the_chooser_is_drawn_under_the_table_it_is_editing() {
+        let mut a = app();
+        a.go(Workspace::Roles);
+        a.reconcile();
+        a.choosing = Some(roles::Choosing::Value {
+            role: jod_core::harness::Role::Main,
+            field: RoleField::Harness,
+            options: roles::options(RoleField::Harness, None, &[]),
+            selected: 0,
+        });
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("main — harness"), "{frame}");
+        assert!(frame.contains("claude_code"), "{frame}");
+        assert!(frame.contains("Esc leave it alone"), "{frame}");
+        assert!(
+            frame.contains("housekeeping"),
+            "the table is still readable under it:\n{frame}"
+        );
+    }
+
+    /// The model list is whatever the harness this console is on said it
+    /// accepts, and a row that names a different one has to be told so — a list
+    /// that looks authoritative and is not is worse than no list.
+    #[test]
+    fn the_model_list_says_whose_names_it_is_offering() {
+        let mut a = app();
+        a.roles = vec![jod_core::store::RoleRow {
+            role: "main".into(),
+            harness: Some(HarnessKind::OpenCode.id().into()),
+            ..Default::default()
+        }];
+        a.go(Workspace::Roles);
+        a.reconcile();
+        a.choosing = Some(roles::Choosing::Value {
+            role: jod_core::harness::Role::Main,
+            field: RoleField::Model,
+            options: roles::options(RoleField::Model, Some(HarnessKind::OpenCode), &a.models),
+            selected: 0,
+        });
+
+        let frame = rendered(&a, 120, 30);
+        assert!(
+            frame.contains("this row runs on OpenCode"),
+            "the console is on Claude Code and the row is not:\n{frame}"
         );
     }
 

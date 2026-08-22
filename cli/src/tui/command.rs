@@ -236,6 +236,11 @@ pub fn parse(line: &str) -> Option<Slash> {
         // remember.
         "hooks" | "webhooks" => Slash::Open(Workspace::Hooks),
         "tasks" | "board" => Slash::Open(Workspace::Tasks),
+        // The one screen with no keystroke behind it. Every digit is spoken
+        // for and the which-key menu is full, so this command is not a second
+        // way to the roles panel — it is the only way, which is the test the
+        // palette keeps.
+        "roles" | "role" => Slash::Open(Workspace::Roles),
         "remember" => match triple(arg) {
             Some((subject, predicate, object)) => Slash::Remember {
                 subject,
@@ -504,6 +509,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("/hooks", "webhook rules (Ctrl-G h)"),
     ("/tasks", "the board as a screen (Ctrl-G t)"),
     (
+        "/roles",
+        "what each layer of the chain of command is spawned on",
+    ),
+    (
         "/remember <s> | <p> | <o>",
         "assert one fact — subject, relation, value",
     ),
@@ -654,6 +663,21 @@ pub fn repo_invocation(
     Some((found.name.clone(), invocation))
 }
 
+/// What a permission mode actually costs you.
+///
+/// Four spellings nobody should have to remember, said the same way wherever
+/// they are offered: `/mode`'s completion list and the roles panel's permission
+/// column both print this. Two copies of the sentence would be two chances for
+/// one of them to describe a mode the other does not.
+pub fn mode_gloss(mode: PermissionPolicy) -> &'static str {
+    match mode {
+        PermissionPolicy::Plan => "read and reason; change nothing",
+        PermissionPolicy::Ask => "check with me first — denies when nobody answers",
+        PermissionPolicy::AcceptEdits => "edits go through; the rest asks",
+        PermissionPolicy::Bypass => "everything auto-approved",
+    }
+}
+
 pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
     let agents = &app.agents;
     let Some(rest) = input.strip_prefix('/') else {
@@ -730,15 +754,7 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
         "mode" | "permission" | "permissions" => PermissionPolicy::ALL
             .into_iter()
             .filter(|m| m.label().starts_with(&typed))
-            .map(|m| {
-                let what = match m {
-                    PermissionPolicy::Plan => "read and reason; change nothing",
-                    PermissionPolicy::Ask => "check with me first — denies when nobody answers",
-                    PermissionPolicy::AcceptEdits => "edits go through; the rest asks",
-                    PermissionPolicy::Bypass => "everything auto-approved",
-                };
-                Completion::new(format!("/{name} {}", m.label()), what)
-            })
+            .map(|m| Completion::new(format!("/{name} {}", m.label()), mode_gloss(m)))
             .collect(),
         // Whatever this harness said it accepts, in its own spelling. This is
         // the one completion list where getting it wrong costs a turn: a model

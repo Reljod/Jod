@@ -404,6 +404,25 @@ const ACTIVITY: &[Key] = &[
 
 const TEAM: &[Key] = &[k("⏎", "mark done"), k("↑↓", "pick"), k("/", "filter")];
 
+/// The roles panel's own verbs.
+///
+/// The four letters are the four columns, and they are printed rather than
+/// hidden behind `⏎` because a settings screen whose keys have to be discovered
+/// is one that gets opened once. `⏎` asks which column first, which is the same
+/// four in a list for anybody who did not read the bar.
+///
+/// `r` is *reset* here rather than *run now*, which is what it means on
+/// schedules and goals. Nothing on this screen runs, so there is no collision to
+/// resolve — only a letter free to mean the obvious thing.
+const ROLES: &[Key] = &[
+    k("⏎", "edit"),
+    k("h", "harness"),
+    k("m", "model"),
+    k("t", "think"),
+    k("p", "permission"),
+    k("r", "reset to inherit"),
+];
+
 /// The decision rail's own verbs, in force only while the rail has the
 /// keyboard — which `Ctrl-N` is what gives it, and `Esc` is what takes away.
 ///
@@ -515,6 +534,7 @@ pub fn local(ws: Workspace) -> &'static [Key] {
         Workspace::Tasks => TASKS,
         Workspace::Activity => ACTIVITY,
         Workspace::Team => TEAM,
+        Workspace::Roles => ROLES,
     }
 }
 

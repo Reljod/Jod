@@ -381,6 +381,16 @@ enum Command {
         /// which is what happened before this existed.
         #[arg(long, default_value_t = 60)]
         wait: u64,
+        /// Refuse `Bash` calls that wait: `sleep`, and `until` and `while`
+        /// loops. Set for a run that hands work to other agents, whose answers
+        /// come back as cards and never from a shell.
+        #[arg(long)]
+        refuse_waiting: bool,
+        /// Raise no approval cards, whatever the call. Set for the modes that
+        /// never stop to ask — `auto` and `plan` — where this hook is installed
+        /// only to carry the refusal above.
+        #[arg(long)]
+        never_ask: bool,
     },
     /// The directories a conversation may work in.
     ///
@@ -2074,7 +2084,12 @@ async fn main() -> Result<()> {
         }
         Command::Card { what } => card_command(&jod, what)?,
         Command::Grant { what } => grant_command(&jod, what)?,
-        Command::ApproveHook { run, wait } => approve::hook(jod, run, wait).await?,
+        Command::ApproveHook {
+            run,
+            wait,
+            refuse_waiting,
+            never_ask,
+        } => approve::hook(jod, run, wait, refuse_waiting, never_ask).await?,
         Command::Root { what } => root_command(&jod, what)?,
         Command::Secret { what } => secret_command(&jod, what)?,
         Command::Commands { what } => commands_command(&jod, what)?,

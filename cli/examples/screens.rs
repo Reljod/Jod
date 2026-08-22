@@ -130,6 +130,16 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", render(&app));
     }
 
+    // The roles panel, which has no digit either: `/roles` is the way in, and
+    // it is drawn here because the six rows are the same six on every machine
+    // and what they *hold* is what the database decides.
+    app.go(Workspace::Roles);
+    app.reconcile();
+    println!();
+    println!("── {} {}", Workspace::Roles.title(), "─".repeat(60));
+    println!("{}", render(&app));
+
+
     // The fleet with a repository opened, which is the screen the tree exists
     // for: a plain render shows every project shut, and shut projects say
     // nothing about whether the roster inside them is right.
@@ -270,12 +280,14 @@ async fn load(jod: &Arc<Jod>, filter: Option<String>) -> anyhow::Result<App> {
     // full catalog in it — the one claim the example exists to make, failing on
     // the one box a reader would check it against.
     app.projects = tui::data::projects(jod);
-    let tree = tui::data::forest(jod);
+    let tree = tui::data::forest(jod, app.tree.show_archived_scratch);
     app.forest = tree.nodes;
     app.closed_works = tree.closed;
     app.work_of = tree.works;
     app.tree_runs = tree.runs;
     app.run_of = tree.run_of;
+    app.scratch = tree.scratch;
+    app.roles = tui::data::roles(jod);
     // The tree's cursor is an id, so it has to be put back on a row that
     // exists before anything is drawn — the same two lines, in the same order,
     // that `refresh_workspaces` runs.

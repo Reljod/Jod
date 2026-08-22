@@ -114,6 +114,19 @@ pub struct TreeState {
     /// Closed works the user explicitly expanded, which is the exception to
     /// their being collapsed by default.
     pub opened: HashSet<NodeId>,
+    /// Show the scratch sessions that have been put away.
+    ///
+    /// Off by default and off again after looking, because a pane holding
+    /// everything ever asked is one people stop reading.
+    ///
+    /// **This used to ride on the closed-works filter and now stands alone.**
+    /// `z` widened the *works* query from live to all, and archived scratch
+    /// rows came back as a side effect of the same switch — one key for one
+    /// intention, which was right while both halves existed. The works toggle
+    /// has since gone, so there is nothing left to ride on: either the reveal
+    /// gets a flag of its own or archiving becomes one-way inside the console.
+    /// It reveals the lane and nothing else, which is what the key now says.
+    pub show_archived_scratch: bool,
 }
 
 impl TreeState {

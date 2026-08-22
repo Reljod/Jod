@@ -61,8 +61,8 @@ pub trait Tick: Send + Sync {
 
 impl Tick for Ticker {
     /// Heartbeats first, then schedules, then goals, then the mail, then the
-    /// delivery queue, then the titlers, then the works, then the pull
-    /// requests — every step every pass.
+    /// delivery queue, then the titlers, then the works, then the scratch lane,
+    /// then the pull requests — every step every pass.
     ///
     /// Separate claims rather than one, because they are different contended
     /// resources — a process holding a goal must not thereby hold a schedule —
@@ -100,6 +100,9 @@ impl Tick for Ticker {
     /// every pull request Jod knows about stays `unknown` for ever. It is also
     /// the only step here that leaves the machine, so it keeps its own interval
     /// and does real work on roughly one tick in five.
+    /// [`Ticker::tick_scratch`] is the sixth: a scratch session is supposed to
+    /// tidy itself away once it has answered, and without this line the fleet
+    /// keeps every errand anybody ever ran.
     ///
     /// **This function is the whole wiring.** All five were built and tested
     /// against nothing for a while, and unit tests on an uncalled function stay
@@ -131,6 +134,14 @@ impl Tick for Ticker {
         // them. This way the queue gets its chance and only the leftovers are
         // reported. Nothing here starts a run.
         let works = self.tick_works()?;
+        // After the delivery queue, for a reason the ordering above already
+        // established: a scratch session may only be archived once its report
+        // has actually been spoken, so running this before the step that speaks
+        // it would leave every finished errand waiting a whole extra tick to go
+        // away. It also has to come after the heartbeat sweep at the top, which
+        // is where a wedged session gets the mark that keeps it on the screen —
+        // and that one is first, so nothing has to be arranged for it.
+        let scratch = self.tick_scratch(now_ms)?;
         // Last, because it is the only step that waits on a network round trip
         // and nothing else in a tick depends on what it learns. It keeps its
         // own interval, so on most passes this returns having done nothing.
@@ -139,7 +150,7 @@ impl Tick for Ticker {
         // to the list above and forgotten in one of the four sums would be a
         // step whose work is invisible in the report, which is exactly how a
         // tick stops being trusted.
-        let all = [schedules, goals, mail, queued, titles, works, prs];
+        let all = [schedules, goals, mail, queued, titles, works, scratch, prs];
         Ok(TickReport {
             claimed: all.iter().map(|r| r.claimed).sum(),
             started: all.iter().map(|r| r.started).sum(),

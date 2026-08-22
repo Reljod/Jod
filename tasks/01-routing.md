@@ -11,7 +11,14 @@ A quick question it should just answer, and today it does not.
 ---
 
 ## R1. The orchestrator is forbidden from ever answering anything
-Status: **in flight** · Severity: high
+Status: **fixed — built on `feat/unblock-main-and-roles`** · Severity was: high
+
+> [`docs/spec-unblock-main-and-roles.md`](../docs/spec-unblock-main-and-roles.md)
+> closes this from a different angle than the fix proposed
+> below. Rather than giving main a branch that decides whether to answer, main
+> stops answering altogether and the branch moves down to the assistant. That
+> puts the decision in one place on a cheap model instead of leaving it as
+> main's judgement on the day, which is what made it a coin flip.
 
 `orchestrator_preamble` (`core/src/orchestrator.rs:353`) opens with:
 
@@ -207,7 +214,16 @@ a turn, the way `core/src/delivery.rs` already starts one for a teammate.
 ---
 
 ## R4. The orchestrator blocks itself busy-waiting on the run it just delegated
-Status: open · Owner: — · Severity: high — **now small, see below**
+Status: **fixed — built on `feat/unblock-main-and-roles`** · Severity was: high
+
+> The waiting commands recorded below are now refused by `jod approve-hook` for
+> any run that can hand work to another agent, in every permission mode. The
+> cause and the fix are written up in
+> [`docs/spec-unblock-main-and-roles.md`](../docs/spec-unblock-main-and-roles.md),
+> Epic A. Main
+> stops routing at all — it hands the instruction to a short-lived assistant and
+> returns — and waiting is refused at the tool boundary rather than discouraged
+> in the preamble. R1 is closed by the same change.
 
 Observed in the same exchange as R1. Having spawned the sub-agent, the
 orchestrator did this, in its own turn:

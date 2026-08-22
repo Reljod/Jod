@@ -3982,3 +3982,75 @@ tree. Cataloguing a repository is likewise `jod project add`. Every one of those
 empty states names the shell command rather than pretending the console has one.
 The alternative was keeping a command alive purely to avoid admitting what the
 console cannot yet do, which is the console lying about its own shape.
+## Main hands every instruction to an assistant and answers nothing itself
+
+Main used to make the routing decision inside its own turn, and its own turn is
+what holds the input box shut. So the box stayed closed for as long as deciding
+took, and typing a second sentence queued it behind the first. The screenshot
+that started this said `21 messages in the live window` and `2 queued` while
+nothing was actually wrong.
+
+The fix is not a faster decision, it is moving the decision. Main now calls
+`ask_assistant` and returns, so its turn is one tool call. The assistant is a
+fresh conversation per instruction, never resumed, running on a small model —
+and *fresh* is the load-bearing word. A standing assistant would serialise the
+same way main did and the block would simply move down a layer. Several
+assistants run at once, so instruction two waits on instruction one's hand-off
+rather than on its work.
+
+Main answering nothing at all is deliberate. The branch that decides whether to
+answer or delegate now exists in exactly one place, on a cheap model, instead of
+being main's judgement call on the day. The cost is a hop on trivial questions
+and it is worth it, because the behaviour it replaces was a coin flip.
+
+## A scratch session is reused on the same subject only, which is the opposite of the engineer rule
+
+`list_agents` already told callers to prefer a free agent *"for any instruction
+here, including one on a different subject"*. That is right for an engineer,
+whose value is a warm checkout any instruction in that repository benefits from.
+It is wrong for a scratch session, which has no checkout — the only thing it
+carries is the subject it was talking about, so reusing one across subjects buys
+nothing and pollutes the context.
+
+So scratch gets its own sentence saying the reverse, and a completed scratch
+session is excluded from the engineer roster. Without that exclusion the
+existing free-agent test matches it perfectly well and advertises it as a warm
+checkout it is not.
+
+A running session is never a reuse candidate. Reuse that waits for one to free
+up would rebuild the exact block this work removes, one layer further down.
+
+## Reasoning effort is a flag on every harness, and absent unless asked for
+
+This was specced as an environment variable — `MAX_THINKING_TOKENS` — on the
+belief that Claude Code had no flag and that AGY was an unknown. Both were
+false. Claude Code 2.1.220 takes `--effort low|medium|high|xhigh|max`, AGY takes
+`--effort low|medium|high` and had been documented in `harness-config.md` all
+along, and OpenCode takes `--variant`, whose values belong to the provider
+rather than to OpenCode. `MAX_THINKING_TOKENS` appears nowhere in the codebase.
+
+A null level emits no flag at all. That is what keeps the promise that an empty
+`roles` table produces the spawn it always did, and it is also the honest answer
+for OpenCode, where Jod cannot know which words the provider accepts.
+
+## The no-waiting rule is enforced by the harness's own hook, and only on one harness
+
+A rule a model can talk its way past is not a rule, and the recorded failure —
+`until [ ... ]; do sleep 5; done`, forty-two seconds and thirty-nine cents to
+learn nothing — was a model doing exactly that. But `Bash` belongs to the
+harness, not to Jod, so Jod's MCP server never sees the call. The denial rides
+the `PreToolUse` hook Jod already hands some runs, now emitted for orchestrating
+and delegating runs **in every mode including `auto`** — which was the gap that
+mattered, because `auto` is main's default and the one mode that received no
+settings document at all.
+
+The matcher reads command position only. Matching the word anywhere would deny
+`grep sleep log.txt` and `python sleep_test.py`, and a rule that fires on
+ordinary work does not read as a rule — it reads as a broken tool, which a model
+correctly routes around. It does not chase evasion through `eval` or a variable
+either: past that point the model is not tripping over the rule but working
+around one it has read, and the answer to that is the transcript, not a longer
+regex.
+
+OpenCode and AGY have no equivalent hook, so for them this stays preamble
+wording. Saying so is better than implying a guarantee that does not exist.

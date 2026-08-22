@@ -908,6 +908,48 @@ pub struct Condensed {
     /// more, so without this list every run in the fleet would read as loose and
     /// the pane would become a second copy of the whole flat list.
     pub runs: HashSet<String>,
+    /// What the loose pane needs to know about the scratch lane.
+    ///
+    /// Empty out of [`condense`], and filled in by [`Store::fleet`]. The fold
+    /// walks nodes, and a scratch conversation is never one — it belongs to no
+    /// work, so [`Store::forest_of`] does not read it — which is exactly why
+    /// these rows land in the pane below the tree in the first place. The fact
+    /// travels on this value anyway because [`Store::fleet`] is the one call the
+    /// fleet screen already makes, and a second call for the same screen is a
+    /// second chance for the two answers to disagree about what is on it.
+    pub scratch: ScratchLane,
+}
+
+/// What the pane below the tree needs to know about scratch sessions.
+///
+/// **Keyed by run, not by conversation, and that is not an accident.** The loose
+/// pane's rows are runs — `App::loose_rows` keeps the fleet's flat list of runs
+/// that no node accounts for — so a set of conversation ids would be a fact the
+/// pane could not apply to anything it draws.
+///
+/// `hidden` and `archived` are two halves of one answer and never both hold the
+/// same id. Which one a row lands in is decided by the [`Filter`] the fleet was
+/// read under, exactly the way a closed work is: asked for the archives, you get
+/// them and they are marked; not asked, they are not there at all.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct ScratchLane {
+    /// Runs the pane must not draw, because their conversation has been
+    /// archived and this read did not ask for the archives.
+    pub hidden: HashSet<String>,
+    /// Runs whose conversation is archived and which *are* being shown, so the
+    /// row can be drawn shut the way a closed work is.
+    pub archived: HashSet<String>,
+    /// Runs whose conversation is held. A held row is never hidden and never
+    /// swept, whatever else is true of it.
+    pub held: HashSet<String>,
+    /// Why a held row is still on the screen, for the rows where that is not
+    /// obvious.
+    ///
+    /// Only for a held conversation whose run has stopped. A held row that is
+    /// still working needs no explanation — it is there because it is running,
+    /// like everything else on the screen — but one that finished and stayed
+    /// looks like a sweep that failed unless it says otherwise.
+    pub why_held: HashMap<String, String>,
 }
 
 impl Condensed {
@@ -1195,6 +1237,9 @@ pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
         works,
         run_of,
         runs,
+        // The fold has no store to ask, and nothing it walks is a scratch row.
+        // `Store::fleet` fills this in.
+        scratch: ScratchLane::default(),
     }
 }
 
@@ -1230,7 +1275,76 @@ impl Store {
             }
             nodes.extend(archived);
         }
-        Ok((condense(&nodes, &closed), closed))
+        let mut folded = condense(&nodes, &closed);
+        folded.scratch = self.scratch_lane(filter)?;
+        Ok((folded, closed))
+    }
+
+    /// What the loose pane needs to know about the scratch lane.
+    ///
+    /// **The reveal is a filter, and it is now the lane's own.** This used to
+    /// be read with whatever filter the tree was read with, because `z` on the
+    /// fleet widened the *works* query from [`Filter::Live`] to [`Filter::All`]
+    /// and archived scratch rows came back on the same switch — one key for one
+    /// intention, which was right while both halves existed. The fleet's
+    /// closed-works toggle has since been removed, so there is no shared switch
+    /// left to ride on and the console asks for this lane separately: the works
+    /// are always live, and `z` decides only whether an archived scratch row is
+    /// missing from the pane or present and marked.
+    ///
+    /// [`Filter::Closed`] reveals the archives here exactly as [`Filter::All`]
+    /// does, and does not additionally hide the live rows. The console only
+    /// ever asks for `Live` or `All`, so narrowing the lane to archives alone
+    /// would be behaviour invented for a caller that does not exist, and the
+    /// reading that keeps a row on the screen is the one to guess wrong in.
+    ///
+    /// One query, joined the same way [`Store::forest_of`] joins its runs: there
+    /// is no column saying which conversation a run wrote into, so
+    /// `messages.run_id` is the join in both places.
+    pub fn scratch_lane(&self, filter: Filter) -> Result<ScratchLane> {
+        let reveal = matches!(filter, Filter::All | Filter::Closed);
+        let mut lane = ScratchLane::default();
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT m.run_id, c.held, c.archived_at_ms, r.status
+               FROM conversations c
+               JOIN messages m ON m.conversation_id = c.id AND m.run_id IS NOT NULL
+               JOIN runs r ON r.id = m.run_id
+              WHERE c.ephemeral = 1",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? != 0,
+                r.get::<_, Option<i64>>(2)?.is_some(),
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (run_id, held, archived, status) = row?;
+            if archived {
+                // A held row is never hidden, whatever the filter says.
+                // Holding one is how a person says it should stay on the
+                // screen, and taking it off the screen anyway would make the
+                // key look broken. Archived *and* held is reachable: a row can
+                // be held after the sweep has already put it away.
+                if reveal || held {
+                    lane.archived.insert(run_id.clone());
+                } else {
+                    lane.hidden.insert(run_id.clone());
+                }
+            }
+            if held {
+                if status != "running" {
+                    lane.why_held.insert(
+                        run_id.clone(),
+                        "kept — this one has finished, and you asked for it to stay".to_string(),
+                    );
+                }
+                lane.held.insert(run_id);
+            }
+        }
+        Ok(lane)
     }
 }
 
@@ -2395,5 +2509,118 @@ mod tests {
             !drawn.contains("[running]"),
             "a spinner that keeps spinning on a wedged agent is the bug: {drawn}"
         );
+    }
+
+    /// The scratch lane, which is the only part of the fleet that is not a
+    /// node.
+    ///
+    /// A scratch conversation belongs to no work, so `forest_of` never reads
+    /// one and no `Node` is ever a scratch row. These rows are drawn by the
+    /// pane below the tree, out of the flat list of runs, which is why every
+    /// answer here is keyed by run.
+    mod scratch_lane {
+        use super::*;
+
+        /// A scratch conversation with one finished run in it.
+        fn scratch(s: &Store, run_id: &str) -> String {
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.mark_ephemeral(&c.id).unwrap();
+            run_for(s, &c.id, run_id, "completed");
+            c.id
+        }
+
+        /// Check 23. Archiving is not deleting: the row goes away and comes
+        /// back under the same key that brings a closed work back.
+        #[test]
+        fn an_archived_scratch_row_is_hidden_until_the_archives_are_asked_for() {
+            let s = store();
+            let c = scratch(&s, "r1");
+            s.archive_conversation(&c, 1_000).unwrap();
+
+            let quiet = s.scratch_lane(Filter::Live).unwrap();
+            assert!(quiet.hidden.contains("r1"), "the pane would still draw it");
+            assert!(quiet.archived.is_empty(), "nothing is marked when nothing is shown");
+
+            let revealed = s.scratch_lane(Filter::All).unwrap();
+            assert!(revealed.archived.contains("r1"), "`z` did not bring it back");
+            assert!(revealed.hidden.is_empty(), "it is both hidden and shown");
+        }
+
+        /// A working scratch session is an ordinary row: no marks, and nothing
+        /// asking the pane to leave it out.
+        #[test]
+        fn a_scratch_row_that_has_not_been_archived_is_left_entirely_alone() {
+            let s = store();
+            scratch(&s, "r1");
+
+            let lane = s.scratch_lane(Filter::Live).unwrap();
+            assert_eq!(lane, ScratchLane::default(), "an ordinary scratch row was marked");
+        }
+
+        /// Holding a row is how a person says it should stay on the screen, so
+        /// the filter must not be able to take it off again.
+        #[test]
+        fn a_held_row_is_shown_even_when_the_archives_are_not_asked_for() {
+            let s = store();
+            let c = scratch(&s, "r1");
+            s.archive_conversation(&c, 1_000).unwrap();
+            s.set_held(&c, true).unwrap();
+
+            let lane = s.scratch_lane(Filter::Live).unwrap();
+            assert!(lane.hidden.is_empty(), "holding a row did not keep it on the screen");
+            assert!(lane.archived.contains("r1"));
+            assert!(lane.held.contains("r1"));
+        }
+
+        /// B4's last line. A held row on a finished run says why it is still
+        /// there, or it reads as a sweep that failed.
+        #[test]
+        fn a_held_row_on_a_finished_run_says_why_it_is_still_there() {
+            let s = store();
+            let done = scratch(&s, "r1");
+            let working = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.mark_ephemeral(&working.id).unwrap();
+            run_for(&s, &working.id, "r2", "running");
+            s.set_held(&done, true).unwrap();
+            s.set_held(&working.id, true).unwrap();
+
+            let lane = s.scratch_lane(Filter::Live).unwrap();
+            assert!(lane.why_held.contains_key("r1"), "the finished row explains nothing");
+            assert!(
+                !lane.why_held.contains_key("r2"),
+                "a row that is still working needs no explanation for being on the screen"
+            );
+        }
+
+        /// Nothing that existed before the lane did is scratch, which is what
+        /// makes this safe to ship to a database full of real conversations.
+        #[test]
+        fn an_ordinary_conversation_is_not_in_the_lane_at_all() {
+            let s = store();
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            run_for(&s, &c.id, "r1", "completed");
+            s.archive_conversation(&c.id, 1_000).unwrap();
+            s.set_held(&c.id, true).unwrap();
+
+            assert_eq!(s.scratch_lane(Filter::All).unwrap(), ScratchLane::default());
+        }
+
+        /// The fleet's own answer carries the lane, so the screen needs no
+        /// second call and the two halves cannot disagree about what is on it.
+        #[test]
+        fn the_fleet_carries_the_lane_beside_the_tree() {
+            let s = store();
+            let c = scratch(&s, "r1");
+            s.archive_conversation(&c, 1_000).unwrap();
+
+            let (folded, _) = s.fleet(Filter::Live).unwrap();
+            assert!(folded.scratch.hidden.contains("r1"), "the fold dropped the lane");
+        }
     }
 }

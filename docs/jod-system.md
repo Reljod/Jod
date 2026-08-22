@@ -334,9 +334,9 @@ would silently start a fresh one instead of continuing anything.
 | `/compact` | No harness exposes conversation compaction through its headless interface. It is the harness's own context to manage, which is the seam working as intended. |
 | `/share`, `/unshare` | OpenCode-specific hosted sessions; there is nothing for Jod to share *to*. |
 | `/connect` | Provider credentials belong to the harness. Jod never holds an API key, by design. |
-| Reasoning-effort cycling | Each harness spells it differently — AGY `--effort`, OpenCode `--variant`, Claude model-side — so there is no uniform control to expose yet. |
+| Reasoning-effort cycling | No longer blocked on spelling: Claude Code and AGY both take `--effort` and OpenCode takes `--variant`, and Jod passes whichever the spawn's role asks for. What is missing is a per-conversation cycle; the level is set per role in `roles`, not per thread. |
 
-The last two rows of that table are the harness seam's cost showing up in the
+The `/share` and `/connect` rows are the harness seam's cost showing up in the
 UI, and are the expected price of [delegating rather than owning the
 loop](decisions.md).
 

@@ -17,7 +17,7 @@ use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
-use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess};
+use crate::harness::{Effort, HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess};
 use crate::heartbeat::{Heartbeat, Watching};
 use crate::store::{Store, StoredRun};
 use crate::workdir::Workdir;
@@ -397,6 +397,123 @@ pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conve
     }
     if let Some(permission) = conversation.permission {
         req.permission = permission;
+    }
+}
+
+/// Fill in from the spawn's `roles` row whatever nobody above it has named.
+///
+/// The third of four rungs. Highest first: an argument in the tool call that
+/// started this, then the conversation's own `/harness` or `/model`, then the
+/// role, then the harness's own default. So this only ever writes into a field
+/// that is still empty, and a request carrying no [`SpawnRequest::role`] — which
+/// is every request until a call site tags one — reads no row and changes
+/// nothing at all.
+///
+/// **Where it runs, and why there.** [`Jod::spawn_agent_in`] calls it once,
+/// before the harness binary is located. That is the earliest point at which the
+/// working directory is settled and the latest at which the harness can still be
+/// changed: a line later and `locate()` would already have gone looking for the
+/// wrong program, and the conversation row would have been opened naming it. It
+/// is the only spawn seam in the crate — `spawn_agent` and
+/// `spawn_from_untrusted` are both one-line wrappers around it — so every spawn
+/// passes through here exactly once.
+///
+/// That placement puts it *above* [`prefer_conversation_settings`] in the file
+/// and *below* it in precedence, which sounds backwards and is not. This writes
+/// a model only when the request has none; the conversation runs afterwards and
+/// overwrites whatever is there whenever its own column is set. The rung that
+/// runs last wins, and the conversation is meant to.
+///
+/// **The permission column can only ever ask for less.** Everything else here
+/// fills an empty field, but [`SpawnRequest::permission`] has no empty — it is a
+/// [`PermissionPolicy`] with a default, so "nobody said" and "somebody said
+/// auto" are the same value and there is no field to fill. What arrives is the
+/// ceiling the run was launched under: the console's mode, or the MCP server's
+/// `max_permission` for a delegated one. So the role is applied only when
+/// [`crate::mcp::permits`] says it sits at or below that ceiling, which is the
+/// same comparison every other permission decision in the codebase makes. A row
+/// asking for more is refused out loud rather than clamped quietly, because a
+/// settings screen that appears to raise a ceiling it cannot raise is worse than
+/// one that says it did not.
+///
+/// Nothing here returns an error, and every refusal is a line on stderr. A role
+/// is a preference; a spawn that cannot read one should still happen, on the
+/// settings it already had.
+pub fn apply_role(store: &Store, req: &mut SpawnRequest) {
+    let Some(role) = req.role else {
+        return;
+    };
+    let row = match store.role_get(role.as_str()) {
+        Ok(Some(row)) => row,
+        // No row, or no table worth the name. Both mean "inherit", which is the
+        // answer on every machine whose owner has never opened the panel.
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("[jod] could not read the `{}` role: {e}", role.as_str());
+            return;
+        }
+    };
+
+    // The harness first, because the two settings under it are read against
+    // whichever one this ends up being: a model name belongs to one harness,
+    // and an effort level is a word only some of them know.
+    if let Some(named) = &row.harness {
+        match HarnessKind::from_id(named) {
+            // Only a run that is starting fresh. A resumed session belongs to
+            // the harness that minted its id and means nothing to any other, so
+            // moving a thread across is `Store::switch_harness`'s job — with a
+            // compaction and a replay behind it — and not something a settings
+            // row may do on the way past. `continue_agent` tags its spawns with
+            // a role for the sake of the other three columns, and this is what
+            // keeps that from stranding the session.
+            Some(kind) if req.resume == Resume::Fresh => req.harness = kind,
+            Some(_) => {}
+            None => eprintln!(
+                "[jod] the `{}` role names an unknown harness `{named}` — ignoring it",
+                role.as_str()
+            ),
+        }
+    }
+
+    if req.model.is_none() {
+        req.model = row.model.clone();
+    }
+
+    if req.effort.is_none() {
+        if let Some(text) = &row.thinking {
+            match Effort::parse(text) {
+                Some(level) if level.accepted_by(req.harness) => req.effort = Some(level),
+                Some(level) => eprintln!(
+                    "[jod] the `{}` role asks to think at `{}` and {} has no word for that — \
+                     starting it with no effort flag rather than with the nearest level",
+                    role.as_str(),
+                    level.as_str(),
+                    req.harness.label()
+                ),
+                None => eprintln!(
+                    "[jod] the `{}` role has an unknown thinking level `{text}` — ignoring it",
+                    role.as_str()
+                ),
+            }
+        }
+    }
+
+    if let Some(text) = &row.permission {
+        match crate::mcp::parse_permission(text) {
+            Some(want) if crate::mcp::permits(req.permission, want) => req.permission = want,
+            Some(want) => eprintln!(
+                "[jod] the `{}` role asks for `{}`, which is above the `{}` this run was \
+                 launched under — leaving it at `{}`",
+                role.as_str(),
+                want.label(),
+                req.permission.label(),
+                req.permission.label()
+            ),
+            None => eprintln!(
+                "[jod] the `{}` role has an unknown permission `{text}` — ignoring it",
+                role.as_str()
+            ),
+        }
     }
 }
 
@@ -1009,6 +1126,20 @@ impl Jod {
         // masked by whichever harness happens to be missing on this machine.
         // Neither question depends on the other.
         settle_cwd(&store, &mut req, &conversation)?;
+
+        // What this run's layer of the chain of command is configured to use,
+        // for the fields nobody has named. Here rather than at the four callers
+        // that could have done it, for the same reason the untrusted cap moved
+        // into the spawn path: a rule every future call site has to remember is
+        // a convention, not a rule. This is the seam they all funnel through —
+        // `spawn_agent` and `spawn_from_untrusted` are wrappers around it — so
+        // it runs exactly once per spawn and cannot be skipped.
+        //
+        // Before `locate()` because it may change the harness, and a harness
+        // settled after the binary has been found is a binary found for the
+        // wrong one. The conversation's own model and mode are applied further
+        // down and deliberately overwrite what this wrote; see `apply_role`.
+        apply_role(&store, &mut req);
 
         let program = req
             .harness
@@ -4025,5 +4156,248 @@ mod tests {
         assert_eq!(summary.status, AgentStatus::Completed);
         assert_eq!(summary.pgid, None);
         assert!(!summary.process_alive);
+    }
+
+    // ---- roles -----------------------------------------------------------
+
+    use crate::harness::Role;
+    use crate::store::RoleField;
+
+    /// What `mcp::delegate` builds today, tagged with the layer it belongs to.
+    /// Nothing else about it changes, which is the point of every test below.
+    fn scratch_request() -> SpawnRequest {
+        SpawnRequest {
+            name: "look something up".into(),
+            harness: HarnessKind::ClaudeCode,
+            prompt: "look something up".into(),
+            cwd: PathBuf::from("/tmp"),
+            permission: PermissionPolicy::Bypass,
+            resume: Resume::Fresh,
+            tools: Some(ToolAccess::ReadOnly),
+            role: Some(Role::Scratch),
+            ..SpawnRequest::default()
+        }
+    }
+
+    /// Compared as JSON because `SpawnRequest` has no `PartialEq`, and because
+    /// this is the comparison the check actually asks for: every field, written
+    /// out, identical.
+    fn as_json(req: &SpawnRequest) -> serde_json::Value {
+        serde_json::to_value(req).expect("a spawn request serialises")
+    }
+
+    /// SPEC check 25, and the most important test in the epic. A machine whose
+    /// owner has never opened the roles panel must spawn exactly what it
+    /// spawned before the panel existed.
+    #[test]
+    fn an_empty_roles_table_changes_no_spawn() {
+        let store = Store::in_memory().unwrap();
+        let before = scratch_request();
+        let mut after = before.clone();
+        apply_role(&store, &mut after);
+        assert_eq!(as_json(&before), as_json(&after));
+    }
+
+    /// The same, from the other side: a row that exists is read only by a
+    /// request that asked to be. An untagged spawn is not quietly reclassified.
+    #[test]
+    fn a_request_carrying_no_role_reads_no_row() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("haiku"))
+            .unwrap();
+        let before = SpawnRequest {
+            role: None,
+            ..scratch_request()
+        };
+        let mut after = before.clone();
+        apply_role(&store, &mut after);
+        assert_eq!(as_json(&before), as_json(&after));
+    }
+
+    /// SPEC check 26. A row naming a harness and a model reaches the request
+    /// that `delegate` builds, which is the whole purpose of the table.
+    #[test]
+    fn a_role_row_supplies_the_harness_and_model_nobody_named() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Harness, Some("open_code"))
+            .unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("gpt-5"))
+            .unwrap();
+
+        let mut req = scratch_request();
+        apply_role(&store, &mut req);
+        assert_eq!(req.harness, HarnessKind::OpenCode);
+        assert_eq!(req.model.as_deref(), Some("gpt-5"));
+    }
+
+    /// SPEC check 27. The rung above the role wins: a `delegate` call that
+    /// names a model is a person or a model choosing on purpose, and a stored
+    /// default must not overrule it.
+    #[test]
+    fn a_model_named_in_the_call_beats_the_role() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("haiku"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            model: Some("opus".into()),
+            ..scratch_request()
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(req.model.as_deref(), Some("opus"));
+    }
+
+    /// SPEC check 28. The conversation's own `/model` sits between the two, and
+    /// it wins because `prefer_conversation_settings` runs after this and
+    /// overwrites what the role filled in. Asserted in that order rather than
+    /// by reading the code, since the order is the entire claim.
+    #[test]
+    fn the_conversations_own_model_beats_the_role() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("haiku"))
+            .unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        store
+            .set_conversation_model(&conversation.id, Some("sonnet"))
+            .unwrap();
+        let conversation = store.conversation(&conversation.id).unwrap().unwrap();
+
+        let mut req = scratch_request();
+        apply_role(&store, &mut req);
+        assert_eq!(req.model.as_deref(), Some("haiku"), "the role fills a gap");
+        prefer_conversation_settings(&mut req, &conversation);
+        assert_eq!(req.model.as_deref(), Some("sonnet"), "the thread wins");
+    }
+
+    /// SPEC check 29, at the seam rather than in the argv: a level the harness
+    /// can spell is set, and the adapters turn it into their own flag.
+    #[test]
+    fn a_thinking_level_the_harness_can_spell_is_set() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Thinking, Some("high"))
+            .unwrap();
+
+        let mut req = scratch_request();
+        apply_role(&store, &mut req);
+        assert_eq!(req.effort, Some(Effort::High));
+    }
+
+    /// And one it cannot is refused rather than rounded. `max` means `max`; a
+    /// role that quietly ran AGY at `high` would be a setting that lied.
+    #[test]
+    fn a_thinking_level_the_harness_cannot_spell_is_left_unset() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Harness, Some("agy"))
+            .unwrap();
+        store
+            .role_set("scratch", RoleField::Thinking, Some("max"))
+            .unwrap();
+
+        let mut req = scratch_request();
+        apply_role(&store, &mut req);
+        assert_eq!(req.harness, HarnessKind::Agy);
+        assert_eq!(req.effort, None, "no flag rather than the wrong flag");
+    }
+
+    /// A null column is not a value. This is check 29's second half at the
+    /// seam: a row that says nothing about thinking leaves the request saying
+    /// nothing about it either, so no adapter emits a flag.
+    #[test]
+    fn a_role_that_says_nothing_about_thinking_sets_no_level() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("haiku"))
+            .unwrap();
+
+        let mut req = scratch_request();
+        apply_role(&store, &mut req);
+        assert_eq!(req.effort, None);
+    }
+
+    /// The launch mode is a ceiling. A role may ask for less than the console
+    /// is running at and never for more, which is what keeps the mode on the
+    /// status bar meaning what it says for everything below it.
+    #[test]
+    fn a_role_permission_may_lower_the_ceiling_but_never_raise_it() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Permission, Some("plan"))
+            .unwrap();
+        let mut lowered = SpawnRequest {
+            permission: PermissionPolicy::AcceptEdits,
+            ..scratch_request()
+        };
+        apply_role(&store, &mut lowered);
+        assert_eq!(lowered.permission, PermissionPolicy::Plan);
+
+        store
+            .role_set("scratch", RoleField::Permission, Some("bypass"))
+            .unwrap();
+        let mut raised = SpawnRequest {
+            permission: PermissionPolicy::AcceptEdits,
+            ..scratch_request()
+        };
+        apply_role(&store, &mut raised);
+        assert_eq!(
+            raised.permission,
+            PermissionPolicy::AcceptEdits,
+            "a role asking for more than the run was launched with is refused"
+        );
+    }
+
+    /// A resumed session belongs to the harness that minted its id, so a role
+    /// may not move it. `continue_agent` tags its spawns for the sake of the
+    /// other columns, and this is what stops that stranding the session.
+    #[test]
+    fn a_role_never_moves_a_resumed_session_to_another_harness() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("engineer", RoleField::Harness, Some("open_code"))
+            .unwrap();
+        store
+            .role_set("engineer", RoleField::Thinking, Some("low"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            role: Some(Role::Engineer),
+            resume: Resume::Session("sess-1".into()),
+            ..scratch_request()
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(
+            req.harness,
+            HarnessKind::ClaudeCode,
+            "the session's own harness stands"
+        );
+        assert_eq!(req.effort, Some(Effort::Low), "the rest of the row applies");
+    }
+
+    /// Nonsense in the table is ignored rather than fatal. A row is a
+    /// preference, and a spawn that cannot understand one should still happen
+    /// on the settings it already had.
+    #[test]
+    fn values_the_code_does_not_recognise_leave_the_request_alone() {
+        let store = Store::in_memory().unwrap();
+        for (field, value) in [
+            (RoleField::Harness, "cursor"),
+            (RoleField::Thinking, "none"),
+            (RoleField::Permission, "yolo"),
+        ] {
+            store.role_set("scratch", field, Some(value)).unwrap();
+        }
+
+        let before = scratch_request();
+        let mut after = before.clone();
+        apply_role(&store, &mut after);
+        assert_eq!(as_json(&before), as_json(&after));
     }
 }
