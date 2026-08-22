@@ -8457,9 +8457,9 @@ mod tests {
     /// Deliberately built through the same calls the orchestrator makes, so
     /// this exercises the arrangement a real session is actually in rather than
     /// one assembled to make the test pass.
-    fn on_a_repo(name: &str) -> Option<OnARepo> {
+    fn on_a_repo(name: &str) -> OnARepo {
         let (guard, scratch) = crate::leases::scratch(name);
-        let repo = crate::leases::fixture_repo(&scratch.join("repo"))?;
+        let repo = crate::leases::fixture_repo(&scratch.join("repo"));
         let runtime = runtime();
         let entered = runtime.enter();
         let store = Arc::new(Store::in_memory().unwrap());
@@ -8488,14 +8488,14 @@ mod tests {
         // into the value. The task `Jod::with_store` spawned stays on the
         // runtime and runs whenever `block_on` drives it.
         drop(entered);
-        Some(OnARepo {
+        OnARepo {
             _guard: guard,
             runtime,
             store,
             server,
             repo,
             conversation: conversation.id,
-        })
+        }
     }
 
     /// Write the record of what a run was launched with, the way the runner
@@ -8552,9 +8552,7 @@ mod tests {
     /// else entirely under `JOD_HOME`.
     #[test]
     fn a_session_that_cannot_write_to_its_claimed_worktree_is_told_so() {
-        let Some(on) = on_a_repo("mcp-unwritable") else {
-            return;
-        };
+        let on = on_a_repo("mcp-unwritable");
         // What the work session really gets: its checkout, read-only, and no
         // worktree because none has been cut yet.
         spawn_plan_granting("run-1", &on.repo, &[&on.repo]);
@@ -8601,9 +8599,7 @@ mod tests {
     /// exactly when it is true.
     #[test]
     fn a_session_whose_grant_reaches_the_worktree_is_not_warned() {
-        let Some(on) = on_a_repo("mcp-writable") else {
-            return;
-        };
+        let on = on_a_repo("mcp-writable");
         // The directory worktrees are cut under, granted up front. This is the
         // shape one of the two candidate fixes for O1 would produce, and it is
         // the only arrangement in which the tool may honestly say "writable".
@@ -8627,9 +8623,7 @@ mod tests {
     /// so removing the tool from the catalogue fails it.
     #[test]
     fn claiming_a_worktree_is_reachable_through_the_tool_and_rebinds_the_roots() {
-        let Some(on) = on_a_repo("mcp-claim") else {
-            return;
-        };
+        let on = on_a_repo("mcp-claim");
         let (store, repo, conversation) = (&on.store, &on.repo, &on.conversation);
         let answer = on.call("claim_worktree", json!({}));
         assert!(!is_error_result(&answer), "{}", said(&answer));
@@ -8660,9 +8654,7 @@ mod tests {
     /// and describe it as its own.
     #[test]
     fn a_sibling_is_offered_the_worktree_rather_than_a_second_branch() {
-        let Some(on) = on_a_repo("mcp-reuse") else {
-            return;
-        };
+        let on = on_a_repo("mcp-reuse");
         let (store, repo) = (&on.store, &on.repo);
         let first: Value =
             serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
@@ -8764,9 +8756,7 @@ mod tests {
     /// failure — an agent told this is an error will try to force it.
     #[test]
     fn releasing_a_worktree_with_uncommitted_work_keeps_it_and_says_why() {
-        let Some(on) = on_a_repo("mcp-release-dirty") else {
-            return;
-        };
+        let on = on_a_repo("mcp-release-dirty");
         let claimed: Value =
             serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
         let worktree = PathBuf::from(claimed["worktree"].as_str().unwrap());
@@ -8782,9 +8772,7 @@ mod tests {
 
     #[test]
     fn releasing_a_clean_merged_worktree_removes_it() {
-        let Some(on) = on_a_repo("mcp-release-clean") else {
-            return;
-        };
+        let on = on_a_repo("mcp-release-clean");
         let claimed: Value =
             serde_json::from_str(&said(&on.call("claim_worktree", json!({})))).unwrap();
         let worktree = PathBuf::from(claimed["worktree"].as_str().unwrap());
@@ -8797,9 +8785,7 @@ mod tests {
 
     #[test]
     fn releasing_when_you_hold_nothing_says_so_rather_than_failing_obscurely() {
-        let Some(on) = on_a_repo("mcp-release-none") else {
-            return;
-        };
+        let on = on_a_repo("mcp-release-none");
         let answer = on.call("release_worktree", json!({}));
         assert!(is_error_result(&answer), "{answer}");
         assert!(said(&answer).contains("hold no worktree"), "{}", said(&answer));

@@ -1855,10 +1855,10 @@ pub fn ask_for_pull_requests_with(
 /// A session that has finished its only task, holding a lease on a real git
 /// repository whose branch has a commit the base does not.
 ///
-/// Returns the lease id and the conversation id, or `None` when git is not
+/// Returns the lease id and the conversation id, and panics when git is not
 /// installed — the same contract [`crate::leases::fixture_repo`] keeps, and for
-/// the same reason: a test that quietly passed without git would be a test that
-/// stopped checking the thing it exists for.
+/// the same reason: a caller that bailed out early still reported as a pass, so
+/// the suite claimed to have checked something it never ran.
 ///
 /// Lives here rather than in the test module because [`crate::ticker`]'s guard
 /// on the auto-PR wiring needs it, and it is this module that knows what
@@ -1866,7 +1866,7 @@ pub fn ask_for_pull_requests_with(
 /// [`branch_is_ahead`] runs real `git`, and the whole point of the guard is
 /// that the tick reaches it.
 #[cfg(test)]
-pub(crate) fn a_finished_session(store: &Store) -> Option<(i64, String)> {
+pub(crate) fn a_finished_session(store: &Store) -> (i64, String) {
     let dir = std::env::temp_dir().join(format!(
         "jod-prs-ask-{}-{}",
         std::process::id(),
@@ -1898,14 +1898,11 @@ pub(crate) fn a_finished_session(store: &Store) -> Option<(i64, String)> {
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output();
         match run {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!(
-                    "SKIPPING an auto-PR test: `git` is not installed on this machine, and \
-                     whether a branch has anything on it is a fact about git. Install git \
-                     and run the suite again — this test checked nothing."
-                );
-                return None;
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => panic!(
+                "`git` is not installed on this machine, and whether a branch has anything \
+                 on it is a fact about git, so this test cannot run. Install git and run \
+                 the suite again."
+            ),
             Err(e) => panic!("could not run `git {}`: {e}", args.join(" ")),
             Ok(out) if !out.status.success() => panic!(
                 "`git {}` failed: {}",
@@ -1992,7 +1989,7 @@ pub(crate) fn a_finished_session(store: &Store) -> Option<(i64, String)> {
         })
         .expect("a lease");
     store.complete_work_task(&task).expect("a finished board");
-    Some((lease, conversation))
+    (lease, conversation)
 }
 
 #[cfg(test)]
@@ -3507,9 +3504,7 @@ thing for the MCP server.
     #[test]
     fn a_branch_with_nothing_on_it_is_not_worth_a_pull_request() {
         let (_guard, dir) = crate::leases::scratch("prs-ahead");
-        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = crate::leases::fixture_repo(&dir.join("repo"));
         let base = git_out(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
         git_ok(&repo, &["checkout", "--quiet", "-b", "jod/feature"]);
 

@@ -3189,9 +3189,7 @@ mod tests {
     #[test]
     fn another_works_confirmation_does_not_arm_this_delete() {
         let (_env, dir) = crate::leases::scratch("confirmation");
-        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = crate::leases::fixture_repo(&dir.join("repo"));
         let s = store();
         let mine = s.create_work("mine").unwrap();
         let other = s.create_work("other").unwrap();
@@ -3218,9 +3216,7 @@ mod tests {
     #[test]
     fn a_confirmation_that_has_expired_does_not_arm_a_later_delete() {
         let (_env, dir) = crate::leases::scratch("expiry");
-        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = crate::leases::fixture_repo(&dir.join("repo"));
         let s = store();
         let work = s.create_work("mine").unwrap();
         let c = session(&s, &work.id, None, "worker");
@@ -3247,9 +3243,7 @@ mod tests {
     #[test]
     fn the_same_command_repeated_from_another_process_completes_the_delete() {
         let (_env, dir) = crate::leases::scratch("two-processes");
-        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = crate::leases::fixture_repo(&dir.join("repo"));
         let db = dir.join("jod.db");
 
         let work_id = {
@@ -3286,12 +3280,8 @@ mod tests {
     #[test]
     fn a_lease_cut_between_the_two_commands_disarms_the_repeat() {
         let (_env, dir) = crate::leases::scratch("disarm");
-        let Some(one) = crate::leases::fixture_repo(&dir.join("one")) else {
-            return;
-        };
-        let Some(two) = crate::leases::fixture_repo(&dir.join("two")) else {
-            return;
-        };
+        let one = crate::leases::fixture_repo(&dir.join("one"));
+        let two = crate::leases::fixture_repo(&dir.join("two"));
         let s = store();
         let work = s.create_work("a job").unwrap();
         let c = session(&s, &work.id, None, "worker");
@@ -3326,9 +3316,7 @@ mod tests {
     #[test]
     fn one_instruction_becomes_a_titled_work_a_claim_a_tree_a_closing_and_a_delete() {
         let (_env, dir) = crate::leases::scratch("e4-check");
-        let Some(repo) = crate::leases::fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = crate::leases::fixture_repo(&dir.join("repo"));
         let s = store();
 
         // One instruction naming a folder produces a titled work…
