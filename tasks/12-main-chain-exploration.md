@@ -829,8 +829,8 @@ cannot, and not retrying on an unrelated turn.
 
 ---
 
-## X13. Main never calls `ask_manager` — the guard that should force it fails open, so the manager tier never runs
-Status: **open — mechanism partly established, see below** · Severity: critical · Owner: —
+## X13. Main never calls `ask_manager` — compaction moves the pin mid-turn, so the guard that should force it fails open
+Status: **open — root cause established: compaction forks the main chat and moves the pin** · Severity: critical · Owner: —
 
 Across every scenario run tonight — thirteen main turns, several of them plainly
 repository work — **main called `ask_manager` exactly zero times.** It used
@@ -875,27 +875,68 @@ newly created `c71f36a9` held the pin — so the caller was, by this comparison,
 not main, and `open_work` went through. `delegations` records it plainly:
 `open_work` at id 58 from conversation `3b1035a4`.
 
-**What is not established, and is the next thing to do.** On a later run main's
-turn *was* in the pinned conversation `c71f36a9`, and `open_work` still went
-through (`delegations` id 61, conversation `c71f36a9`). At the same time a
-further conversation `0a1a280c` appeared — `origin=human`, `agy`,
-`cwd=/home/reljod` — and the work session's parent is *that*, not `c71f36a9`.
-So the delegation row and the conversation tree disagree about who the caller
-was.
+**The cause is compaction, and it is now established rather than guessed.**
+Compacting a conversation does not edit it in place. It **forks it into a new
+conversation** and moves the pin, titling the new row `main`
+(`core/src/conversation.rs:1594-1620`). The comment there explains why the pin
+has to move, and is right about it:
 
-Two candidate explanations, and they need telling apart before anyone writes a
-fix:
+> The pin follows the thread across the switch. `main_conversation` is
+> get-or-create on `pinned = 1`, so a pin left behind on the conversation this
+> switch just compacted away would send the next turn back to the thread that
+> was handed over.
 
-1. **The pin drifts, and the caller is genuinely some other conversation.** A
-   fresh `main` conversation is being created mid-session — one appeared at
-   18:48 during a run — and whichever of them the turn lands in may or may not
-   be the pinned one. What creates them is not yet identified; compaction and
-   the failed `/harness` attempts are both candidates, and the seven-way pile-up
-   suggests this has been happening for a long time.
-2. **The identity the MCP server resolves is not the conversation the turn is
-   recorded under.** This is where X1 bites: an AGY session gets no per-run MCP
-   config, so run and conversation identity are resolved from the process group
-   rather than from the environment Claude Code would have been given.
+So the pin moving is correct. The bug is *when* it moves relative to a turn
+already in flight. **A turn that began before a compaction belongs to the old
+conversation for its whole life, while the pin has already moved to the new
+one.** From that moment `caller_is_main` compares the turn's conversation
+against a different pinned id, returns false, and every main-only guard fails
+open for the rest of that turn.
+
+**The store shows a perfect one-to-one chain.** Every compaction run is followed
+eight to twelve seconds later by a new conversation, forked from the previous
+one and titled `main`:
+
+| `summarise to compact` run | new `main` conversation | gap |
+|---|---|---|
+| 1787423541681 | `3b1035a4` @ 1787423550502 | +9s |
+| 1787424527516 | `c71f36a9` @ 1787424535851 | +8s |
+| 1787424989059 | `0a1a280c` @ 1787424996981 | +8s |
+| 1787425992673 | `2945d706` @ 1787426004731 | +12s |
+
+And `forked_from` links them in one unbroken line, oldest to newest:
+
+```
+8ce8211e → 3035de39 → 85d68207 → d2588dcd → ef0405d8 → 3b1035a4 → c71f36a9 → 0a1a280c → 2945d706
+```
+
+That is the seven-way pile-up explained: it is not drift or corruption, it is
+one chat compacted eight times. It also resolves what looked like a
+contradiction above — the run recorded against `c71f36a9` whose work session
+hangs under `0a1a280c` is a turn that straddled the third compaction.
+
+**Why it fires so often here, which is a second-order consequence of the
+requested configuration.** Main is on `gemini-3.7-flash-medium`. Four
+compactions happened in about forty minutes of ordinary use. On a model with a
+larger context the window between compactions is wide and a turn rarely
+straddles one; on this one it is narrow and turns straddle compactions
+routinely. So the same bug that would be intermittent and baffling elsewhere is
+close to permanent in Reljod's setup — which is why the manager tier was absent
+from *every* scenario rather than from some of them.
+
+**Two fix shapes, and they are not equivalent.** Either resolve "is this main"
+against the thread rather than against the current pin — following `forked_from`
+so a conversation that *was* main and was compacted still counts for the turn
+that was already running — or freeze the answer at the start of a turn and carry
+it. The first is more correct and more work; the second is smaller and leaves
+the question wrong for anything that outlives a turn. Whichever is chosen,
+`caller_is_main` being a single equality against a mutable pin is the thing to
+stop doing.
+
+Worth noting for whoever takes it: all four `summarise to compact` runs are
+recorded `failed`, and X11 applies to them, so do not read those statuses as
+evidence that compaction is broken. At least one of them demonstrably worked —
+the console reported "15518 chars of conversation became 2522".
 
 **Why this is the most important finding in this file.** It is not a wrong
 label or a bad message — an entire designed layer is absent at runtime, on the
