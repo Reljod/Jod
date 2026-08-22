@@ -1174,6 +1174,65 @@ it for ever.
 
 ---
 
+## X16. Compaction carries queued deliveries across but not reviewing ones, so a message under judgement is orphaned
+Status: **open** · Severity: high · Owner: —
+
+The other half of why delivery 12 in X15 could never be recovered, and it
+survives the fix for X15 unless that fix is written knowing about it.
+
+Compaction forks the main chat (see X13) and then deliberately carries several
+things across to the new conversation: child conversations, open cards, and
+queued deliveries. The delivery statement is scoped:
+
+```sql
+UPDATE pending_deliveries SET conversation_id = ?2
+  WHERE conversation_id = ?1 AND state = 'queued'
+```
+
+`state = 'queued'` only. Its comment explains the exclusion it *was* thinking
+about — "a delivered one is a record of where it actually went, and moving it
+would make the ledger lie" — which is right. But `reviewing` is neither
+`queued` nor `delivered`. It is a live message mid-judgement, and it is left
+behind.
+
+**Observed, and it explains the permanence in X15.** Delivery 12 was queued
+against conversation `0a1a280c` and put into `reviewing` when its doorman
+started. The next compaction, fifteen seconds later, forked main into
+`2945d706` and moved the pin. Delivery 12 stayed on `0a1a280c` — a conversation
+that is no longer main, is not busy, and that nothing revisits. Two later
+messages, 15 and 16, were queued against `2945d706` after it existed and were
+delivered normally within about thirty seconds.
+
+So the two faults compound and each alone would have been survivable:
+
+1. The doorman died and nothing returned row 12 to `queued` (X15).
+2. Because it was sitting in `reviewing`, the next compaction skipped it and
+   orphaned it onto an abandoned conversation.
+
+**Why this matters to the fix already written for X15.** That fix sweeps
+`reviewing` rows at the top of `tick_deliveries` and at turn end in the console,
+which is the right shape. But a sweep that asks about *the current main* will
+not find a row orphaned onto a previous one — `under_review_for` takes a
+conversation id, and after a compaction the orphan's id is a conversation
+nobody looks at again. The sweep has to either follow the `forked_from` chain
+or ask globally rather than per-conversation.
+
+**And the window is not rare here.** A doorman takes tens of seconds to judge;
+compaction fires every ten minutes or so on `gemini-3.7-flash-medium` (X13). A
+message being judged when a compaction lands is an ordinary Tuesday in this
+configuration, not a corner case.
+
+The narrow fix is to widen the statement to carry `reviewing` rows as well as
+`queued` ones — a message still being judged is exactly as owed to the new
+thread as one still waiting, and the comment's reasoning about not moving
+`delivered` rows does not apply to it.
+
+Check: queue a message into a busy main chat, let a doorman claim it, force a
+compaction before the doorman finishes, and read the row's `conversation_id`.
+Green is the new conversation's id, and the row eventually leaving `reviewing`.
+
+---
+
 ## Checked and not a bug
 
 Recorded because both looked like findings and both cost real time to
