@@ -125,12 +125,30 @@ pub struct Preview {
     pub rows: usize,
     /// Lines the content came to.
     pub lines: usize,
+    /// Where the pane was drawn, border included, so the wheel can tell a
+    /// pointer over it from one over the rows beside it. `None` when no pane
+    /// was drawn at all.
+    pub area: Option<Rect>,
 }
 
 impl Preview {
     /// The furthest the pane can be scrolled before its last line is at the top.
     pub fn max_scroll(self) -> u16 {
         self.lines.saturating_sub(self.rows).min(u16::MAX as usize) as u16
+    }
+
+    /// Whether a pointer at these coordinates is over the pane.
+    ///
+    /// The same test [`RailHits::holds`] and [`PanelHits::holds`] make, for the
+    /// same reason: the wheel has to go to the box under the pointer, and the
+    /// only thing that knows where that box is is the frame that drew it.
+    pub fn holds(self, column: u16, row: u16) -> bool {
+        self.area.is_some_and(|area| {
+            column >= area.x
+                && column < area.x + area.width
+                && row >= area.y
+                && row < area.y + area.height
+        })
     }
 }
 
@@ -4043,6 +4061,7 @@ fn preview_pane(
     let shape = Preview {
         rows: area.height.saturating_sub(2) as usize,
         lines: lines.len(),
+        area: Some(area),
     };
     // `resting` is the colour this pane wears when the rows have the keyboard,
     // and it is the caller's because it is not about focus: the chat is the
@@ -12851,13 +12870,6 @@ mod tests {
         assert_eq!(empty.count_for(Workspace::Fleet), "nothing delegated yet");
     }
 
-    /// A filter on the fleet says so, on the tree as well as the flat list.
-    ///
-    /// The flat list has drawn this line since it had one; the tree never did.
-    /// Once the fleet always had a tree, filtering hid rows — whole projects,
-    /// and `★ jod` — with nothing anywhere saying a filter was on, so the
-    /// screen read as a fleet that had lost them.
-    #[test]
     /// An empty state that does not fit says so, rather than becoming a
     /// different sentence.
     ///

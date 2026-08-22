@@ -867,6 +867,20 @@ async fn event_loop(
                             MouseEventKind::ScrollDown if hits.holds(m.column, m.row) => {
                                 on_rail_wheel(&mut app, &hits, 1);
                             }
+                            // The fleet's preview pane. Claimed before the
+                            // transcript for the same reason the rail is: the
+                            // wheel belongs to the box under the pointer, and
+                            // the transcript is what is left over.
+                            //
+                            // Like the catalog below, this does not take the
+                            // keyboard, so the border stays as it was and `⇥`
+                            // is still what moves focus.
+                            MouseEventKind::ScrollUp if preview.holds(m.column, m.row) => {
+                                on_preview_wheel(&mut app, preview, -1);
+                            }
+                            MouseEventKind::ScrollDown if preview.holds(m.column, m.row) => {
+                                on_preview_wheel(&mut app, preview, 1);
+                            }
                             // The catalog walks its cursor rather than holding
                             // an offset of its own, for the reason
                             // `on_rail_wheel` gives: the window is derived from
@@ -4471,6 +4485,23 @@ fn on_preview_key(app: &mut App, key: KeyEvent, shape: ui::Preview) -> Option<Op
         _ => return None,
     }
     Some(None)
+}
+
+/// The wheel over the preview pane, in notches: negative up, positive down.
+///
+/// Three lines a notch, which is the step the transcript takes, because the
+/// pane holds the same kind of thing — prose somebody is reading — and a box
+/// that crawled one line where the box beside it moves three would read as
+/// stuck rather than as deliberate.
+///
+/// Clamped against the frame that was actually drawn, exactly as
+/// [`on_preview_key`] is and for the same reason: the content changes
+/// underneath a scroll that does not, so a pane scrolled past its end draws an
+/// empty box.
+fn on_preview_wheel(app: &mut App, shape: ui::Preview, notches: i32) {
+    let last = i32::from(shape.max_scroll());
+    let at = i32::from(app.preview_scroll.min(shape.max_scroll()));
+    app.preview_scroll = at.saturating_add(notches.saturating_mul(3)).clamp(0, last) as u16;
 }
 
 /// The traffic log's own verbs.
@@ -13881,7 +13912,19 @@ mod tests {
     /// A screen wide enough to have drawn a preview, which `press` cannot say:
     /// it hands the handler a default shape, and a shape of no rows is how the
     /// frame reports that the terminal was too narrow to draw one.
-    const WIDE: ui::Preview = ui::Preview { rows: 10, lines: 30 };
+    ///
+    /// The area is where such a pane lands on a wide screen: to the right of the
+    /// rows, ten rows of content inside a border that costs two.
+    const WIDE: ui::Preview = ui::Preview {
+        rows: 10,
+        lines: 30,
+        area: Some(ratatui::layout::Rect {
+            x: 40,
+            y: 2,
+            width: 60,
+            height: 12,
+        }),
+    };
 
     fn tab(app: &mut App) {
         on_key(
@@ -13987,7 +14030,20 @@ mod tests {
         tab(&mut app);
         tab(&mut app);
         assert!(app.preview_focused);
-        (app, ui::Preview { rows, lines })
+        (
+            app,
+            ui::Preview {
+                rows,
+                lines,
+                area: Some(ratatui::layout::Rect {
+                    x: 40,
+                    y: 2,
+                    width: 60,
+                    // The border costs the two rows that are not content.
+                    height: rows as u16 + 2,
+                }),
+            },
+        )
     }
 
     fn scroll(app: &mut App, shape: ui::Preview, code: KeyCode) {
@@ -14029,6 +14085,72 @@ mod tests {
             scroll(&mut app, shape, KeyCode::Up);
         }
         assert_eq!(app.preview_scroll, 0);
+    }
+
+    /// The wheel scrolls the pane it is pointing at.
+    ///
+    /// Until this existed the preview was the one readable box on the screen
+    /// that the wheel did nothing to: the transcript, the rail and the catalog
+    /// all took it, so a wheel over the preview fell through to the last arm and
+    /// scrolled the transcript hidden behind another workspace. What the reader
+    /// saw was a wheel that had stopped working.
+    #[test]
+    fn the_wheel_scrolls_the_preview_it_is_over() {
+        let (mut app, shape) = reading(30, 10);
+
+        // Three lines a notch, the step the transcript takes.
+        on_preview_wheel(&mut app, shape, 1);
+        assert_eq!(app.preview_scroll, 3);
+        on_preview_wheel(&mut app, shape, 1);
+        assert_eq!(app.preview_scroll, 6);
+        on_preview_wheel(&mut app, shape, -1);
+        assert_eq!(app.preview_scroll, 3);
+
+        // Both ends stop where the keyboard stops, against the frame that was
+        // drawn rather than against the raw line count.
+        for _ in 0..50 {
+            on_preview_wheel(&mut app, shape, 1);
+        }
+        assert_eq!(
+            app.preview_scroll, 20,
+            "the wheel stops where `End` does, not past the last line"
+        );
+        for _ in 0..50 {
+            on_preview_wheel(&mut app, shape, -1);
+        }
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    /// A wheel over a box you are only reading is not a statement that you want
+    /// to type into it — the same rule the catalog below the rail follows.
+    #[test]
+    fn the_wheel_scrolls_the_preview_without_taking_the_keyboard() {
+        let (mut app, shape) = reading(30, 10);
+        app.leave_preview();
+        assert!(!app.preview_focused);
+
+        on_preview_wheel(&mut app, shape, 1);
+        assert_eq!(app.preview_scroll, 3, "an unfocused pane still scrolls");
+        assert!(
+            !app.preview_focused,
+            "and scrolling it did not hand it the keys"
+        );
+    }
+
+    /// The wheel goes to the box under the pointer, so the pane has to know
+    /// where it was drawn. A frame that drew no pane holds no coordinates and
+    /// must claim nothing, or it would swallow the transcript's wheel.
+    #[test]
+    fn the_preview_claims_only_the_ground_it_was_drawn_on() {
+        assert!(WIDE.holds(40, 2), "its own top-left corner");
+        assert!(WIDE.holds(99, 13), "and its bottom-right one");
+        assert!(!WIDE.holds(39, 6), "a column short of it is the rows beside it");
+        assert!(!WIDE.holds(100, 6), "and one past it is off the pane");
+        assert!(!WIDE.holds(60, 14), "a row below it is not the pane either");
+        assert!(
+            !ui::Preview::default().holds(40, 2),
+            "a frame too narrow to draw a preview claims no ground at all"
+        );
     }
 
     /// `Home` and `End` reach the ends in one press, and a page keeps one row

@@ -27,7 +27,12 @@ source "$REPO_ROOT/.agents/skills/test-scenarios/scripts/assert.sh"
 SWEEP="$REPO_ROOT/.agents/skills/reclaim-disk/scripts/sweep_targets.sh"
 ARM="$REPO_ROOT/.agents/skills/reclaim-disk/scripts/arm_schedule.sh"
 
-FIX="$(mktemp -d)"
+# Resolved, because on macOS `mktemp -d` hands back a path under `/var`, which is
+# a symlink to `/private/var`, and the kernel reports the `/private` spelling for
+# a process's cwd. Comparing the two spellings is how this suite reported a
+# perfectly good fixture as broken. The sweep resolves its own root for the same
+# reason, so both sides of every comparison are the path the kernel would print.
+FIX="$(cd -- "$(mktemp -d)" && pwd -P)"
 
 # The fixture starts a real background process, so cleanup has to reach it from
 # every exit path — including the early exit an assertion failure takes. Killing
@@ -45,6 +50,27 @@ cleanup() {
 trap cleanup EXIT
 
 # --- fixture ----------------------------------------------------------------
+# Backdate a path and everything under it.
+#
+# `touch -d "-600 minutes"` is a GNU extension. BSD touch, which is the one on a
+# Mac, rejects it and prints "out of range or illegal time specification" — and
+# because a failed touch leaves the file at its real mtime, every fixture came
+# out brand new. The sweep then correctly spared all of them, and six assertions
+# that had nothing to do with the sweep failed. The error went to stderr while
+# the run carried on, so what a reader saw was a working script accused of
+# leaving abandoned targets on disk.
+#
+# Both touches accept an absolute `-t CCYYMMDDhhmm`, so the arithmetic moves to
+# `date`, which is the one thing that has to differ: BSD spells the offset
+# `-v-600M` and GNU spells it `-d "-600 minutes"`. Both hosts then get the same
+# absolute stamp, which is what makes this a fix rather than a way of not
+# erroring.
+backdate() { # backdate <path> <minutes-old>
+  local at
+  at="$(date -v "-$2M" +%Y%m%d%H%M 2>/dev/null || date -d "-$2 minutes" +%Y%m%d%H%M)"
+  find "$1" -exec touch -t "$at" {} +
+}
+
 # A stand-in repo with four worktrees. Sizes are padded so `du` reports
 # something, and mtimes are set explicitly rather than by waiting.
 mk_target() { # mk_target <worktree> <minutes-old>
@@ -53,8 +79,7 @@ mk_target() { # mk_target <worktree> <minutes-old>
   dd if=/dev/zero of="$wt/target/debug/deps/blob.rlib" bs=1024 count=64 \
      status=none 2>/dev/null
   printf 'fn main() {}\n' > "$wt/src/main.rs"
-  # -d accepts a relative offset, so no date arithmetic is needed here.
-  find "$wt/target" -exec touch -d "-${age} minutes" {} +
+  backdate "$wt/target" "$age"
 }
 
 mk_target stale 600        # abandoned: ten hours untouched
@@ -92,8 +117,21 @@ fi
 
 section "a busy target is spared even when it is old"
 
+# Where a running process is standing, asked the way the host allows: /proc on
+# Linux, `lsof -d cwd` on a Mac, which has no /proc. This mirrors the same split
+# in sweep_targets.sh, and it is here for the same reason — without it the check
+# below silently compared "" with the worktree path and reported the fixture
+# broken on a Mac while the fixture was fine.
+process_cwd() { # process_cwd <pid>
+  if [ -d /proc ]; then
+    readlink "/proc/$1/cwd" 2>/dev/null
+  else
+    lsof -a -d cwd -Fn -p "$1" 2>/dev/null | sed -n 's/^n//p' | head -1
+  fi
+}
+
 # A real process whose cwd is inside the busy worktree — the exact condition the
-# script scans /proc for.
+# script scans the process table for.
 #
 # It has to be a script rather than a symlink to `sleep`: coreutils ships as one
 # multi-call binary that dispatches on argv[0] and refuses to run under a name it
@@ -117,13 +155,14 @@ chmod +x "$FIX/fakebin/cargo"
 ( cd "$FIX/busy" && exec "$FIX/fakebin/cargo" 60 ) >/dev/null 2>&1 </dev/null &
 BUSY_PID=$!
 busy_pid="$BUSY_PID"
-# Wait for the process to actually be visible in /proc with the right cwd,
-# rather than assuming it scheduled instantly.
+busy_cwd="$FIX/busy"
+# Wait for the process to actually be visible with the right cwd, rather than
+# assuming it scheduled instantly.
 for _ in $(seq 1 50); do
-  [ "$(readlink "/proc/$busy_pid/cwd" 2>/dev/null)" = "$FIX/busy" ] && break
+  [ "$(process_cwd "$busy_pid")" = "$busy_cwd" ] && break
   sleep 0.1
 done
-assert_eq "$FIX/busy" "$(readlink "/proc/$busy_pid/cwd" 2>/dev/null)" \
+assert_eq "$busy_cwd" "$(process_cwd "$busy_pid")" \
   "the fixture process really is rooted in busy/"
 
 out_busy="$($SWEEP --root "$FIX" --min-free-gb 0 --idle-minutes 90 2>&1)"
@@ -156,7 +195,7 @@ section "node_modules is opt-in"
 
 mkdir -p "$FIX/nodewt/node_modules/pkg"
 dd if=/dev/zero of="$FIX/nodewt/node_modules/pkg/blob" bs=1024 count=64 status=none 2>/dev/null
-find "$FIX/nodewt/node_modules" -exec touch -d '-600 minutes' {} +
+backdate "$FIX/nodewt/node_modules" 600
 
 out_default="$($SWEEP --root "$FIX" --min-free-gb 0 --idle-minutes 90 2>&1)"
 printf '%s' "$out_default" | grep -q 'node_modules' \
@@ -196,7 +235,7 @@ section "--skip puts a path permanently out of reach"
 # So it must be excludable by path, not merely off by default.
 mkdir -p "$FIX/apps/ios/node_modules/pkg"
 dd if=/dev/zero of="$FIX/apps/ios/node_modules/pkg/blob" bs=1024 count=64 status=none 2>/dev/null
-find "$FIX/apps/ios/node_modules" -exec touch -d '-600 minutes' {} +
+backdate "$FIX/apps/ios/node_modules" 600
 
 out_skip="$($SWEEP --root "$FIX" --min-free-gb 0 --idle-minutes 90 --with-node \
              --skip 'apps/ios/*' 2>&1)"
@@ -260,7 +299,7 @@ mkdir -p "$FIX/trap/target"
 printf 'gitdir: /nowhere\n' > "$FIX/trap/target/.git"
 dd if=/dev/zero of="$FIX/trap/target/blob" bs=1024 count=64 status=none 2>/dev/null
 printf 'precious unpushed work\n' > "$FIX/trap/target/WORK.md"
-find "$FIX/trap/target" -exec touch -d '-600 minutes' {} +
+backdate "$FIX/trap/target" 600
 
 out_trap="$($SWEEP --root "$FIX" --min-free-gb 0 --idle-minutes 90 --apply 2>&1)"
 assert_dir  "$FIX/trap/target"          "refused to remove a directory containing .git"

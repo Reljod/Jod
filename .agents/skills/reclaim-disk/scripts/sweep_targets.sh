@@ -101,7 +101,12 @@ if [ -z "$ROOT" ]; then
 fi
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || {
   printf 'sweep_targets.sh: no repository found (pass --root)\n' >&2; exit 2; }
-ROOT="$(cd -- "$ROOT" && pwd)"
+# `-P` because the busy check compares this against paths the kernel reports, and
+# the kernel has no symlinks left to report. On macOS `/tmp` and `/var` are links
+# into `/private`, so a root given as `/var/folders/…` would be compared against
+# a cwd of `/private/var/folders/…` — two spellings of one directory that no
+# string match can reconcile, and every busy directory would look idle.
+ROOT="$(cd -- "$ROOT" && pwd -P)"
 
 # --- is there any pressure? -------------------------------------------------
 free_kb() { df -Pk "$ROOT" | awk 'NR==2 {print $4}'; }
@@ -134,27 +139,69 @@ is_build_name() {
   esac
 }
 
-busy_paths=""
-for pid_dir in /proc/[0-9]*; do
-  [ -r "$pid_dir/cmdline" ] || continue
-  looks_like_build=0
-  exe="$(readlink "$pid_dir/exe" 2>/dev/null || true)"
-  [ -n "$exe" ] && is_build_name "${exe##*/}" && looks_like_build=1
-  # NUL-separated, so a path containing a space cannot split into two entries.
-  args="$(tr '\0' '\n' < "$pid_dir/cmdline" 2>/dev/null || true)"
-  if [ "$looks_like_build" -eq 0 ]; then
-    while IFS= read -r tok; do
-      [ -n "$tok" ] || continue
-      if is_build_name "${tok##*/}"; then looks_like_build=1; break; fi
-    done <<< "$args"
-  fi
-  [ "$looks_like_build" -eq 1 ] || continue
-  cwd="$(readlink "$pid_dir/cwd" 2>/dev/null || true)"
-  [ -n "$cwd" ] && busy_paths="$busy_paths$cwd"$'\n'
-  case "$args" in
-    *"$ROOT"*) busy_paths="$busy_paths$args"$'\n' ;;
+# Record one build process: where it is standing, and what it named.
+#
+# Both halves matter and they catch different things. The cwd catches `cargo
+# build` run from inside a worktree; the command line catches a build pointed at
+# a target directory from somewhere else, which is why it is kept whenever it
+# mentions the root at all.
+note_build() { # note_build <cwd> <args>
+  [ -n "$1" ] && busy_paths="$busy_paths$1"$'\n'
+  case "$2" in
+    *"$ROOT"*) busy_paths="$busy_paths$2"$'\n' ;;
   esac
-done
+}
+
+# Whether any token of a command line is a compiler.
+args_look_like_build() { # args_look_like_build <args, one token per line>
+  local tok
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    is_build_name "${tok##*/}" && return 0
+  done <<< "$1"
+  return 1
+}
+
+busy_paths=""
+if [ -d /proc ]; then
+  for pid_dir in /proc/[0-9]*; do
+    [ -r "$pid_dir/cmdline" ] || continue
+    looks_like_build=0
+    exe="$(readlink "$pid_dir/exe" 2>/dev/null || true)"
+    [ -n "$exe" ] && is_build_name "${exe##*/}" && looks_like_build=1
+    # NUL-separated, so a path containing a space cannot split into two entries.
+    args="$(tr '\0' '\n' < "$pid_dir/cmdline" 2>/dev/null || true)"
+    if [ "$looks_like_build" -eq 0 ]; then
+      args_look_like_build "$args" && looks_like_build=1
+    fi
+    [ "$looks_like_build" -eq 1 ] || continue
+    note_build "$(readlink "$pid_dir/cwd" 2>/dev/null || true)" "$args"
+  done
+else
+  # macOS has no /proc, so the loop above ran zero times and `busy_paths` stayed
+  # empty — meaning no directory was ever busy and the guard this section opens
+  # by explaining was simply absent on the machine whose disk fills up soonest.
+  #
+  # `ps` answers what is running and `lsof -d cwd` answers where it is standing.
+  # `lsof` is asked only about the processes that already look like builds, which
+  # is a handful, because asking it about every process on the box is slow enough
+  # to matter in an hourly job.
+  #
+  # Tokens are split on whitespace here rather than on NUL, because `ps` has
+  # already joined them and the separator is gone. That is only good enough for
+  # spotting a compiler *name*, which is all this half does; the other half
+  # matches the root as a fixed substring and is unaffected.
+  while IFS= read -r line; do
+    pid="${line%% *}"
+    [ -n "$pid" ] || continue
+    args="${line#"$pid" }"
+    args_look_like_build "$(tr ' ' '\n' <<< "$args")" || continue
+    # -Fn prints one `n<path>` line per record; the cwd is the only record asked
+    # for. A process that exited between `ps` and here simply yields nothing.
+    cwd="$(lsof -a -d cwd -Fn -p "$pid" 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    note_build "$cwd" "$args"
+  done < <(ps -Ao pid=,args= 2>/dev/null | sed 's/^ *//')
+fi
 
 is_busy() { # is_busy <target-dir> <worktree>
   local target="$1" worktree="$2"
@@ -185,9 +232,33 @@ for i in "${!names[@]}"; do
 done
 find_args+=(")" -prune -print0)
 
+# How to ask one file for its mtime, settled once.
+#
+# `find -printf` is a GNU extension. BSD find, which is the one on a Mac, does
+# not have it and wrote an error to a stderr this script was discarding, so
+# `newest_mtime` returned nothing and awk turned that into 0 — an epoch stamp
+# older than any cutoff. The effect was that on macOS the idle check was not
+# merely wrong, it was off: every build directory read as abandoned no matter
+# how recently it had been written, and `--apply` was one keystroke from
+# deleting the build somebody was three minutes into. `stat` exists on both, and
+# its two dialects differ only in the flag, so the flavour is decided here rather
+# than per file.
+#
+# The probe uses the GNU flag rather than the BSD one, because only that
+# direction gives a clean answer. BSD stat has no `-c` and exits non-zero, which
+# is a real signal. GNU stat does have `-f`, but it means `--file-system`, so
+# `stat -f '%m' .` cheerfully prints a mount point and exits 0 — probing that way
+# round would have chosen the BSD dialect on Linux and put a mount point where an
+# epoch stamp belongs.
+if stat -c '%Y' . >/dev/null 2>&1; then
+  STAT_MTIME=(stat -c '%Y')   # GNU
+else
+  STAT_MTIME=(stat -f '%m')   # BSD
+fi
+
 # newest write time inside a tree, as epoch seconds; 0 for an empty one
 newest_mtime() {
-  find "$1" -type f -printf '%T@\n' 2>/dev/null \
+  find "$1" -type f -exec "${STAT_MTIME[@]}" {} + 2>/dev/null \
     | awk 'BEGIN{m=0} {if ($1+0>m) m=$1+0} END{printf "%d\n", m}'
 }
 
