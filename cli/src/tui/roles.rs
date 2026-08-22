@@ -133,11 +133,17 @@ impl Row {
     /// reasoning lives. It is deliberately *not* a row in the `roles` table: an
     /// empty table still means "nothing is configured", so Reljod can always
     /// tell what he set from what Jod assumed.
+    /// **The built-in is a pair, and the model half only shows on its own
+    /// harness.** A model name belongs to exactly one harness, so a row moved
+    /// to Claude Code must stop offering AGY's model as its default — the panel
+    /// would be promising a spawn that comes straight back saying the model
+    /// does not exist. `apply_role` draws the same line, and has to: this is
+    /// the screen that shows what that code will do.
     pub fn default_value(&self, field: RoleField) -> Option<&'static str> {
         let (harness, model) = self.role.default_spawn()?;
         match field {
             RoleField::Harness => Some(harness.id()),
-            RoleField::Model => Some(model),
+            RoleField::Model => (self.harness_kind() == Some(harness)).then_some(model),
             RoleField::Thinking | RoleField::Permission => None,
         }
     }

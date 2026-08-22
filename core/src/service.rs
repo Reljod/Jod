@@ -479,14 +479,30 @@ pub fn apply_role(store: &Store, req: &mut SpawnRequest) {
     // harness's. Written into the row rather than applied separately so there
     // is one set of rules below this line: a column the row filled is the
     // column that wins, and this only ever fills an empty one.
-    let row = RoleRow {
-        harness: row
+    //
+    // **The built-in is a pair, and the model half only applies on its own
+    // harness.** A model name belongs to exactly one harness, so a row that
+    // moves the assistant to Claude Code and says nothing about the model must
+    // not then be handed AGY's. Found by running it: the doorman started on
+    // Claude Code with `--model gpt-oss-120b-medium` and came back "There's an
+    // issue with the selected model", which is a whole spawn wasted on a
+    // sentence no test would have read.
+    let row = {
+        let default = role.default_spawn();
+        let harness = row
             .harness
-            .or_else(|| role.default_harness().map(|k| k.id().to_string())),
-        model: row
-            .model
-            .or_else(|| role.default_model().map(str::to_string)),
-        ..row
+            .or_else(|| default.map(|(kind, _)| kind.id().to_string()));
+        let on_its_own_harness = harness.as_deref().and_then(HarnessKind::from_id)
+            == default.map(|(kind, _)| kind);
+        RoleRow {
+            model: row.model.or_else(|| {
+                default
+                    .filter(|_| on_its_own_harness)
+                    .map(|(_, model)| model.to_string())
+            }),
+            harness,
+            ..row
+        }
     };
 
     // The harness first, because the two settings under it are read against

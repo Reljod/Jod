@@ -8005,6 +8005,97 @@ mod tests {
             assert_eq!(after.permission, before.permission);
         }
 
+        /// The assistant is the one layer with a built-in, and this is it.
+        ///
+        /// Nothing is configured — `roles` is empty — and the spawn still comes
+        /// out on AGY's cheap model, because reading one message and answering
+        /// "can this wait" is not work a frontier model does better and it
+        /// happens every time Reljod types into a busy chat.
+        #[tokio::test]
+        async fn the_assistant_runs_on_its_built_in_when_nothing_is_configured() {
+            let store = Store::in_memory().unwrap();
+            let mut req = SpawnRequest {
+                role: Some(crate::harness::Role::Assistant),
+                ..SpawnRequest::default()
+            };
+            assert!(store.role_list().unwrap().is_empty(), "the premise");
+
+            crate::service::apply_role(&store, &mut req);
+
+            assert_eq!(req.harness, HarnessKind::Agy);
+            assert_eq!(req.model.as_deref(), Some("gpt-oss-120b-medium"));
+        }
+
+        /// And no other layer gets one, because no other layer has work small
+        /// enough for the model to stop mattering.
+        #[tokio::test]
+        async fn no_layer_but_the_assistant_has_a_built_in() {
+            let store = Store::in_memory().unwrap();
+            for role in crate::harness::Role::ALL {
+                if role == crate::harness::Role::Assistant {
+                    continue;
+                }
+                let before = SpawnRequest {
+                    role: Some(role),
+                    ..SpawnRequest::default()
+                };
+                let mut after = before.clone();
+                crate::service::apply_role(&store, &mut after);
+                assert_eq!(after.harness, before.harness, "{role:?}");
+                assert_eq!(after.model, before.model, "{role:?}");
+            }
+        }
+
+        /// **The built-in is a pair, and moving the harness leaves the model
+        /// behind.** A model name belongs to exactly one harness.
+        ///
+        /// Found by running it rather than by reading it: with the two halves
+        /// applied independently, a row moving the assistant to Claude Code
+        /// still handed it `--model gpt-oss-120b-medium`, and the run came back
+        /// "There's an issue with the selected model" — a whole spawn spent on
+        /// a sentence, and nothing in the suite would have read it.
+        #[tokio::test]
+        async fn a_row_that_moves_the_assistant_does_not_take_the_built_in_model_with_it() {
+            let store = Store::in_memory().unwrap();
+            store
+                .role_set("assistant", crate::store::RoleField::Harness, Some("claude_code"))
+                .unwrap();
+            let mut req = SpawnRequest {
+                role: Some(crate::harness::Role::Assistant),
+                ..SpawnRequest::default()
+            };
+
+            crate::service::apply_role(&store, &mut req);
+
+            assert_eq!(req.harness, HarnessKind::ClaudeCode, "the row wins");
+            assert_eq!(
+                req.model, None,
+                "and the model is left to Claude Code, which is the only thing \
+                 that knows its own names"
+            );
+        }
+
+        /// The row still wins outright when it names both.
+        #[tokio::test]
+        async fn a_row_naming_both_outranks_the_built_in_entirely() {
+            let store = Store::in_memory().unwrap();
+            store
+                .role_set("assistant", crate::store::RoleField::Harness, Some("claude_code"))
+                .unwrap();
+            store
+                .role_set("assistant", crate::store::RoleField::Model, Some("haiku"))
+                .unwrap();
+            let mut req = SpawnRequest {
+                role: Some(crate::harness::Role::Assistant),
+                ..SpawnRequest::default()
+            };
+
+            crate::service::apply_role(&store, &mut req);
+
+            assert_eq!(req.harness, HarnessKind::ClaudeCode);
+            assert_eq!(req.model.as_deref(), Some("haiku"));
+        }
+
         /// Main's own verb for a repository is back, and this is the test that
         /// used to say it was gone.
         ///

@@ -416,13 +416,26 @@ pub async fn start_doorman(
                 .to_string()
         }
     };
+    // **The verb travels with the thing it acts on.** The brief names
+    // `interrupt_main` and that is not enough on its own — measured, not
+    // assumed: a doorman briefed exactly this way read a contradiction
+    // correctly, answered "stopping it — you switched to a different
+    // repository", and never made the call, so the turn it had decided to stop
+    // ran happily on while Reljod read a sentence saying it had not. This is
+    // the same failure `delivery::protocol_for` was written for, and the same
+    // remedy: whatever is needed to respond goes in the turn being responded
+    // to, not only in the framing several turns back.
     let prompt = format!(
         "Reljod typed this into the main chat while a turn of it was already \
          running:\n\n{messages}\n\n\
          The turn in flight is `{}`, run id `{}`. {doing}\n\n\
          Decide: does this wait for that turn to end, or does it stop the turn \
-         now?",
-        flight.name, flight.run_id
+         now?\n\n\
+         If it stops the turn, your first action is to call `interrupt_main` \
+         with `run_id: \"{}\"` and a one-sentence reason. Nothing else stops \
+         it — saying that you are stopping it leaves it running. If it waits, \
+         call nothing. Then say your one sentence.",
+        flight.name, flight.run_id, flight.run_id
     );
 
     let agent = jod
@@ -532,18 +545,23 @@ pub fn assistant_preamble() -> &'static str {
      by itself the moment the turn finishes. Stopping a turn you should have \
      left alone throws away work Reljod asked for, and nothing brings it back. \
      A message you have to argue yourself into calling urgent is not urgent.\n\n\
-     To stop it, call `interrupt_main` with the run id you were given and one \
-     sentence saying why. That ends the turn and leaves the conversation \
-     exactly where it was, and the message you just read is delivered as the \
-     next turn — so you never have to pass it on yourself, and you must not try \
-     to answer it.\n\n\
-     To hold, call nothing at all. The message is already queued and it goes in \
+     **Stopping the turn is a tool call, and nothing else stops it.** Call \
+     `interrupt_main` with the run id you were given and one sentence saying \
+     why. Do that **first**, before you write anything: writing \"stopping it\" \
+     without calling `interrupt_main` stops nothing at all, and the turn you \
+     meant to stop keeps running while Reljod reads a sentence telling him it \
+     did not. Saying what you are about to do is not doing it.\n\n\
+     The call ends the turn and leaves the conversation exactly where it was, \
+     and the message you just read is delivered as the next turn on its own — \
+     so you never have to pass it on yourself, and you must not try to answer \
+     it.\n\n\
+     To hold, call nothing at all. The message is already queued and goes in \
      when the turn ends, whether or not you do anything.\n\n\
-     Either way, finish with **one short sentence** saying what you decided and \
-     why. Reljod sees that sentence in his main chat, and it is the only thing \
-     he sees from you — so write it for him: \"held — this reads like a \
-     follow-up, it will go in when the turn ends\", or \"stopping it — you asked \
-     for the other repository\"."
+     Then, either way, **one short sentence** saying what you decided and why. \
+     Reljod sees that sentence in his main chat and it is the only thing he \
+     sees from you, so write it for him: \"held — this reads like a follow-up, \
+     it will go in when the turn ends\", or \"stopping it — you asked for the \
+     other repository\"."
 }
 
 /// What handing an instruction to a manager produced.

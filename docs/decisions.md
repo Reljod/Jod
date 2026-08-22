@@ -4247,3 +4247,14 @@ its own spec.
 saying so.** The two mistakes are different sizes. A message wrongly held costs
 a wait that ends by itself when the turn finishes. A message wrongly acted on
 throws away a turn Reljod asked for, and nothing brings it back.
+
+**Found by running it, not by reading it.** Two things only a live run showed.
+The doorman brief named `interrupt_main` and the model answered "stopping it —
+you switched to a different repository" in prose without calling anything, so
+the turn it had decided to stop carried happily on; the verb now travels in the
+turn itself as well as in the brief, which is the same remedy
+`delivery::protocol_for` was written for and for the same reason. And the
+built-in default was applied a column at a time, so a `roles` row moving the
+assistant to Claude Code still handed it AGY's model — a whole spawn wasted on
+"there's an issue with the selected model". The built-in is a pair now: the
+model half only applies on its own harness.
