@@ -37,6 +37,18 @@ pub enum NodeKind {
     /// said in this conversation, and a tree whose top level is a list of
     /// repositories cannot show that.
     Main,
+    /// The conversation the assistant runs in. Always the first child of `jod`,
+    /// and always the same row.
+    ///
+    /// The [`NodeKind::Manager`] of the top level, and it is here for the same
+    /// reason: it is a standing conversation that holds runs, it is where an
+    /// instruction actually goes, and a tree that cannot show it shows main
+    /// handing work to nothing. Every instruction Reljod types reaches the
+    /// assistant and stops there until it decides where the work goes, so a
+    /// fleet without this row has a gap exactly where the decision is being
+    /// made — the console said it had passed something on, and nothing on the
+    /// screen was doing anything.
+    Assistant,
     /// A repository. The level above works, so the tree groups by the thing
     /// that outlives every work and every session.
     Project,
@@ -83,6 +95,15 @@ impl NodeId {
     /// [`NodeId::manager`] carries its conversation's.
     pub fn main(conversation_id: impl Into<String>) -> NodeId {
         NodeId { kind_tag: "main", id: conversation_id.into() }
+    }
+    /// The assistant's row. Carries its conversation's id, for the same reason
+    /// [`NodeId::manager`] does: the row exists to be entered, and what you
+    /// enter is a conversation.
+    pub fn assistant(conversation_id: impl Into<String>) -> NodeId {
+        NodeId {
+            kind_tag: "assistant",
+            id: conversation_id.into(),
+        }
     }
 }
 
@@ -539,6 +560,17 @@ impl Store {
         };
         let now_ms = chrono::Utc::now().timestamp_millis();
 
+        // The assistant's standing conversation, if there is one yet.
+        //
+        // Checked against `conversations` for the reason
+        // `Store::assistant_conversation` checks it: a settings row is not a
+        // foreign key, and a row naming a conversation that is not there would
+        // draw an empty row on the fleet for a thread nobody can open.
+        let assistant = match self.setting(crate::orchestrator::ASSISTANT_SETTING)? {
+            Some(id) if self.conversation(&id)?.is_some() => Some(id),
+            _ => None,
+        };
+
         let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
         let mut sessions: HashMap<String, Vec<RawSession>> = HashMap::new();
         let mut runs: HashMap<String, Vec<RawRun>> = HashMap::new();
@@ -729,12 +761,66 @@ impl Store {
                 branch: None,
                 worktree: None,
                 expanded: true,
-                has_children: holds_runs(&from, main),
+                has_children: holds_runs(&from, main) || assistant.is_some(),
             });
             let (running, stalled_below) =
                 push_runs(&mut out, &mut from, main, &id, 1, "cyan");
+
+            // The assistant under Jod, the way a manager sits under its project.
+            //
+            // Its runs live in its own conversation row, so `push_runs(main, …)`
+            // above never sees them and the whole layer was missing from the
+            // fleet: main said it had handed an instruction on, and nothing on
+            // the screen was doing anything. It sits *after* Jod's own runs and
+            // before nothing else, because Jod has no other children — the
+            // repositories are beside him, not under him.
+            let mut running = running;
+            let mut stalled_below = stalled_below;
+            let mut main_cards = main_cards;
+            let mut main_blocked = main_blocked;
+            if let Some(assistant) = &assistant {
+                let assistant_node = out.len();
+                let assistant_id = NodeId::assistant(assistant);
+                let (its_cards, its_blocked) = cards.get(assistant).copied().unwrap_or((0, 0));
+                out.push(Node {
+                    id: assistant_id.clone(),
+                    parent: Some(id.clone()),
+                    kind: NodeKind::Assistant,
+                    depth: 1,
+                    label: "assistant".to_string(),
+                    summary: latest.get(assistant).cloned().unwrap_or_default(),
+                    running: false,
+                    status: None,
+                    stalled_for_ms: None,
+                    cards: its_cards,
+                    blocked: its_blocked,
+                    stalled: 0,
+                    colour: "cyan".to_string(),
+                    // It decides who does the work; it holds no checkout of its
+                    // own, exactly as a manager does not.
+                    branch: None,
+                    worktree: None,
+                    expanded: true,
+                    has_children: holds_runs(&from, assistant),
+                });
+                let (its_running, its_stalled) =
+                    push_runs(&mut out, &mut from, assistant, &assistant_id, 2, "cyan");
+                out[assistant_node].running = its_running;
+                out[assistant_node].stalled = its_stalled;
+                // Rolled up onto Jod's row the way a project adds its manager's
+                // counts to its own. A blocking question the assistant asked is
+                // a question Reljod is being asked, and a row that showed
+                // nothing while the row folded inside it showed three would be
+                // worse than no roll-up at all.
+                running |= its_running;
+                stalled_below += its_stalled;
+                main_cards += its_cards;
+                main_blocked += its_blocked;
+            }
             out[main_node].running = running;
             out[main_node].stalled = stalled_below;
+            out[main_node].cards = main_cards;
+            out[main_node].blocked = main_blocked;
         }
 
         for project_id in order {
@@ -1099,6 +1185,23 @@ pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
                     out.push(Node {
                         parent: None,
                         depth: 0,
+                        ..node.clone()
+                    });
+                }
+            }
+            // Kept as a row, and kept under Jod. The fold's rule is that a
+            // *heading* survives and a row nobody can act on does not; the
+            // assistant is neither — it is a conversation you enter, holding
+            // runs whose news has to reach it, which is exactly what
+            // `NodeKind::Manager` is one level down. So it is folded the same
+            // way: its own row, its runs read as news about it, and no cursor
+            // descending into it.
+            NodeKind::Assistant => {
+                if seen.insert(node.id.clone()) {
+                    owner_at.insert(node.id.clone(), out.len());
+                    out.push(Node {
+                        parent: node.parent.clone(),
+                        depth: 1,
                         ..node.clone()
                     });
                 }
@@ -2232,6 +2335,130 @@ mod tests {
 
         assert_eq!(nodes[2].kind, NodeKind::Work, "{nodes:?}");
         assert_eq!(nodes[2].depth, 0, "a work is beside Jod, not under him");
+    }
+
+    /// The assistant is a row under `jod`, and its runs hang from that.
+    ///
+    /// **The measured gap.** `push_runs` under the `jod` row only picks up runs
+    /// whose conversation *is* main, and the assistant's runs live in the
+    /// assistant's own conversation row — so the whole layer was invisible.
+    /// Every instruction Reljod types goes to the assistant and stops there
+    /// until it decides where the work goes, which meant the fleet drew nothing
+    /// at all during exactly the stretch somebody is watching to see whether the
+    /// instruction was picked up: main said it had passed something on, and the
+    /// screen showed one idle row.
+    ///
+    /// It sits under `jod` and not beside him for the reason a manager sits
+    /// under its project: it is the conversation that owns what happens next,
+    /// and the chain of command is the thing this screen is for.
+    #[test]
+    fn the_assistant_is_a_row_under_jod_and_holds_its_own_runs() {
+        let s = store();
+        let main = s
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        run_for(&s, &main, "main-run", "completed");
+        let (assistant, _) = s
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        run_for(&s, &assistant, "assistant-run", "running");
+
+        let nodes = s.forest().unwrap();
+
+        let at = nodes
+            .iter()
+            .position(|n| n.kind == NodeKind::Assistant)
+            .unwrap_or_else(|| panic!("no assistant row in the fleet: {nodes:?}"));
+        assert_eq!(nodes[at].id, NodeId::assistant(&assistant));
+        assert_eq!(nodes[at].label, "assistant");
+        assert_eq!(nodes[at].depth, 1);
+        assert_eq!(nodes[at].parent, Some(NodeId::main(&main)));
+        assert!(nodes[at].running, "its run is live, so it is");
+        assert!(nodes[at].has_children, "its run is a row beneath it");
+
+        assert_eq!(nodes[at + 1].kind, NodeKind::Run);
+        assert_eq!(nodes[at + 1].id, NodeId::run("assistant-run"));
+        assert_eq!(nodes[at + 1].parent, Some(NodeId::assistant(&assistant)));
+        assert_eq!(nodes[at + 1].depth, 2);
+
+        // And it rolls up, the way a manager's news rolls up onto its project.
+        // Jod's own run has finished, so without the roll-up his row would read
+        // idle while the layer folded inside it was working.
+        assert!(nodes[0].running, "jod is running because the assistant is");
+        assert!(nodes[0].has_children);
+    }
+
+    /// A blocking question the assistant asked counts on Jod's row.
+    ///
+    /// The roll-up is what lets a folded row say where the questions are. A
+    /// `jod` row showing nothing above an assistant row showing three would be
+    /// worse than no roll-up at all: the fleet's whole claim is that you can
+    /// read the top level and know whether to open anything.
+    #[test]
+    fn the_assistants_cards_count_on_jods_row() {
+        use crate::cards::NewCard;
+
+        let s = store();
+        let main = s
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let (assistant, _) = s
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        run_for(&s, &assistant, "assistant-run", "running");
+        s.raise_card(NewCard {
+            conversation_id: assistant.clone(),
+            title: "which web did you mean".into(),
+            blocking: true,
+            ..NewCard::default()
+        })
+        .unwrap();
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(nodes[0].id, NodeId::main(&main));
+        assert_eq!(nodes[0].cards, 1, "{nodes:?}");
+        assert_eq!(nodes[0].blocked, 1, "{nodes:?}");
+    }
+
+    /// The assistant survives the fold, the way a manager does.
+    ///
+    /// The fold drops every run row, so without an arm of its own the row would
+    /// be dropped with them and the fleet would lose the layer again on the one
+    /// screen that actually draws it.
+    #[test]
+    fn the_fold_keeps_the_assistant_and_the_run_it_answers_for() {
+        let s = store();
+        let main = s
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let (assistant, _) = s
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        run_for(&s, &assistant, "assistant-run", "running");
+
+        let folded = condense(&s.forest().unwrap(), &HashSet::new());
+
+        assert_eq!(
+            folded.nodes.len(),
+            2,
+            "jod and the assistant, no run beneath: {:?}",
+            folded.nodes
+        );
+        assert_eq!(folded.nodes[0].kind, NodeKind::Main);
+        assert!(folded.nodes[0].has_children, "the assistant is under him");
+        assert_eq!(folded.nodes[1].kind, NodeKind::Assistant);
+        assert_eq!(folded.nodes[1].depth, 1);
+        assert_eq!(folded.nodes[1].parent, Some(NodeId::main(&main)));
+        assert!(!folded.nodes[1].has_children, "its run folded into it");
+        assert_eq!(
+            folded
+                .run_of
+                .get(&NodeId::assistant(&assistant))
+                .map(String::as_str),
+            Some("assistant-run"),
+            "its row answers for the run the fold removed"
+        );
+        assert!(folded.runs.contains("assistant-run"));
     }
 
     /// A work opened before projects were recorded keeps its null and stays at

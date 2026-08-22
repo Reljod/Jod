@@ -494,6 +494,11 @@ pub fn kind_glyph(kind: NodeKind) -> &'static str {
         // He sits above the repositories rather than being one of them, so the
         // gutter says that before any colour does.
         NodeKind::Main => "★",
+        // A conversation that is always there, like a manager, so it takes the
+        // manager's shape. One level up rather than one level down, and the
+        // gutter says which by where the row sits rather than by a shape of its
+        // own — a sixth glyph would be a distinction nobody could name.
+        NodeKind::Assistant => "◆",
         // Solid, and the widest of the set: a project is the outermost group,
         // and the gutter is what says so on a screen with no colour.
         NodeKind::Project => "▪",

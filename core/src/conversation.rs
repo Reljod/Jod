@@ -1591,6 +1591,114 @@ impl Store {
                     at
                 ],
             )?;
+            // ---- what every carried-forward thread takes with it ----------
+            //
+            // The three below used to sit inside the `pinned == 1` block, on
+            // the reasoning that main is the thread that compacts itself. Main
+            // is no longer the only one: the assistant is a standing thread
+            // now, and it compacts itself for exactly the same reason. The
+            // rules are not main's rules — they are the rules for *any* thread
+            // that carries on as a new row — so they apply to all of them, and
+            // the block below keeps only what is genuinely about being main.
+
+            // What this thread is stays true of its continuation.
+            //
+            // `conversations.origin` says what opened a conversation, and for
+            // the assistant it is load-bearing twice over: the guard in
+            // `crate::mcp` that stops an assistant starting another assistant
+            // reads it, and so does the one that decides where an assistant's
+            // project pointer is written. A continuation that lost it would be
+            // an assistant that no longer counts as one — no refusal, no error,
+            // just the recursion the guard exists to prevent.
+            tx.execute(
+                "UPDATE conversations SET origin = (SELECT origin FROM conversations WHERE id = ?1)
+                  WHERE id = ?2",
+                params![conversation_id, new_id],
+            )?;
+            // Everything hanging under the old thread hangs under this one, and
+            // the continuation hangs where the old thread hung.
+            //
+            // Cards cascade upward along `parent_conversation_id`, and the rail
+            // asks for the subtree of the conversation being viewed. A project
+            // manager is hung under main when it is created and the assistant is
+            // hung under main when it is created, so leaving those edges on the
+            // compacted-away thread empties Reljod's rail — everything below
+            // still reports, upward, to a conversation nobody opens.
+            //
+            // Observed for main: a fleet showing `alpha [3 cards]` and
+            // `gamma [8 cards]` beside a rail reading "nothing waiting — no
+            // agent has asked anything". Main compacts itself, so this undid the
+            // link on its own, on a timer, without anybody doing anything.
+            //
+            // The second statement is the half main does not need. Main reports
+            // to nobody, so its parent is null and stays null; the assistant
+            // reports to main, and a continuation with a null parent is an
+            // assistant whose card reaches nobody — the same failure one level
+            // down.
+            tx.execute(
+                "UPDATE conversations SET parent_conversation_id = ?2
+                  WHERE parent_conversation_id = ?1 AND id <> ?2",
+                params![conversation_id, new_id],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET parent_conversation_id =
+                     (SELECT parent_conversation_id FROM conversations WHERE id = ?1)
+                  WHERE id = ?2",
+                params![conversation_id, new_id],
+            )?;
+            // A question still owed follows the chat it was asked in.
+            //
+            // The rail shows the subtree of the conversation being viewed, and
+            // `ask_question` raises its card on the *asking* conversation. Left
+            // behind, the card drops off the rail entirely: a blocking question
+            // put to Reljod shortly before a compaction simply disappears, and
+            // the threads that ask them are the threads that compact themselves.
+            //
+            // Open cards only. An answered or dismissed one is a record of what
+            // was asked and settled where, and moving it would make the rail's
+            // history say a conversation asked something it never did — the same
+            // line `pending_deliveries` draws just below.
+            tx.execute(
+                "UPDATE cards SET conversation_id = ?2
+                  WHERE conversation_id = ?1 AND status = 'open'",
+                params![conversation_id, new_id],
+            )?;
+            // An answer still owed follows the chat it is owed to.
+            //
+            // `Ticker::tick_deliveries` reads `pending_deliveries` and injects
+            // into the conversation named there. A card answered — or an
+            // instruction handed to a busy assistant — just before a compaction
+            // was owed to the thread that has since been compacted away, so it
+            // would be injected into a conversation nothing resumes any more,
+            // and the answer would never arrive.
+            //
+            // Queued rows only: a delivered one is a record of where it actually
+            // went, and moving it would make the ledger lie.
+            tx.execute(
+                "UPDATE pending_deliveries SET conversation_id = ?2
+                  WHERE conversation_id = ?1 AND state = 'queued'",
+                params![conversation_id, new_id],
+            )?;
+            // The assistant's pointer follows its thread, for the reason the
+            // project's manager pointer does at the bottom of this function.
+            //
+            // `Store::assistant_conversation` is get-or-create on this settings
+            // row and checks that the conversation it names still exists — which
+            // the compacted-away one does. So an assistant left pointing at the
+            // thread it was compacted *from* would have every later instruction
+            // resume the old session: the compaction undone without a word, and
+            // the summary sitting in a conversation nothing opens again.
+            tx.execute(
+                "UPDATE settings SET value = ?2, updated_at_ms = ?3
+                  WHERE key = ?4 AND value = ?1",
+                params![
+                    conversation_id,
+                    new_id,
+                    at,
+                    crate::orchestrator::ASSISTANT_SETTING
+                ],
+            )?;
+
             // The pin follows the thread across the switch.
             //
             // `main_conversation` is get-or-create on `pinned = 1`, so a pin
@@ -1616,64 +1724,6 @@ impl Store {
                 tx.execute(
                     "UPDATE conversations SET pinned = 1, title = 'main' WHERE id = ?1",
                     params![new_id],
-                )?;
-                // Everything hanging under the old chat hangs under this one.
-                //
-                // Cards cascade upward along `parent_conversation_id`, and the
-                // rail asks for the subtree of the conversation being viewed.
-                // A project manager is hung under main when it is created, so
-                // leaving those edges on the compacted-away thread empties
-                // Reljod's rail — the managers still report, upward, to a
-                // conversation nobody opens.
-                //
-                // Observed: a fleet showing `alpha [3 cards]` and
-                // `gamma [8 cards]` beside a rail reading "nothing waiting — no
-                // agent has asked anything". Main compacts itself, so this
-                // undid the link on its own, on a timer, without anybody doing
-                // anything.
-                //
-                // The new row's own parent is null and stays that way — main
-                // reports to nobody — and the guard keeps it that way even if
-                // that ever changes.
-                tx.execute(
-                    "UPDATE conversations SET parent_conversation_id = ?2
-                      WHERE parent_conversation_id = ?1 AND id <> ?2",
-                    params![conversation_id, new_id],
-                )?;
-                // A question still owed follows the chat it was asked in.
-                //
-                // The rail shows the subtree of the conversation being viewed,
-                // and `ask_question` raises its card on the *asking*
-                // conversation — for main, that is main itself. Left behind,
-                // the card drops off the rail entirely: a blocking question put
-                // to Reljod shortly before a compaction simply disappears, and
-                // main compacts itself.
-                //
-                // Open cards only. An answered or dismissed one is a record of
-                // what was asked and settled where, and moving it would make
-                // the rail's history say a conversation asked something it
-                // never did — the same line `pending_deliveries` draws just
-                // below.
-                tx.execute(
-                    "UPDATE cards SET conversation_id = ?2
-                      WHERE conversation_id = ?1 AND status = 'open'",
-                    params![conversation_id, new_id],
-                )?;
-                // An answer still owed follows the chat it is owed to.
-                //
-                // `Ticker::tick_deliveries` reads `pending_deliveries` and
-                // injects into the conversation named there. A card answered
-                // just before a compaction was owed to the thread that has
-                // since been compacted away, so the reply would be injected
-                // into a conversation the console no longer shows — and Reljod
-                // would never see the answer to his own question.
-                //
-                // Queued rows only: a delivered one is a record of where it
-                // actually went, and moving it would make the ledger lie.
-                tx.execute(
-                    "UPDATE pending_deliveries SET conversation_id = ?2
-                      WHERE conversation_id = ?1 AND state = 'queued'",
-                    params![conversation_id, new_id],
                 )?;
                 // Every bus that has a `main` on its roster follows the pin.
                 //
