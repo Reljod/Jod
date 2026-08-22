@@ -146,6 +146,18 @@ pub enum Action {
     /// the pinned row. Carries the conversation id, which the tree row already
     /// holds — a project id here would make this look it up again.
     EnterManager(String),
+    /// Put the chat box into an engineer's own conversation, and follow it.
+    ///
+    /// `⏎` on an agent's row in the fleet. It used to be
+    /// `Sessions(Request::Open)`, which is a *listing* — one truncated line per
+    /// turn, printed into whichever transcript happened to be on screen, from a
+    /// screen that is not the chat. So the row that says an engineer is running
+    /// was the one row on the fleet you could not go to, and the agent actually
+    /// doing the work could not be read or spoken to at all.
+    ///
+    /// Carries the conversation id, like [`Action::EnterManager`], because that
+    /// is what the row holds — see [`jod_core::tree::NodeId::session`].
+    EnterSession(String),
     /// Stop an agent and close its tmux session.
     Stop(String),
     /// Run a command this repository offers, in the spelling its harness takes.
@@ -1254,6 +1266,47 @@ fn enter_conversation(
     app.scroll_to_bottom();
 }
 
+/// Follow whatever this conversation still has running, having just entered it.
+///
+/// Entering replays what has already been said, which is the whole story for an
+/// idle agent and only half of it for a busy one. The event stream appends to
+/// the transcript for exactly one run — the one in `App::watching`, see the
+/// `events.recv()` arm of the loop — so without this, going into an engineer
+/// mid-turn showed its work up to that instant and then sat there in silence
+/// while the agent carried on writing. A live agent drawn as a dead one is the
+/// picture the fleet exists to prevent.
+///
+/// Read off `App::run_of` and `App::agents`, which the fleet drew this row from
+/// a frame ago, rather than out of the store: this runs on a keypress.
+///
+/// Nothing happens for an agent that has stopped. Its last run's output is
+/// already in the transcript that was just replayed, and marking the chat busy
+/// for a process that has ended would take the input box away with nothing
+/// coming back to give it.
+fn follow_live_run(app: &mut App, conversation: &str) {
+    let row = jod_core::tree::NodeId::session(conversation);
+    let Some(run) = app.run_of.get(&row).cloned() else {
+        return;
+    };
+    let Some((started_at_ms, session)) = app
+        .agents
+        .iter()
+        .find(|a| a.id == run && a.is_running())
+        .map(|a| (a.created_at_ms, a.session.clone()))
+    else {
+        return;
+    };
+    // The session cursor follows the eye, the same way `watch` moves it: what
+    // is typed next continues the conversation being read.
+    if let Some(session) = session {
+        app.resume = Resume::Session(session.clone());
+        app.session = Some(session);
+    }
+    app.watching = Some(run);
+    app.busy = true;
+    app.turn_started_ms = Some(started_at_ms);
+}
+
 /// A conversation's live window as transcript entries.
 ///
 /// Pure, so what the screen shows on entering is testable without a service.
@@ -1581,6 +1634,25 @@ async fn perform(
                     .map(|p| format!("{}'s manager", p.name))
                     .unwrap_or_else(|| "that manager".to_string());
                 enter_conversation(&store, app, thread, &conversation, &what, false);
+            }
+        },
+        Action::EnterSession(conversation) => match jod.store() {
+            None => app.push(Entry::Notice(format!("{NO_STORE} — there are no sessions"))),
+            Some(store) => {
+                // Named off the fleet rather than out of the store, because the
+                // row is what the reader just pressed `⏎` on. Its title is the
+                // instruction it was opened with — see `tree::hired_as` — so
+                // "already in engineer#2" is a sentence about the screen and
+                // "already in Reljod's words: …" would be a sentence about a
+                // string nobody chose.
+                let what = app
+                    .forest
+                    .iter()
+                    .find(|n| n.id == jod_core::tree::NodeId::session(&conversation))
+                    .map(|n| n.label.clone())
+                    .unwrap_or_else(|| format!("session {}", short(&conversation)));
+                enter_conversation(&store, app, thread, &conversation, &what, false);
+                follow_live_run(app, &conversation);
             }
         },
         Action::Delegate(prompt) => {
@@ -4266,25 +4338,32 @@ fn background(app: &mut App) {
     )));
 }
 
-/// Back out of a manager conversation to the fleet, cursor on the row that
-/// opened it.
+/// The fleet row the chat box is currently bound into, if it is in one.
 ///
-/// The inverse of `⏎` on a manager row. Nothing is unbound: the chat box stays
-/// tied to that conversation exactly as it stays tied to the main chat while
-/// you walk the fleet, so typing after coming back in still instructs the same
-/// manager. What changes is only which screen you are looking at, which is why
-/// this asks the supervisor nothing — see [`background`], which leaves a run
-/// alone for the same reason.
+/// A thin join between [`Thread::conversation`] and [`App::entered_row`],
+/// returning an owned id because every caller is about to mutate `app` with it.
+fn entered_row(app: &App, thread: &Thread) -> Option<jod_core::tree::NodeId> {
+    app.entered_row(thread.conversation.as_deref()?)
+        .map(|row| row.id.clone())
+}
+
+/// Back out of a conversation to the fleet, cursor on the row that opened it.
+///
+/// The inverse of `⏎` on a manager row or an engineer's. Nothing is unbound:
+/// the chat box stays tied to that conversation exactly as it stays tied to the
+/// main chat while you walk the fleet, so typing after coming back in still
+/// instructs the same agent. What changes is only which screen you are looking
+/// at, which is why this asks the supervisor nothing — see [`background`],
+/// which leaves a run alone for the same reason.
 ///
 /// The cursor placement is the half that makes it a round trip. Left where it
 /// was, `←` then `⏎` would reopen whatever row the fleet happened to be
 /// pointing at — very likely a run belonging to something else entirely.
 /// [`fleet::TreeState::reveal`] also opens the project above the row, because a
 /// cursor on a hidden row is dropped at the next frame.
-fn leave_manager(app: &mut App, conversation: &str) {
-    let row = jod_core::tree::NodeId::manager(conversation);
+fn leave_conversation(app: &mut App, row: &jod_core::tree::NodeId) {
     let forest = app.forest.clone();
-    app.tree.reveal(&forest, &row);
+    app.tree.reveal(&forest, row);
     app.go(Workspace::Fleet);
 }
 
@@ -4737,14 +4816,26 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             // It goes *into* the conversation instead, which is the same pair
             // the pinned chat row makes at the top of this function: `←` backs
             // out of a conversation, `→` goes into the one under the cursor.
-            // Run and session rows are left alone — those are not conversations
-            // the chat box can bind to, and `⏎` is their key.
-            let manager = app
+            //
+            // An engineer's row goes the same way, and for the same reason. The
+            // fold puts every agent of every work on one level under its
+            // project, so a session row has nothing beneath it to open or
+            // descend into either — `→` on the row that says an agent is
+            // running was a printed key that did nothing. A run is still left
+            // alone: it is a process, not a conversation.
+            let into = app
                 .selected_node()
-                .filter(|node| node.kind == jod_core::tree::NodeKind::Manager)
-                .map(|node| node.id.id.clone());
-            if let Some(conversation) = manager {
-                return handled(Some(Action::EnterManager(conversation)));
+                .and_then(|node| match node.kind {
+                    jod_core::tree::NodeKind::Manager => {
+                        Some(Action::EnterManager(node.id.id.clone()))
+                    }
+                    jod_core::tree::NodeKind::Session if !node.has_children => {
+                        Some(Action::EnterSession(node.id.id.clone()))
+                    }
+                    _ => None,
+                });
+            if let Some(action) = into {
+                return handled(Some(action));
             }
             let (forest, closed) = (app.forest.clone(), app.closed_works.clone());
             app.tree.expand_or_descend(&forest, &closed);
@@ -4905,8 +4996,11 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                     app.go(Workspace::Chat);
                     handled(Some(Action::Watch(node.id.id)))
                 }
+                // Into it, the way `⏎` on a manager goes into a manager. A
+                // session *is* a conversation, and the listing this used to
+                // print was neither a way in nor a way to watch.
                 jod_core::tree::NodeKind::Session => {
-                    handled(Some(Action::Sessions(sessions::Request::Open(node.id.id))))
+                    handled(Some(Action::EnterSession(node.id.id)))
                 }
                 // The row carries the conversation id, so this is the id to
                 // bind to — the same movement `⏎` on the pinned row makes.
@@ -5928,27 +6022,18 @@ fn on_chat_key(
         KeyCode::Left if app.input.is_empty() && (app.busy || app.watching.is_some()) => {
             background(app);
         }
-        // A manager is something to leave even when nothing is running, which
-        // is the difference between it and the main chat. You got here by
-        // pressing `⏎` on a row one screen away, so the way back has to be the
-        // one key that already means "out" — and it was a dead key, because the
-        // arm above only fires while a run is on screen and a manager sitting
-        // idle has none.
+        // A manager, or an engineer, is something to leave even when nothing is
+        // running — which is the difference between both of them and the main
+        // chat. You got here by pressing a key on a row one screen away, so the
+        // way back has to be the one key that already means "out", and it was a
+        // dead key: the arm above only fires while a run is on screen, and an
+        // agent that has finished its turn has none.
         //
         // The main chat deliberately keeps the old behaviour. It is home rather
         // than somewhere you went, so there is nothing to back out *to*.
-        KeyCode::Left
-            if app.input.is_empty()
-                && thread
-                    .conversation
-                    .as_deref()
-                    .is_some_and(|id| app.is_manager_conversation(id)) =>
-        {
-            let conversation = thread
-                .conversation
-                .clone()
-                .expect("the guard just read it");
-            leave_manager(app, &conversation);
+        KeyCode::Left if app.input.is_empty() && entered_row(app, thread).is_some() => {
+            let row = entered_row(app, thread).expect("the guard just read it");
+            leave_conversation(app, &row);
         }
         KeyCode::Left => app.left(),
         KeyCode::Right => app.right(),
@@ -12885,6 +12970,33 @@ mod tests {
         ]
     }
 
+    /// The same repository, with an engineer beside the manager — the shape the
+    /// fold leaves: one project, and its agents all on one level under it.
+    fn forest_with_an_engineer(manager: &str, engineer: &str) -> Vec<jod_core::tree::Node> {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let mut nodes = forest_with_a_manager(manager);
+        nodes.push(Node {
+            id: NodeId::session(engineer),
+            parent: Some(NodeId::project("p1")),
+            kind: NodeKind::Session,
+            depth: 1,
+            label: "engineer#1".into(),
+            summary: "writing the board".into(),
+            running: true,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            stalled: 0,
+            colour: "cyan".into(),
+            branch: None,
+            worktree: None,
+            expanded: true,
+            has_children: false,
+        });
+        nodes
+    }
+
     /// The console as it stands after `⏎` on a manager row: the chat screen,
     /// the chat box bound to that conversation, and the row it came from still
     /// in the forest.
@@ -12953,6 +13065,124 @@ mod tests {
             Some(Action::EnterManager("conv-9".into())),
             "→ on a manager row is still the dead key it was"
         );
+    }
+
+    /// The bug this pair was written for: the engineer actually doing the work
+    /// was the one row on the fleet you could not go to.
+    ///
+    /// `⏎` on it produced `Sessions(Request::Open)`, which is a listing — one
+    /// truncated line per turn, pushed as notices into whichever transcript
+    /// happened to be bound, from a screen that is not the chat. Nothing bound,
+    /// nothing followed, and no way to say anything to the agent. It goes into
+    /// the conversation now, exactly as `⏎` on the manager row above it does.
+    #[test]
+    fn enter_on_an_engineers_row_goes_into_that_conversation() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_an_engineer("conv-9", "conv-e1");
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::session("conv-e1"));
+
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::EnterSession("conv-e1".into())),
+            "the row has to carry the conversation to bind to"
+        );
+    }
+
+    /// And `→`, which was dead on an engineer's row for the reason it was dead
+    /// on a manager's: the fold leaves the row a leaf, so there is nothing to
+    /// open and nothing to descend into.
+    #[test]
+    fn right_on_an_engineers_row_goes_into_that_conversation() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_an_engineer("conv-9", "conv-e1");
+        app.go(Workspace::Fleet);
+        app.tree.selected = Some(NodeId::session("conv-e1"));
+
+        assert_eq!(
+            press(&mut app, KeyCode::Right),
+            Some(Action::EnterSession("conv-e1".into())),
+        );
+    }
+
+    /// Going in has to be leavable, or `⏎` is a one-way trip off the fleet.
+    ///
+    /// The same round trip the manager rows make, and it is the same arm: `←`
+    /// on an empty line backs out to the row that opened the conversation, and
+    /// `⏎` there reopens it.
+    #[test]
+    fn left_out_of_an_engineer_lands_on_the_row_that_opened_it() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_an_engineer("conv-9", "conv-e1");
+        app.go(Workspace::Chat);
+        let mut thread = Thread {
+            conversation: Some("conv-e1".into()),
+            ..Default::default()
+        };
+        assert!(!app.busy);
+        assert_eq!(app.watching, None, "nothing is running to back out of");
+
+        assert_eq!(press_in(&mut app, &mut thread, KeyCode::Left), None);
+        assert_eq!(app.workspace, Workspace::Fleet);
+        assert_eq!(app.tree.selected, Some(NodeId::session("conv-e1")));
+        assert_eq!(
+            press_in(&mut app, &mut thread, KeyCode::Enter),
+            Some(Action::EnterSession("conv-e1".into())),
+            "⏎ did not reopen what ← left"
+        );
+    }
+
+    /// Going in on a working engineer has to keep showing it working.
+    ///
+    /// Entering replays the transcript, and that is the whole story only for an
+    /// agent that has stopped. The event stream appends to the screen for
+    /// exactly one run — the one in `App::watching` — so an engineer entered
+    /// mid-turn drew everything it had said up to that instant and then went
+    /// quiet while it carried on writing, which is the picture of a wedged
+    /// agent on the screen built to stop wedged agents hiding.
+    #[test]
+    fn going_into_a_working_engineer_follows_its_run() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_an_engineer("conv-9", "conv-e1");
+        app.run_of
+            .insert(NodeId::session("conv-e1"), "run-e1".into());
+        app.agents = vec![running("run-e1", "the board")];
+
+        follow_live_run(&mut app, "conv-e1");
+
+        assert_eq!(app.watching.as_deref(), Some("run-e1"));
+        assert!(app.busy, "its turn is in flight, and the status bar says so");
+        assert_eq!(
+            app.session.as_deref(),
+            Some("sess-run-e1"),
+            "the session cursor follows the eye, so the next thing typed \
+             continues the conversation being read"
+        );
+    }
+
+    /// And an engineer that has stopped is left alone. Its last run's output is
+    /// already in the transcript that was just replayed, and marking the chat
+    /// busy for a process that has ended would take the input box away with
+    /// nothing coming back to give it.
+    #[test]
+    fn going_into_a_finished_engineer_leaves_the_chat_free() {
+        use jod_core::tree::NodeId;
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = forest_with_an_engineer("conv-9", "conv-e1");
+        app.run_of
+            .insert(NodeId::session("conv-e1"), "run-e1".into());
+        let mut done = running("run-e1", "the board");
+        done.status = "completed".into();
+        app.agents = vec![done];
+
+        follow_live_run(&mut app, "conv-e1");
+
+        assert_eq!(app.watching, None);
+        assert!(!app.busy);
     }
 
     /// And `→` everywhere else is still the tree's own key. A project has

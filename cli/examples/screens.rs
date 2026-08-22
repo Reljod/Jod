@@ -377,6 +377,12 @@ mod tests {
 
     const WORK: &str = "port the parser";
     const SESSION: &str = "port the lexer";
+    /// What the fleet calls that session: a seat on the roster its heading
+    /// holds, rather than the title the conversation carries. See
+    /// `jod_core::tree::hired_as`.
+    const SEAT: &str = "engineer#1";
+    /// The newest thing the run said, which is the agent's row on this screen.
+    const SAID: &str = "the lexer builds";
     const RUN: &str = "hello-agent";
     const RUN_ID: &str = "de1e6a7e";
 
@@ -470,8 +476,16 @@ mod tests {
             "the work has no project, so it is the root of this tree:\n{screen}"
         );
         assert!(
-            screen.contains(SESSION),
+            screen.contains(SEAT),
             "the agent under it is what the tree draws:\n{screen}"
+        );
+        assert!(
+            screen.contains(SAID),
+            "and the row says what that agent is doing:\n{screen}"
+        );
+        assert!(
+            !screen.contains(SESSION),
+            "the instruction the session was opened with is not its name:\n{screen}"
         );
     }
 

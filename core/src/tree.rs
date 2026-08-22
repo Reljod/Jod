@@ -1000,6 +1000,27 @@ fn in_tree_order(nodes: Vec<Node>) -> Vec<Node> {
     }
 }
 
+/// What the nth agent under one heading is called on the fleet.
+///
+/// A session's own title is whatever it was first asked to do — nothing names
+/// these conversations, so `open_conversation` falls back to the opening prompt
+/// — and on a roster that reads badly twice over. The row said
+/// `Reljod's words: "maybe create a simple tic tac toe web app …"` where the row
+/// above it said `manager`, so the one screen whose job is showing a chain of
+/// command showed a rank on one line and an instruction on the next, and the
+/// instruction was the *work's*, repeated on every agent that work has. What
+/// each agent is doing right now is already the rest of the row: `summary` is
+/// its newest message, and it had been squeezed off the end by the title.
+///
+/// A seat number rather than a name, because there is nothing to name them
+/// after. The number is a position in this heading's roster, not an identity —
+/// an engineer that finishes and leaves renumbers the ones after it, the same
+/// way a list does. Identity lives in [`NodeId`], which is what the cursor and
+/// every verb are keyed by.
+fn hired_as(seat: usize) -> String {
+    format!("engineer#{seat}")
+}
+
 pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
     let mut out: Vec<Node> = Vec::new();
     let mut works: HashMap<NodeId, String> = HashMap::new();
@@ -1020,6 +1041,9 @@ pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
     // index into `out`. Jod and a manager are in here beside the sessions,
     // because all three are conversations that hold runs.
     let mut owner_at: HashMap<NodeId, usize> = HashMap::new();
+    // How many agents each heading has taken on so far, so the row beside
+    // `manager` says which engineer it is. See [`hired_as`].
+    let mut hired: HashMap<NodeId, usize> = HashMap::new();
 
     for node in nodes {
         match node.kind {
@@ -1109,10 +1133,13 @@ pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
                 if let Some(work) = &work {
                     works.insert(node.id.clone(), work.clone());
                 }
+                let seat = hired.entry(parent.clone()).or_insert(0);
+                *seat += 1;
                 owner_at.insert(node.id.clone(), out.len());
                 out.push(Node {
                     parent: Some(parent),
                     depth: depth + 1,
+                    label: hired_as(*seat),
                     ..node.clone()
                 });
             }
@@ -1925,6 +1952,61 @@ mod tests {
         assert_eq!(nodes[2].parent, Some(NodeId::project(&project.id)));
         assert_eq!(nodes[3].kind, NodeKind::Session);
         assert_eq!(nodes[3].depth, 2, "and the whole subtree shifts down with it");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A project's agents read as a roster, not as the instruction repeated.
+    ///
+    /// Nothing names a work session, so `open_conversation` gives it the opening
+    /// prompt as a title — and the fleet drew that title as the row. A project
+    /// whose manager row said `manager` had its engineer's row saying
+    /// `Reljod's words: "maybe create a simple tic tac toe web app …"`, which is
+    /// the work's instruction rather than anything about that agent, and is the
+    /// same string on every agent the work has. It also took the width the row's
+    /// summary needed, so the one thing that *was* about this agent — its newest
+    /// message — was pushed off the end.
+    #[test]
+    fn a_projects_agents_are_numbered_beside_its_manager() {
+        let s = store();
+        let dir = format!("/tmp/jod-tree-roster-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named("tic-tac-toe"))
+            .unwrap();
+        s.manager_conversation(&project.id, HarnessKind::ClaudeCode)
+            .unwrap();
+
+        // Two works, so the numbering has to run across a project rather than
+        // restart inside each one — the fold puts every agent of every work on
+        // one level, and two `engineer#1`s under one repository would be two
+        // rows a person cannot tell apart.
+        let first = s
+            .create_work_in("build the board", Some(&project.id))
+            .unwrap();
+        session(&s, &first.id, None, "Reljod's words: \"maybe create a …\"");
+        let second = s
+            .create_work_in("score the game", Some(&project.id))
+            .unwrap();
+        session(&s, &second.id, None, "Reljod's words: \"and keep score\"");
+
+        let (folded, _) = s.fleet(Filter::Live).unwrap();
+        let rows: Vec<(NodeKind, &str)> = folded
+            .nodes
+            .iter()
+            .map(|n| (n.kind, n.label.as_str()))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                (NodeKind::Project, "tic-tac-toe"),
+                (NodeKind::Manager, "manager"),
+                (NodeKind::Session, "engineer#1"),
+                (NodeKind::Session, "engineer#2"),
+            ],
+            "the fleet is a chain of command: {rows:?}",
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

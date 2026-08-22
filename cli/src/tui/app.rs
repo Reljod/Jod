@@ -3715,6 +3715,26 @@ impl App {
             .any(|n| n.id == NodeId::manager(conversation_id))
     }
 
+    /// The fleet row a bound conversation was entered from, if there is one.
+    ///
+    /// A manager and an engineer are both conversations the chat box can bind
+    /// to, and you arrive in both by pressing a key on a row one screen away —
+    /// so both owe the reader the same two things: a way back to that row, and
+    /// a word in the banner saying which of them the next instruction lands in.
+    /// Asked of the forest for the reason [`App::is_manager_conversation`]
+    /// gives: these rows are already keyed by the conversation they stand for.
+    ///
+    /// The main chat answers `None` deliberately. It is home rather than
+    /// somewhere you went, so there is nothing to back out to and nothing that
+    /// needs saying about it.
+    pub fn entered_row(&self, conversation_id: &str) -> Option<&Node> {
+        let manager = NodeId::manager(conversation_id);
+        let session = NodeId::session(conversation_id);
+        self.forest
+            .iter()
+            .find(|n| n.id == manager || n.id == session)
+    }
+
     /// Which conversation the composer is about to send to, in words.
     ///
     /// Every one of these looks the same from the chair. The banner, the
@@ -3729,8 +3749,8 @@ impl App {
     /// silent: an instruction meant for main, typed into beta's manager, is not
     /// refused — it is carried out, in beta.
     ///
-    /// `None` when the answer would be noise: no conversation bound yet, or an
-    /// ordinary session, which the run's own name already covers.
+    /// `None` when the answer would be noise: no conversation bound yet, or a
+    /// conversation the fleet has no row for.
     pub fn where_you_are(&self) -> Option<String> {
         let conversation = self.conversation.as_deref()?;
         if self
@@ -3740,8 +3760,17 @@ impl App {
         {
             return Some("main".to_string());
         }
-        if !self.is_manager_conversation(conversation) {
-            return None;
+        let row = self.entered_row(conversation)?;
+        if row.kind != NodeKind::Manager {
+            // An engineer's own conversation, which `⏎` on its row now goes
+            // into. Named after its project too, and for the same reason the
+            // manager below is: `engineer#2` alone says nothing about which
+            // repository the next thing typed lands in.
+            let project = self.project_named(row.parent.as_ref());
+            return Some(match project {
+                Some(name) => format!("{name} · {}", row.label),
+                None => row.label.clone(),
+            });
         }
         // Named after its project rather than "manager", because "manager" is
         // the answer to a question nobody asked — there is one per project and
@@ -3759,6 +3788,19 @@ impl App {
             // in main.
             None => "a project manager".to_string(),
         })
+    }
+
+    /// The catalogued name behind a row's parent, when that parent is a project.
+    ///
+    /// A row under a closed work, or under a work belonging to no repository,
+    /// hangs from a heading that is not a project and answers `None` — which is
+    /// the honest answer, not a missing one.
+    fn project_named(&self, parent: Option<&NodeId>) -> Option<String> {
+        let parent = parent.filter(|id| id.kind_tag == "project")?;
+        self.projects
+            .iter()
+            .find(|p| p.id == parent.id)
+            .map(|p| p.name.clone())
     }
 }
 
@@ -3887,8 +3929,26 @@ mod tests {
             "named after its project, because which project is the whole point",
         );
 
-        // An ordinary session says nothing: the run's own name already titles
-        // the transcript, and a second label would be noise.
+        // An engineer's own conversation, which `⏎` on its fleet row now goes
+        // into. Named after its project too, and for the same reason: sitting
+        // in `engineer#1` with nothing on screen saying whose engineer it is
+        // means the next instruction lands in a repository you did not pick.
+        a.forest.push(Node {
+            id: NodeId::session("c-e1"),
+            parent: Some(NodeId::project("p-alpha")),
+            kind: NodeKind::Session,
+            depth: 1,
+            label: "engineer#1".into(),
+            ..manager_node("c-alpha")
+        });
+        a.conversation = Some("c-e1".into());
+        assert_eq!(
+            a.where_you_are().as_deref(),
+            Some("alpha · engineer#1"),
+        );
+
+        // A conversation the fleet has no row for still says nothing: the run's
+        // own name titles the transcript, and a second label would be noise.
         a.conversation = Some("c-someone-else".into());
         assert_eq!(a.where_you_are(), None);
 
