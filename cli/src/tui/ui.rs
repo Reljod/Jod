@@ -6069,6 +6069,14 @@ enum Chunk {
     Card,
     /// Something Jod said on its own account.
     Note,
+    /// Something Jod said that has to be acted on.
+    ///
+    /// Apart from [`Chunk::Note`] rather than folded into it, because being
+    /// told apart from the ordinary notices around it is the entire reason
+    /// `Entry::Alert` exists. It does not pack, so a line of air goes above and
+    /// below it even in a run of notices — which is where a blocked run is
+    /// always announced.
+    Alarm,
     /// The line a run ends on.
     End,
     /// Harness output we could not classify.
@@ -6085,6 +6093,7 @@ impl Chunk {
             Entry::ToolOut { .. } => Chunk::Out,
             Entry::Plan(_) | Entry::Delegated { .. } => Chunk::Card,
             Entry::Notice(_) | Entry::Hint(_) => Chunk::Note,
+            Entry::Alert(_) => Chunk::Alarm,
             Entry::Done { .. } => Chunk::End,
             Entry::Raw(_) => Chunk::Raw,
         }
@@ -11285,6 +11294,30 @@ mod tests {
             tight.lines().all(|l| l.chars().count() <= 96),
             "and nothing runs off the edge:\n{tight}"
         );
+    }
+
+    /// The transcript is laid out in blocks now, and an alert must not be one
+    /// of the notices. Packed into `Chunk::Note` it would sit flush against the
+    /// notice above it with no line between — the same failure the marker was
+    /// added to fix, one layer along.
+    #[test]
+    fn an_alert_is_parted_from_the_notices_around_it() {
+        let mut a = app();
+        a.push(Entry::Notice("compacted — 17239 chars".into()));
+        a.push(Entry::Alert("a run is blocked — Ctrl-N opens the rail".into()));
+        a.push(Entry::Notice("context is 100% full".into()));
+
+        let frame = rendered(&a, 120, 24);
+        let lines: Vec<&str> = frame.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("a run is blocked"))
+            .expect("the alert is on screen");
+        // Empty of *text*, not of characters: the row still carries the chat
+        // box's own borders on either side of it.
+        let blank = |line: &str| !line.chars().any(|c| c.is_alphanumeric());
+        assert!(blank(lines[at - 1]), "a line of air above it:\n{frame}");
+        assert!(blank(lines[at + 1]), "and below it:\n{frame}");
     }
 
     /// A blocked run used to be pushed as a `Notice`, which put it in the same

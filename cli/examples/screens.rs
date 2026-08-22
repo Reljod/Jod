@@ -297,7 +297,7 @@ async fn load(jod: &Arc<Jod>, filter: Option<String>) -> anyhow::Result<App> {
     app.goals = tui::data::goals(jod);
     app.hooks = tui::data::hooks(jod);
     app.activity = tui::data::activity(jod);
-    app.board = tui::data::tasks(jod, None);
+    app.board = tui::data::tasks(jod, None, app.now_ms);
     // The catalog the side panel draws. Missed when these loaders were copied
     // out of `refresh_workspaces`, which is why every panel this example has
     // ever printed said `none yet — /project add <path>` on a database with a
