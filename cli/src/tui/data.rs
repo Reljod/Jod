@@ -1612,6 +1612,32 @@ pub fn cards(jod: &Arc<Jod>, query: &Query) -> Vec<Card> {
     }
 }
 
+/// Fill in the titles of any works these cards belong to that are not known yet.
+///
+/// Writes into the cache rather than returning a map, because the point is that
+/// an id is looked up once. The rail re-reads on every keystroke of its filter
+/// box, and asking the store for a title that has not changed since the last
+/// keystroke would be a query per character typed.
+///
+/// A work that cannot be read — deleted, or a database that has gone away — is
+/// left out rather than cached as blank, so the heading falls back to the short
+/// id and a later tick can still find the name.
+pub fn learn_work_titles(jod: &Arc<Jod>, cards: &[Card], known: &mut HashMap<String, String>) {
+    let Some(store) = jod.store() else { return };
+    for card in cards {
+        let Some(work) = &card.work_id else { continue };
+        if known.contains_key(work) {
+            continue;
+        }
+        if let Ok(Some(found)) = store.work(work) {
+            let title = found.title.trim().to_string();
+            if !title.is_empty() {
+                known.insert(work.clone(), title);
+            }
+        }
+    }
+}
+
 /// The directories a conversation may work in, in the user's own order.
 ///
 /// Empty with no conversation *and* empty with no roots, which are the same

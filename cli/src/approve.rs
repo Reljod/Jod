@@ -48,13 +48,12 @@ use serde_json::{json, Value};
 /// and the reason a person is being asked at all is that they are trying to get
 /// on with something else.
 ///
-/// `ALWAYS` is `jod_core`'s, not this file's: the *answer* is what writes the
-/// grant — from whichever surface answered it, and whether or not this process
-/// is still waiting — so the text offered here and the text acted on there have
-/// to be one string.
-use jod_core::approvals::ALWAYS;
-const ONCE: &str = "allow once";
-const DENY: &str = "deny";
+/// All three are `jod_core`'s, not this file's: the *answer* is what acts —
+/// `ALWAYS` writes the grant from whichever surface answered it, whether or not
+/// this process is still waiting, and the rail's quick answer picks `ONCE` by
+/// name. So the text offered here and the text acted on there have to be one
+/// string.
+use jod_core::approvals::{ALWAYS, DENY, ONCE};
 
 /// How often to look for an answer while waiting.
 ///

@@ -22,8 +22,9 @@
 //! `j` into the sentence being written. Two ways out exist and the rail uses
 //! both, at different costs:
 //!
-//! - `Ctrl-N` opens the rail and puts it away again, and `Ctrl-R` shows or
-//!   hides it without taking the keyboard. Both are chords, so both are safe
+//! - `Ctrl-N` opens the rail and puts it away again, and `Ctrl-R` shows it and
+//!   arms a digit — `Ctrl-R` then `3` accepts card three's recommendation —
+//!   without taking the keyboard. Both are chords, so both are safe
 //!   mid-sentence — that is the property E2.S3 asks for by name.
 //! - `Ctrl-N` also *focuses* the rail, after which the bare keys are the rail's:
 //!   `↑↓`/`jk` move, `⏎` expands, a digit answers, `x` dismisses, and `Esc`
@@ -65,12 +66,21 @@ pub const LIMIT: u32 = 50;
 
 /// How many cards the stack draws at once, however many rows it has been given.
 ///
-/// Five, rather than as many as fit. `Pressing` has already put the blocking
-/// cards at the top, so the rows past the fifth are spent on cards nobody is
-/// reading — and on the bottom panel, which is the phone case, they are spent
-/// on rows the chat needed. The rest of the stack stays reachable: the cursor
-/// keys and the wheel both move the selection, and the window follows it.
-pub const VISIBLE: usize = 5;
+/// This used to be five, because a card was a bordered box four rows tall and
+/// the sixth card cost twenty-four rows to reach. A card is one row now, so the
+/// cap that protected the chat from the rail no longer has anything to protect
+/// it from: nine cards cost nine rows plus their group headings, and the whole
+/// rail usually fits. Nine rather than everything because nine is how many
+/// carry a quick-answer digit — past that the rail is a list you scroll, and
+/// the cap is what keeps it from becoming one silently.
+pub const VISIBLE: usize = 9;
+
+/// How many cards get a quick-answer digit.
+///
+/// One through nine, because those are the keys. A tenth card is still there,
+/// still selectable and still answerable the long way; what it does not get is
+/// a number, because there is no key to print beside it.
+pub const QUICK: usize = 9;
 
 /// Everything the rail remembers between frames.
 ///
@@ -126,6 +136,15 @@ pub struct RailState {
     /// blockers arriving together produce one. It falls back to zero when the
     /// last one is answered, which is what lets the next one speak again.
     pub announced: usize,
+    /// Whether `Ctrl-R` has been pressed and the rail is waiting for a digit.
+    ///
+    /// The rail can be *shown* without being *focused*, and this is a third
+    /// thing again: the keyboard still belongs to the chat, and exactly one
+    /// keystroke is being watched for. Any key that is not a digit puts it back
+    /// down and is handled normally, so an armed rail can never eat a sentence
+    /// — the worst it costs is the one keypress that disarmed it, which is
+    /// still typed.
+    pub quick: bool,
     /// Whether the rail shows the whole subtree or only this conversation.
     ///
     /// On by default, and that is the orchestrator's whole case for existing:
@@ -156,6 +175,7 @@ impl Default for RailState {
             stack: 0,
             auto_opened: false,
             announced: 0,
+            quick: false,
             cascade: true,
         }
     }
@@ -343,6 +363,40 @@ impl RailState {
         }
     }
 
+    /// `Ctrl-R`: put the rail on screen and watch for a digit, or put it away.
+    ///
+    /// This key used to be a plain visibility toggle. It is a prefix now,
+    /// because showing a column you were not going to read is not worth a chord
+    /// and answering the thing that stopped a run is. The old job survives in
+    /// both directions: the first press still shows a hidden rail, and a second
+    /// press still takes it away.
+    ///
+    /// It deliberately does **not** take the keyboard. `Ctrl-N` is the key that
+    /// does that, and the whole value of this one is that it costs nothing —
+    /// press it mid-sentence, read the numbered rows, press a digit or carry on
+    /// typing.
+    ///
+    /// Returns whether it armed rather than disarmed, so the caller can say
+    /// which of the two just happened.
+    pub fn arm(&mut self) -> bool {
+        if self.quick {
+            self.close();
+            return false;
+        }
+        self.shown = true;
+        self.quick = true;
+        true
+    }
+
+    /// Stop watching for a digit, leaving everything else as it was.
+    ///
+    /// Called for every key that is not a digit, and for every way out of the
+    /// rail. An armed rail that stayed armed would turn the next `7` typed into
+    /// a sentence into an answer to somebody's card.
+    pub fn disarm(&mut self) {
+        self.quick = false;
+    }
+
     /// Take the rail off the screen and hand the keyboard back.
     ///
     /// Every way out ends here — the chord, `Esc`, and `Ctrl-R` hiding it —
@@ -357,6 +411,7 @@ impl RailState {
     pub fn close(&mut self) {
         self.shown = false;
         self.focused = false;
+        self.quick = false;
         self.collapse();
     }
 
@@ -471,40 +526,36 @@ pub fn delivery_note(card: &Card) -> Option<&'static str> {
     }
 }
 
+/// The same fact in one word, for a rail too narrow to hold the sentence.
+///
+/// [`delivery_note`] joins two facts — `answered, queued` — because "answered"
+/// alone reads as done. This drops the half the reader already has: the stack's
+/// own name is printed on the rail's header, so a row saying `queued` under a
+/// header saying `answered` says both things exactly once between them, which is
+/// what decision D2 is actually asking for. `undelivered` keeps its own meaning
+/// with no header at all, which is why that one is not shortened to `session`.
+///
+/// Only ever used when the full sentence will not fit beside a readable title —
+/// see `ui::answer_text`. A thirty-four column rail that spends sixteen of them
+/// on `answered, queued` has four left for the card, and a row that says what
+/// happened to a question nobody can read is not the honest option.
+pub fn delivery_short(card: &Card) -> Option<&'static str> {
+    match (card.status, card.delivery) {
+        (Status::Answered, Delivery::Queued) => Some("queued"),
+        (Status::Answered, Delivery::Delivered) => Some("delivered"),
+        (_, Delivery::Undeliverable) => Some("undelivered"),
+        (Status::Answered, Delivery::None) => Some("answered"),
+        (Status::Dismissed, _) => Some("dismissed"),
+        (Status::Open, _) => None,
+    }
+}
+
 /// The word every blocking card carries, beside its coloured border.
 ///
 /// A constant because two places print it — the collapsed card and the
 /// expanded one — and because the epic's check greps for it. Colour is never
 /// the only channel in this program, and this is the other one.
 pub const BLOCKED: &str = "blocked";
-
-/// Which session raised a card, short enough for a thirty-four column rail.
-///
-/// Printed on **every** cascaded card, and it is not decoration: with the
-/// subtree scope on, the rail holds cards from sessions all over the fleet, and
-/// answering is a write against one specific agent. A card that did not say
-/// whose question it was would make "answer the top one" a coin flip about
-/// which agent gets unblocked.
-pub fn raised_by(card: &Card) -> String {
-    let session: String = card.conversation_id.chars().take(8).collect();
-    match &card.run_id {
-        Some(run) => format!("{session}·{}", run.chars().take(4).collect::<String>()),
-        None => session,
-    }
-}
-
-/// The work a card belongs to, as a short tag.
-///
-/// A tag rather than the tint E4.S5 asks for, because the colour belongs to
-/// the *work* — `works::Work::colour` — and there is no store query returning a
-/// work yet. **Integration point:** once lane A lands one, look the work up and
-/// colour the row with it; the tag stays either way, because colour is never
-/// the only channel in this program.
-pub fn work_tag(card: &Card) -> Option<String> {
-    card.work_id
-        .as_ref()
-        .map(|id| id.chars().take(6).collect::<String>())
-}
 
 /// The glyph that says what kind of card this is without relying on colour.
 pub fn kind_glyph(kind: CardKind) -> &'static str {
@@ -513,6 +564,161 @@ pub fn kind_glyph(kind: CardKind) -> &'static str {
         CardKind::Question => "?",
         CardKind::Secret => "✱",
     }
+}
+
+/// The glyph a collapsed row leads with, which is not always the kind's.
+///
+/// One column, three facts competing for it, resolved by which one the reader
+/// needs first:
+///
+/// 1. **A secret keeps `✱`.** It is the one kind whose answer is not a
+///    keystroke — it needs a typed value — so a row that hid that would offer a
+///    digit for something no digit can do.
+/// 2. **Anything else that blocks gets `!`.** A card that stopped a run outranks
+///    what sort of card it is, and this is the non-colour channel for it: the
+///    collapsed row no longer carries the word `blocked`, so the glyph has to.
+///    The word itself survives on the rail's header, on every group heading
+///    that has one, and in full on the expanded card.
+/// 3. **Otherwise the kind's own glyph**, as before.
+pub fn row_glyph(card: &Card) -> &'static str {
+    if card.kind == CardKind::Secret {
+        return kind_glyph(CardKind::Secret);
+    }
+    if card.blocking {
+        return "!";
+    }
+    kind_glyph(card.kind)
+}
+
+/// What the rail's quick answer would send, and the word the row prints for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recommended {
+    /// The exact option text to answer with — matched by value against
+    /// [`Card::options`], never by index. The hook that wrote the options is
+    /// free to reorder them, and an index would silently start answering a
+    /// different one the day it did.
+    pub option: String,
+    /// What the row prints in its right-hand column, short enough for a
+    /// thirty-four column rail.
+    pub label: String,
+}
+
+/// The one answer a card can be given without reading it, or `None`.
+///
+/// `None` is the honest and the common result, and the rail prints it as `—`:
+/// most questions are questions precisely because nobody can guess them. Two
+/// cases can be answered blind, and only two:
+///
+/// - **A permission request** — the agent was refused a tool call and is asking
+///   to be let past. The recommendation is [`ONCE`](jod_core::approvals::ONCE)
+///   and never `always allow`, because a two-keystroke chord must not be able
+///   to write a standing grant. Widening what Jod may run unasked stays a
+///   deliberate act: open the card and press the digit for it.
+/// - **A decision already taken** — the agent chose, and the card exists so it
+///   can be overruled. Accepting is agreeing with what has already happened, so
+///   it changes nothing except that the card stops waiting.
+///
+/// A card that is not open has nothing to recommend: it has been answered or
+/// put down, and offering a digit for it would answer it twice.
+pub fn recommended(card: &Card) -> Option<Recommended> {
+    if card.status != Status::Open {
+        return None;
+    }
+    if jod_core::approvals::is_approval(card) {
+        let once = card
+            .options
+            .iter()
+            .find(|o| o.trim() == jod_core::approvals::ONCE)?;
+        return Some(Recommended {
+            option: once.clone(),
+            label: "allow".to_string(),
+        });
+    }
+    // Only when the option is still on offer. A `chosen` naming something that
+    // is not in `options` is a card whose emitter has changed its mind about
+    // the alternatives, and answering with text no option matches would be a
+    // write nobody asked for.
+    let chosen = card.chosen.as_ref()?;
+    let option = card.options.iter().find(|o| *o == chosen)?;
+    Some(Recommended {
+        option: option.clone(),
+        label: option.clone(),
+    })
+}
+
+/// One project's cards — or one session's, when the cards belong to no work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    /// The work id, or the conversation id when there is no work. Identity, not
+    /// display: two works can be called the same thing.
+    pub key: String,
+    /// What the heading prints.
+    pub label: String,
+    /// How many of this group's cards stopped a run.
+    pub blocked: usize,
+    /// Indices into the list this was built from, in the order it had them.
+    pub cards: Vec<usize>,
+}
+
+/// Gather the rail's cards under a heading each, without reordering them.
+///
+/// **The sort still decides everything.** Groups come out in the order their
+/// first card appeared and cards keep their places inside one, so `Pressing`
+/// still floats the group holding the most urgent card to the top. Grouping
+/// that re-sorted would quietly undo the one ordering the rail exists to
+/// provide.
+///
+/// `names` resolves an id to something a person recognises — a work's title,
+/// which is a paraphrase of what that agent was asked to do. An id nobody has
+/// looked up yet falls back to a short form of itself, so a heading is never
+/// blank while the lookup catches up.
+pub fn group(cards: &[Card], names: &std::collections::HashMap<String, String>) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for (at, card) in cards.iter().enumerate() {
+        let (key, fallback) = match &card.work_id {
+            Some(work) => (work.clone(), short_id(work)),
+            None => (
+                card.conversation_id.clone(),
+                format!("session {}", short_id(&card.conversation_id)),
+            ),
+        };
+        let found = groups.iter().position(|g| g.key == key);
+        let at_group = match found {
+            Some(index) => index,
+            None => {
+                groups.push(Group {
+                    label: names.get(&key).cloned().unwrap_or(fallback),
+                    key,
+                    blocked: 0,
+                    cards: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        groups[at_group].cards.push(at);
+        if card.blocking && card.is_open() {
+            groups[at_group].blocked += 1;
+        }
+    }
+    groups
+}
+
+/// An id cut to something a heading can hold, when there is no name for it yet.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// The cards in the order the rail draws them, as indices into the list the
+/// groups were built from.
+///
+/// Grouping moves cards past each other — a second card for the first work is
+/// drawn above a first card for the second one — so this is the order, and the
+/// only one. Three things read it and all three must agree: the renderer, the
+/// cursor that `↑↓` walks, and the digit the quick answer resolves. A digit
+/// that counted rows while the cursor counted the query's order would answer
+/// whichever card happened to sit at that number in the other list.
+pub fn order(groups: &[Group]) -> Vec<usize> {
+    groups.iter().flat_map(|g| g.cards.iter().copied()).collect()
 }
 
 /// The rail, reduced to a single line.
@@ -536,7 +742,12 @@ pub fn summary(cards: &[Card]) -> String {
     if queued > 0 {
         line.push_str(&format!(" · {queued} queued"));
     }
-    line.push_str(" · Ctrl-N to answer");
+    // The cheapest way in rather than the most capable one. This line is what a
+    // terminal too small for the rail gets, so the key it names should be the
+    // one that costs least to press — `Ctrl-R` shows the stack and arms the
+    // digits without taking the keyboard, and `Ctrl-N` is a keystroke further
+    // on for anyone who wants to read a card rather than clear it.
+    line.push_str(" · Ctrl-R then 1–9");
     line
 }
 
@@ -570,6 +781,192 @@ mod tests {
             delivered_at_ms: None,
             dedupe_key: None,
         }
+    }
+
+    /// A permission card as `jod approve-hook` actually raises one.
+    fn approval(id: i64, pattern: &str) -> Card {
+        let mut c = card(id, true);
+        c.title = format!("Bash: {pattern}");
+        c.options = vec![
+            format!("{} `{pattern}*`", jod_core::approvals::ALWAYS),
+            jod_core::approvals::ONCE.to_string(),
+            jod_core::approvals::DENY.to_string(),
+        ];
+        c.dedupe_key = Some(format!("approval:Bash:{pattern}*"));
+        c
+    }
+
+    /// The chord's whole safety property. Two keystrokes may let a call
+    /// through; they may never widen what Jod is allowed to run from then on.
+    #[test]
+    fn the_quick_answer_on_a_permission_card_allows_once_and_never_always() {
+        let c = approval(1, "cargo test ");
+        let rec = recommended(&c).expect("a permission card can be accepted blind");
+        assert_eq!(rec.option, jod_core::approvals::ONCE);
+        assert_eq!(rec.label, "allow", "the row has room for one word");
+        assert!(
+            !rec.option.starts_with(jod_core::approvals::ALWAYS),
+            "a standing grant is never two keystrokes away: {}",
+            rec.option
+        );
+    }
+
+    /// The recommendation is matched by value, so an emitter that reorders its
+    /// options cannot silently move which one the digit sends.
+    #[test]
+    fn a_permission_card_whose_options_moved_still_resolves_to_the_same_text() {
+        let mut c = approval(1, "gh pr ");
+        c.options.reverse();
+        assert_eq!(
+            recommended(&c).map(|r| r.option),
+            Some(jod_core::approvals::ONCE.to_string())
+        );
+    }
+
+    /// A decision has already happened; accepting agrees with it. Anything else
+    /// with options is a question, and a question answered blind is a guess.
+    #[test]
+    fn only_a_decision_already_taken_can_be_accepted_blind() {
+        let mut taken = card(1, false);
+        taken.kind = CardKind::Decision;
+        taken.options = vec!["SQLite".into(), "Postgres".into()];
+        taken.chosen = Some("SQLite".into());
+        assert_eq!(
+            recommended(&taken).map(|r| r.label),
+            Some("SQLite".to_string())
+        );
+
+        let mut asked = card(2, false);
+        asked.options = vec!["8080".into(), "3000".into()];
+        assert_eq!(
+            recommended(&asked),
+            None,
+            "an open question has no answer anybody can guess"
+        );
+
+        // A `chosen` naming something no longer on offer is an emitter that
+        // changed its mind, and answering with text no option matches would be
+        // a write nobody asked for.
+        let mut stale = taken.clone();
+        stale.chosen = Some("DuckDB".into());
+        assert_eq!(recommended(&stale), None);
+    }
+
+    /// A card that is not open has nothing left to accept, or the digit beside
+    /// it would answer it twice.
+    #[test]
+    fn an_answered_card_offers_no_quick_answer() {
+        let mut c = approval(1, "cargo test ");
+        c.status = Status::Answered;
+        assert_eq!(recommended(&c), None);
+        c.status = Status::Dismissed;
+        assert_eq!(recommended(&c), None);
+    }
+
+    /// A secret needs a typed value, so no digit can finish it.
+    #[test]
+    fn a_secret_offers_no_quick_answer_and_keeps_its_own_glyph() {
+        let mut c = card(1, true);
+        c.kind = CardKind::Secret;
+        assert_eq!(recommended(&c), None);
+        assert_eq!(
+            row_glyph(&c),
+            kind_glyph(CardKind::Secret),
+            "a blocking secret is still a secret: the digit cannot answer it"
+        );
+    }
+
+    /// Blocking is never carried by colour alone. The word left the row, so the
+    /// glyph column has to say it.
+    #[test]
+    fn a_blocking_row_is_marked_in_something_other_than_colour() {
+        assert_eq!(row_glyph(&card(1, true)), "!");
+        assert_eq!(row_glyph(&card(2, false)), kind_glyph(CardKind::Question));
+    }
+
+    /// Cards gather under the work they belong to, and fall back to the session
+    /// when they belong to none.
+    #[test]
+    fn cards_group_by_work_and_fall_back_to_the_session() {
+        let mut one = card(1, true);
+        one.work_id = Some("work-aaaa1111".into());
+        one.conversation_id = "conv-aaaa".into();
+        let mut two = card(2, false);
+        two.work_id = Some("work-bbbb2222".into());
+        two.conversation_id = "conv-bbbb".into();
+        let mut three = card(3, false);
+        three.work_id = Some("work-aaaa1111".into());
+        three.conversation_id = "conv-cccc".into();
+        let mut loose = card(4, false);
+        loose.conversation_id = "conv-dddd5555".into();
+
+        let mut names = std::collections::HashMap::new();
+        names.insert("work-aaaa1111".to_string(), "ship the rail".to_string());
+
+        let groups = group(&[one, two, three, loose], &names);
+        assert_eq!(groups.len(), 3, "two works and one loose session");
+        assert_eq!(groups[0].label, "ship the rail", "the work's own title");
+        assert_eq!(groups[0].cards, vec![0, 2], "both of that work's cards");
+        assert_eq!(groups[0].blocked, 1);
+        assert_eq!(
+            groups[1].label, "work-bbb",
+            "an id nobody has looked up yet still gets a heading"
+        );
+        assert_eq!(
+            groups[2].label, "session conv-ddd",
+            "a card belonging to no work is filed under the session"
+        );
+    }
+
+    /// Grouping moves cards past each other, and everything that counts rows —
+    /// the renderer, the cursor, the quick-answer digit — has to agree on the
+    /// order it produced. A digit resolved against the query's order would
+    /// answer a different card from the one it is printed beside.
+    #[test]
+    fn the_drawn_order_is_the_grouped_order_and_not_the_querys() {
+        let mut first = card(1, false);
+        first.work_id = Some("A".into());
+        let mut middle = card(2, false);
+        middle.work_id = Some("B".into());
+        let mut last = card(3, false);
+        last.work_id = Some("A".into());
+
+        let cards = [first, middle, last];
+        let groups = group(&cards, &std::collections::HashMap::new());
+        assert_eq!(
+            order(&groups),
+            vec![0, 2, 1],
+            "both of A's cards, then B's — not the order the query returned"
+        );
+    }
+
+    /// The prefix shows the rail without taking the keyboard, and a second
+    /// press puts the whole thing away.
+    #[test]
+    fn the_quick_prefix_arms_then_closes_and_never_holds_the_keyboard() {
+        let mut rail = RailState::default();
+        assert!(rail.arm(), "the first press arms");
+        assert!(rail.shown, "and shows the rail");
+        assert!(!rail.focused, "but never takes the bare keys");
+
+        assert!(!rail.arm(), "the second press disarms");
+        assert!(!rail.shown, "and takes the rail away with it");
+        assert!(!rail.quick);
+    }
+
+    /// Anything that puts the rail down puts the prefix down too, or the next
+    /// digit typed into a sentence answers somebody's card.
+    #[test]
+    fn closing_the_rail_disarms_the_prefix() {
+        let mut rail = RailState::default();
+        rail.arm();
+        rail.close();
+        assert!(!rail.quick);
+
+        rail.arm();
+        rail.disarm();
+        assert!(!rail.quick, "and so does changing your mind");
+        assert!(rail.shown, "which leaves the rail exactly as it was");
     }
 
     /// The whole point of D2: two independent facts, and the rail says both.
@@ -691,38 +1088,6 @@ mod tests {
         let narrow = rail.query(Some("conv".into()));
         assert_eq!(narrow.conversation_id.as_deref(), Some("conv"));
         assert_eq!(narrow.subtree_of, None);
-    }
-
-    /// Answering writes against one specific agent, so a cascaded card that did
-    /// not say whose question it was would make "answer the top one" a coin
-    /// flip about which agent gets unblocked.
-    #[test]
-    fn a_cascaded_card_names_the_session_that_raised_it() {
-        let mut c = card(1, false);
-        c.conversation_id = "7c09d454-aaaa-bbbb".into();
-        c.run_id = Some("3f2ab1c0".into());
-        let said = raised_by(&c);
-        assert!(said.starts_with("7c09d454"), "{said}");
-        assert!(said.contains("3f2a"), "and which run of it: {said}");
-    }
-
-    #[test]
-    fn a_card_with_no_run_still_names_its_session() {
-        let mut c = card(1, false);
-        c.conversation_id = "7c09d454-aaaa".into();
-        c.run_id = None;
-        assert_eq!(raised_by(&c), "7c09d454");
-    }
-
-    /// The work tag stands in for the tint until there is a query returning a
-    /// work. Colour is never the only channel here, so the tag is what the
-    /// design actually needs and the colour is the improvement on top.
-    #[test]
-    fn a_card_belonging_to_a_work_carries_its_tag() {
-        let mut c = card(1, false);
-        c.work_id = Some("w-abcdef-123".into());
-        assert_eq!(work_tag(&c).as_deref(), Some("w-abcd"));
-        assert_eq!(work_tag(&card(2, false)), None, "no work, no tag");
     }
 
     /// The text filter has to reach the store, or it is not full-text search —
@@ -962,7 +1327,9 @@ mod tests {
         let line = summary(&[card(1, false), card(2, true), card(3, true)]);
         assert!(line.starts_with("3 cards"), "{line}");
         assert!(line.contains(&format!("2 {BLOCKED}")), "{line}");
-        assert!(line.contains("Ctrl-N"), "{line}");
+        // The cheapest key in, which is the prefix rather than the focus chord:
+        // this line is what a terminal too small to draw the rail gets.
+        assert!(line.contains("Ctrl-R"), "{line}");
     }
 
     #[test]
