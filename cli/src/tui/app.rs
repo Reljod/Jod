@@ -1848,41 +1848,28 @@ impl App {
         }
     }
 
-    /// `Ctrl-R`: put the rail on screen, or take it off.
-    ///
-    /// A visibility toggle and not a focus one, so showing the rail this way
-    /// leaves the keyboard where it is. Hiding it hands the keyboard on to
-    /// whatever was underneath.
-    pub fn toggle_rail_shown(&mut self) {
-        if self.rail.shown {
-            self.rail.close();
-            self.release_keyboard(Layer::Rail);
-        } else {
-            self.rail.shown = true;
-            self.sync_focus();
-        }
-    }
-
     /// `Ctrl-R`: put the rail on screen and watch for a digit, or put it away.
     ///
-    /// The same bookkeeping as [`App::toggle_rail_shown`] on the way out, and
-    /// deliberately *not* the same on the way in: this never calls
+    /// This replaced a plain visibility toggle, and keeps that toggle's
+    /// bookkeeping on the way out: hiding the rail hands the keyboard on to
+    /// whatever was underneath. On the way in it deliberately does *not* call
     /// [`App::take_keyboard`]. The prefix's whole value is that it costs
     /// nothing — press it mid-sentence, read the numbered rows, then press a
     /// digit or carry on typing — and a chord that took the bare keys would
     /// cost the sentence. `Ctrl-N` is the key that takes them.
     ///
+    /// [`RailState::arm`] owns which of the two this is; this is the part that
+    /// notices the rail has gone and passes the keyboard on, exactly as
+    /// [`App::rail_back`] does for `Esc`.
+    ///
     /// Returns whether it armed rather than disarmed.
     pub fn arm_rail(&mut self) -> bool {
-        if self.rail.quick {
-            self.rail.close();
-            self.release_keyboard(Layer::Rail);
-            return false;
+        if self.rail.arm() {
+            self.sync_focus();
+            return true;
         }
-        self.rail.shown = true;
-        self.rail.quick = true;
-        self.sync_focus();
-        true
+        self.release_keyboard(Layer::Rail);
+        false
     }
 
     /// A pointer landing in the rail, which says the same thing `Ctrl-N` does.

@@ -16348,10 +16348,16 @@ mod tests {
     /// `Ctrl-R` hides the rail from anywhere, so it can reach past the catalog
     /// that has the keyboard. What it must not do is take the keyboard with it:
     /// the catalog is still open and still the newest thing on screen.
+    ///
+    /// Two presses rather than one, because `Ctrl-R` is a prefix now — the
+    /// first arms the quick answer, the second puts the rail away. Neither of
+    /// them touches the keyboard, which is the property this is about.
     #[test]
     fn hiding_the_rail_underneath_leaves_the_catalog_holding_the_keys() {
         let mut app = with_both_views();
 
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert!(app.panel_focused, "arming took nothing from the catalog");
         ctrl(&mut app, KeyCode::Char('r'));
         assert!(!app.rail.shown, "Ctrl-R hid the rail");
         assert!(app.panel_focused, "and the catalog kept the keyboard");
