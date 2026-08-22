@@ -959,7 +959,11 @@ fn fire_outcome(f: &Fire, run: Option<&StoredRun>) -> Outcome {
         | FireOutcome::SkippedMisfire
         | FireOutcome::Replaced
         | FireOutcome::MonitorQuiet => Outcome::Idle,
-        FireOutcome::SpawnFailed | FireOutcome::Abandoned => Outcome::Failed,
+        // A stop that failed is a failed tick even though a run did start:
+        // the schedule's one guarantee did not hold.
+        FireOutcome::SpawnFailed | FireOutcome::Abandoned | FireOutcome::ReplaceFailed => {
+            Outcome::Failed
+        }
         // A row this build cannot read. `Missing` is the honest cell: it says
         // nothing rather than claiming a run happened, which is the same choice
         // `FireOutcome::Unknown` itself exists to make.

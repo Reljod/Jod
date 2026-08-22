@@ -980,15 +980,41 @@ impl Ticker {
             Decision::Replace { due_at_ms, stop } => {
                 // Stop first, so the two never overlap even briefly — the whole
                 // point of choosing `replace` over `allow`.
-                let _ = self.jod.kill_agent(stop).await;
+                //
+                // The result is written down rather than acted on, and the two
+                // halves of that are separate decisions.
+                //
+                // **Written down**, because the row this records is the only
+                // account of the tick anybody ever reads. It used to say
+                // `Replaced`, `stopped <id>` whether the stop had happened or
+                // not, so a schedule that had quietly gone on running twice
+                // over left behind a ledger positively asserting it had not.
+                //
+                // **Not acted on**, because whether a schedule should refuse to
+                // fire when it cannot stop its predecessor is a real question
+                // with two defensible answers — for many schedules two
+                // overlapping runs are better than a night with no run at all —
+                // and it is Reljod's to answer. Until he does, the fire goes
+                // ahead exactly as it always has and the overlap is recorded
+                // rather than prevented.
+                let (outcome, detail) = match self.jod.kill_agent(stop).await {
+                    Ok(()) => (FireOutcome::Replaced, format!("stopped {stop}")),
+                    Err(e) => (
+                        FireOutcome::ReplaceFailed,
+                        format!(
+                            "could not stop {stop}: {e} — the replacement was started \
+                             anyway, so both may be running"
+                        ),
+                    ),
+                };
                 store.record_fire(&Fire {
                     id: 0,
                     schedule_id: s.id.clone(),
                     due_at_ms: *due_at_ms,
                     fired_at_ms: now_ms,
                     run_id: None,
-                    outcome: FireOutcome::Replaced,
-                    detail: Some(format!("stopped {stop}")),
+                    outcome,
+                    detail: Some(detail),
                 })?;
                 let run = self.spawn(s, *due_at_ms, watch).await?;
                 store.record_fire(&Fire {
@@ -2761,6 +2787,123 @@ mod tests {
                 stop: "run-1".into()
             }]
         );
+    }
+
+    /// A `replace` whose stop fails must not be written down as a stop that
+    /// happened.
+    ///
+    /// The stop is failed the way production fails it, with no injection and no
+    /// mock: `kill_agent` refuses a run this process does not hold in memory
+    /// and the store has no row for. That is what is left when the previous run
+    /// ends and is cleared away between the tick planning the replacement and
+    /// carrying it out — the tick's monitor probe alone is allowed thirty
+    /// seconds in that gap — and it was the state of every long-lived run until
+    /// #262 taught `kill_agent` to fall back to the stored process group.
+    ///
+    /// What is under test is only the ledger. The replacement is still started
+    /// after a failed stop, deliberately, so this asserts nothing about
+    /// overlap beyond the fact that the failure does not stop the fire.
+    #[tokio::test]
+    async fn a_replace_that_could_not_stop_the_previous_run_does_not_claim_it_did() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let s = sched(Misfire::FireOnce, Overlap::Replace);
+        store.add_schedule(&s).unwrap();
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let carried = ticker
+            .carry_out(
+                &s,
+                &Decision::Replace {
+                    due_at_ms: 5_000,
+                    stop: "run-nobody-can-stop".into(),
+                },
+                9_000,
+                None,
+            )
+            .await;
+
+        let fires = store.fires(&s.id, 10).unwrap();
+        assert!(
+            !fires.iter().any(|f| f.outcome == FireOutcome::Replaced),
+            "the stop failed, so nothing was replaced: {fires:?}"
+        );
+        assert!(
+            !fires.iter().any(|f| f
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("stopped "))),
+            "and the ledger must not say it stopped the run it could not stop: {fires:?}"
+        );
+
+        // What it says instead, which has to be enough on its own: somebody
+        // reading the history a week later has the run that would not stop and
+        // the reason it would not, without a live process to ask.
+        let stop = fires
+            .iter()
+            .find(|f| f.outcome == FireOutcome::ReplaceFailed)
+            .unwrap_or_else(|| panic!("nothing records the failed stop at all: {fires:?}"));
+        let detail = stop.detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("run-nobody-can-stop"),
+            "the row must name the run that is still going: {detail}"
+        );
+        assert!(
+            detail.contains("no agent with id"),
+            "and why the stop failed: {detail}"
+        );
+        assert!(
+            !stop.outcome.started_a_run(),
+            "this row is the stop, not the run that went ahead despite it"
+        );
+        assert!(
+            crate::activity::fire_needs_you(stop.outcome),
+            "a schedule quietly running twice over is nobody else's job to report"
+        );
+
+        // Whatever `carry_out` returned, it is about the spawn rather than
+        // about the stop: the schedule still fires, which is the behaviour this
+        // change leaves exactly as it was.
+        if let Err(e) = &carried {
+            assert!(
+                !e.to_string().contains("run-nobody-can-stop"),
+                "a stop that failed must not decide whether the schedule fires: {e}"
+            );
+        }
+    }
+
+    /// The other half of the same row: a stop that worked still reads as the
+    /// replacement it was.
+    ///
+    /// It succeeds here the way it succeeds for a run whose process has already
+    /// gone — `kill_agent` finds the row, sees nothing left to signal and
+    /// returns `Ok` — which is the success available to a test that must not
+    /// launch a real harness just to have something to kill.
+    #[tokio::test]
+    async fn a_replace_that_stopped_the_previous_run_still_says_so() {
+        let store = std::sync::Arc::new(crate::store::Store::in_memory().unwrap());
+        let s = sched(Misfire::FireOnce, Overlap::Replace);
+        store.add_schedule(&s).unwrap();
+        a_finished_run(&store, "run-that-stops", 0.0, "done");
+
+        let ticker = Ticker::new(Jod::with_store(store.clone())).as_owner("t");
+        let _ = ticker
+            .carry_out(
+                &s,
+                &Decision::Replace {
+                    due_at_ms: 5_000,
+                    stop: "run-that-stops".into(),
+                },
+                9_000,
+                None,
+            )
+            .await;
+
+        let fires = store.fires(&s.id, 10).unwrap();
+        let stop = fires
+            .iter()
+            .find(|f| f.outcome == FireOutcome::Replaced)
+            .unwrap_or_else(|| panic!("the stop worked and nothing says so: {fires:?}"));
+        assert_eq!(stop.detail.as_deref(), Some("stopped run-that-stops"));
     }
 
     #[test]
