@@ -1461,13 +1461,43 @@ impl Jod {
     /// stop says nothing at all about whether the work below it should
     /// continue. → [`Jod::cascade_stop`].
     pub async fn kill_agent(&self, id: &str) -> Result<()> {
-        // The named run is looked up in memory and fails loudly if it is not
-        // there. That is the existing contract for the run a caller named, and
-        // it is not the contract for the cascade below, which finds runs the
-        // caller never mentioned and cannot expect to be rehydrated.
+        // The named run is looked up in memory first, and in the store when it
+        // is not there. Memory alone was the whole test, and it made a stop
+        // that a caller had every right to expect fail: rehydration fills the
+        // map from the most recent few hundred rows, so a run older than that
+        // window — the main chat, typically, which outlives everything — was
+        // `UnknownAgent` to the process being asked to stop it. The row is
+        // enough to do the work, because the pgid is a column rather than a
+        // handle, and `stop_one` below already reads it from either place.
         let known = self.state.read().await.agents.contains_key(id);
         if !known {
-            return Err(JodError::UnknownAgent(id.to_string()));
+            let row = match &self.store {
+                Some(store) => store.run(id)?,
+                None => None,
+            };
+            let Some(row) = row else {
+                // Nothing in memory and no row anywhere: genuinely unknown,
+                // and that still fails loudly. Only "the store knows this run
+                // and this process happens not to" is what changed here.
+                return Err(JodError::UnknownAgent(id.to_string()));
+            };
+
+            // Nothing is signalled for a run that is not still going. Pids are
+            // recycled, so a finished run's pgid column names either nothing
+            // at all or a stranger's process, and killing a stranger's process
+            // is a far worse outcome than the refusal this replaces. The same
+            // reasoning is why `rehydrate` only probes rows that still say
+            // `running`, and why `fail_agent` will not terminate a group that
+            // has already gone. The status is left exactly as it is: a run
+            // that ended on its own did not end because of this call, and
+            // relabelling it would hide how it really finished. Descendants
+            // are a separate question, and the cascade below still asks it.
+            let live = row.status == AgentStatus::Running.as_str()
+                && row.pgid.is_some_and(proc::group_alive);
+            if !live {
+                self.cascade_stop(id).await;
+                return Ok(());
+            }
         }
         self.stop_one(id).await?;
         self.cascade_stop(id).await;
@@ -2440,6 +2470,131 @@ mod tests {
             jod.agent("already-failed").await.unwrap().status,
             AgentStatus::Failed
         );
+    }
+
+    /// A live process group, for the tests below that need a pgid that really
+    /// answers. Returns the group id; the caller stops it.
+    fn a_live_group() -> u32 {
+        let dir = std::env::temp_dir().join(format!(
+            "jod-stranded-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::proc::spawn_detached(
+            std::path::Path::new("/bin/sleep"),
+            &["30".to_string()],
+            &dir,
+            &dir.join("log"),
+        )
+        .unwrap()
+    }
+
+    async fn until(mut done: impl FnMut() -> bool) -> bool {
+        for _ in 0..400 {
+            if done() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        done()
+    }
+
+    /// A run the store knows about and this process does not must still stop.
+    ///
+    /// This is the defect a doorman agent hit in production: it asked five
+    /// times to stop the main chat and was told `no agent with id …` every
+    /// time, while the run was alive and the id was right. Every reach for a
+    /// run went through the in-memory map, and rehydration only fills that map
+    /// with the most recent few hundred rows, so a long-lived run that has
+    /// since been pushed out of that window is unreachable to the process that
+    /// was asked to stop it. `rehydrate(1)` below is that window, shrunk to
+    /// the size a test can state.
+    #[tokio::test]
+    async fn a_stored_run_outside_the_rehydration_window_can_still_be_stopped() {
+        let pgid = a_live_group();
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+
+        let mut stranded = record().summary;
+        stranded.id = "stranded".into();
+        stranded.status = AgentStatus::Running;
+        stranded.pid = Some(pgid);
+        stranded.pgid = Some(pgid);
+        stranded.created_at_ms = 1;
+        store.save_run(&stored_run(&stranded)).unwrap();
+
+        let mut newer = record().summary;
+        newer.id = "newer".into();
+        newer.created_at_ms = 2;
+        store.save_run(&stored_run(&newer)).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        jod.rehydrate(1).await.unwrap();
+        assert!(
+            jod.agent("stranded").await.is_err(),
+            "the run has to be absent from memory, or this test proves nothing"
+        );
+
+        jod.kill_agent("stranded").await.expect("the run stops");
+        assert!(
+            until(|| !crate::proc::group_alive(pgid)).await,
+            "the process group is still running after the stop"
+        );
+        assert_eq!(
+            store.run("stranded").unwrap().unwrap().status,
+            AgentStatus::Killed.as_str(),
+            "the row still does not say the run was stopped"
+        );
+    }
+
+    /// The guard on the fallback above: an id with no row anywhere is still an
+    /// error. "The store knows it and I do not" is the only case that changed;
+    /// a genuinely unknown run must keep failing loudly, because a caller that
+    /// mistypes an id is owed the error rather than a quiet success.
+    #[tokio::test]
+    async fn a_run_no_store_row_knows_about_still_fails_loudly() {
+        let jod = Jod::with_store(std::sync::Arc::new(Store::in_memory().unwrap()));
+        assert!(matches!(
+            jod.kill_agent("never-existed").await,
+            Err(JodError::UnknownAgent(_))
+        ));
+    }
+
+    /// The other guard: a finished run is never signalled.
+    ///
+    /// Pids are recycled, so the pgid column of a run that has already ended
+    /// names either nothing or somebody else's process. The row here has
+    /// finished and carries a pgid that a live and entirely unrelated group
+    /// now holds — exactly the collision the reuse makes possible — and that
+    /// group has to be alive when the stop returns.
+    #[tokio::test]
+    async fn a_finished_run_does_not_signal_whatever_holds_its_old_pgid() {
+        let pgid = a_live_group();
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+
+        let mut summary = record().summary;
+        summary.id = "long-done".into();
+        summary.status = AgentStatus::Completed;
+        summary.pid = Some(pgid);
+        summary.pgid = Some(pgid);
+        store.save_run(&stored_run(&summary)).unwrap();
+
+        let jod = Jod::with_store(store.clone());
+        jod.kill_agent("long-done").await.unwrap();
+
+        assert!(
+            crate::proc::group_alive(pgid),
+            "a stranger's process was killed for holding a finished run's old pgid"
+        );
+        assert_eq!(
+            store.run("long-done").unwrap().unwrap().status,
+            AgentStatus::Completed.as_str(),
+            "a finished run must keep the status it finished with"
+        );
+        let _ = crate::proc::terminate_group(pgid, std::time::Duration::from_secs(1)).await;
     }
 
     /// A run stopped on purpose must read `killed` *without* a restart.
