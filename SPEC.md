@@ -95,6 +95,10 @@ Do not reopen these.
   Nesting carries the edges.
 - **A finished scratch session is hidden and then deleted** after a retention
   window, rather than kept forever or destroyed on the spot.
+- **The assistant chooses whether to reuse a scratch session or start a new
+  one**, and only recent ones count. The choice is the assistant's judgement, not
+  a rule in the code — the code only decides which sessions it is allowed to
+  choose from.
 - **The no-blocking rule is enforced at the tool boundary**, not left to
   preamble wording. A rule the model can talk its way past is not a rule.
 
@@ -131,6 +135,11 @@ those.
 - The assistant conversation is created with `origin = 'assistant'`,
   `ephemeral = 1` (Epic B), and `parent_conversation_id` set to main.
 - It is not pinned and it is never resumed.
+
+**The assistant is never reused. The scratch sessions underneath it are** —
+that is A6. The two are easy to conflate and they pull in opposite directions:
+a standing assistant would serialise every instruction, while a standing scratch
+session is how a follow-up keeps its context.
 
 ## A2. `ask_assistant`
 
@@ -175,6 +184,8 @@ used to be main's:
 - `ask_manager` for anything touching a repository.
 - `delegate` for a one-shot that needs a tool but no repository — a lookup, a
   fetch, a calculation. This is what starts a scratch session.
+- `continue_agent` instead, when a recent scratch session was working on this
+  same thing and has finished. A6 has the rule and its two traps.
 - Report back in one or two sentences. The answer reaches Reljod as a card on
   main's rail, which is the return leg that already exists.
 - **You never wait.** Hand over and return. The answer arrives later as its own
@@ -209,7 +220,69 @@ The queue stays. It is correct behaviour, and it is not the bug — a queue that
 drains in a second is not a block. What changes is that main's turn is one tool
 call, so it drains in a second.
 
----
+## A6. The assistant picks up a recent scratch session, or starts a fresh one
+
+Reljod: *"The assistant will determine if it reuses existing ephemeral session or
+new ones. It only considers those that are recent else, it creates new ones."*
+
+**Most of this already exists and must not be rebuilt.** `continue_agent`
+(`core/src/mcp.rs:229`) sends a follow-up to a run that already reported a
+session id, and it already sits at `ToolAccess::Delegate` — the access the
+assistant holds. `list_agents` already works out which runs are free
+(`core/src/mcp.rs:1163`: status `completed`, has a `session_id`, is not a router)
+and already writes a sentence telling the caller to reuse one. What is missing is
+the recency bound and a rule that fits scratch rather than engineers.
+
+**Why reuse is worth having at all.** A follow-up — *"what did you find?"*, *"try
+the other spelling"* — sent to a fresh session is answered by something that has
+never seen the question it is following up on. Reuse is also the cheaper call: no
+cold start, no re-reading.
+
+**A candidate is a scratch session that is all four of:**
+
+1. `ephemeral = 1` and descended from main — a scratch row, not an engineer.
+2. Free in the sense `list_agents` already means: its latest run is `completed`
+   and reported a `session_id`.
+3. Last active within `scratch_reuse_window_minutes` — a new key in `settings`,
+   default 60. `0` disables reuse and makes every instruction fresh, which is the
+   way back to A1-only behaviour if this turns out badly.
+4. Not deleted by the retention sweep. Archived is fine — see B2.
+
+**Two rules that are load-bearing, and both are easy to get backwards.**
+
+**Never wait for one.** A *running* scratch session is not a candidate, ever. If
+the only session on the right subject is busy, the assistant starts a new one
+beside it. Reuse that waits for a session to free up is the original bug rebuilt
+one layer down, which is the whole thing this spec exists to prevent.
+
+**Same thread only — the opposite of the engineer rule.** The reuse sentence
+`list_agents` writes today says to prefer a free agent *"for any instruction
+here, including one on a different subject"* (`core/src/mcp.rs:1226`). That is
+right for an engineer, whose value is a warm checkout that any instruction in
+that repository benefits from. It is wrong for scratch, which has no checkout —
+the only thing a scratch session carries is the subject it was talking about, so
+reusing one across subjects buys nothing and pollutes the context.
+
+So scratch needs its own sentence, saying the opposite: reuse this one only if
+the new instruction continues what it was doing, otherwise open a new one. The
+existing `last_message` field on `AgentView` is what the assistant judges that
+from; it is already populated and no new field is needed for it.
+
+**One bug this creates if it is done carelessly.** `is_free` matches a completed
+scratch session just as happily as an engineer, so a scratch row would land in
+the `idle` list and get advertised as a warm checkout by the engineer sentence.
+`AgentView` gains `scratch: bool`, scratch rows are excluded from the `idle` list
+that feeds the engineer hint, and the scratch hint is computed separately over
+just those rows.
+
+**The assistant's preamble** (A3) gets the rule in these terms: look once at what
+is already running under you; if a recent session was working on this same thing
+and has finished, continue it with `continue_agent`; otherwise `delegate` a new
+one. Never wait for a busy one to free up.
+
+This fits inside A4's single-call budget on purpose. The assistant gets one
+`list_agents`, and that one response has to carry both the fleet picture and the
+reuse candidates — which it does, because they are the same list.
 
 # Epic B — the scratch lane
 
@@ -238,6 +311,19 @@ tidy itself away, because the whole reason to see it is that it went wrong.
 
 Archiving sets `archived_at_ms` and nothing else. Nothing is deleted at this
 point and the transcript stays readable.
+
+**Archiving is not final, because of A6.** A scratch session can be archived and
+then picked up again by `continue_agent` inside the reuse window. Starting a run
+on a scratch conversation clears `archived_at_ms` back to null, and it re-archives
+under the same three conditions when that run finishes. Archived therefore means
+"finished and out of the way", not "closed" — the row comes back to the loose
+pane for as long as it is working again.
+
+The two windows have to stay in that order: the reuse window is minutes and the
+retention window is days, so the sweep never deletes something the assistant was
+about to continue. If anybody sets retention shorter than reuse, the worst case
+is a `continue_agent` naming a run that has just been deleted, which already
+fails with a plain error rather than doing damage.
 
 ## B3. Deleting, later
 
@@ -376,13 +462,17 @@ reading the file — do not derive them by counting.** The last spec predicted
 Existing rows get `0`, `0` and null, which is the honest starting state: nothing
 that already exists is scratch.
 
+Both settings keys — `scratch_retention_days` and `scratch_reuse_window_minutes`
+— need no migration. `settings` is key and value (`core/src/store.rs:727`), so an
+absent key means the default.
+
 ## Files this touches
 
 | File | What changes |
 |---|---|
 | `core/src/store.rs` | four migrations, `roles` accessors, the archive and sweep queries |
 | `core/src/orchestrator.rs` | main's preamble shrinks, `assistant_preamble`, `hand_to_assistant` |
-| `core/src/mcp.rs` | `ask_assistant`, `ask_manager`/`delegate`/`open_work` refused from main, the `list_agents` second-call refusal |
+| `core/src/mcp.rs` | `ask_assistant`, `ask_manager`/`delegate`/`open_work` refused from main, the `list_agents` second-call refusal, `AgentView.scratch` and the scratch reuse hint |
 | `core/src/service.rs` | `SpawnRequest.role`, resolving a role to harness/model/env at the one spawn seam |
 | `core/src/ticker.rs` | the retention sweep |
 | `core/src/tree.rs` | archived and held scratch rows in the loose pane |
@@ -417,40 +507,60 @@ that already exists is scratch.
 9. `jod approve-hook` denies `sleep 45` and `until [ ... ]; do sleep 5; done`
    for an orchestrating run, and allows `ls`.
 
+**Epic A, reuse (A6)**
+
+10. `list_agents` from an assistant run offers a completed scratch session whose
+    last activity is inside `scratch_reuse_window_minutes`, and does not offer
+    the same session once it is outside it.
+11. A *running* scratch session is never offered for reuse. This is the
+    regression guard on rebuilding the block one layer down.
+12. A completed scratch session is absent from the engineer `idle` list and from
+    the engineer reuse sentence. This is the cross-talk guard from A6 — without
+    it a scratch row gets advertised as a warm checkout.
+13. `scratch_reuse_window_minutes = 0` offers nothing for reuse, and the
+    assistant's every instruction opens a new session.
+14. The scratch reuse sentence tells the caller to continue only on the same
+    subject, where the engineer one says any subject will do.
+
 **Epic B**
 
-10. A scratch conversation whose run completed and whose deliveries are all
+15. A scratch conversation whose run completed and whose deliveries are all
     delivered is archived by the sweep.
-11. The same conversation with one `queued` delivery is **not** archived.
-12. A scratch conversation whose run `failed` is not archived.
-13. A scratch conversation marked stalled is not archived.
-14. `held = 1` survives every one of the above.
-15. The sweep deletes an archived scratch conversation past the window and
+16. The same conversation with one `queued` delivery is **not** archived.
+17. A scratch conversation whose run `failed` is not archived.
+18. A scratch conversation marked stalled is not archived.
+19. `held = 1` survives every one of the above.
+20. The sweep deletes an archived scratch conversation past the window and
     leaves one inside it.
-16. `scratch_retention_days = 0` deletes nothing.
-17. `k` on a finished, unheld scratch row archives it immediately; `k` again on a
+21. `scratch_retention_days = 0` deletes nothing.
+22. `k` on a finished, unheld scratch row archives it immediately; `k` again on a
     held row releases it.
-18. An archived scratch row is hidden from the loose pane and shown under `z`.
+23. An archived scratch row is hidden from the loose pane and shown under `z`.
+24. `continue_agent` on an archived scratch conversation clears
+    `archived_at_ms`, and the row is back in the loose pane while it runs.
 
 **Epic C**
 
-19. An empty `roles` table changes no spawn — assert the `SpawnRequest` built for
+25. An empty `roles` table changes no spawn — assert the `SpawnRequest` built for
     a `delegate` is byte-identical to today's.
-20. A `roles` row for `scratch` naming a harness and model reaches the
+26. A `roles` row for `scratch` naming a harness and model reaches the
     `SpawnRequest` that `delegate` builds.
-21. An explicit `model` argument on `delegate` beats the role's row.
-22. The conversation's own `/model` beats the role's row.
-23. `thinking = 'high'` for a Claude Code role puts `MAX_THINKING_TOKENS` in
+27. An explicit `model` argument on `delegate` beats the role's row.
+28. The conversation's own `/model` beats the role's row.
+29. `thinking = 'high'` for a Claude Code role puts `MAX_THINKING_TOKENS` in
     `SpawnRequest.env`; for OpenCode it puts nothing and the row reports the
     field inert.
-24. The roles panel lists all six roles with `main` at the root and `engineer`
+30. The roles panel lists all six roles with `main` at the root and `engineer`
     at depth three.
 
 **End to end, on this box**
 
-25. Open `jod tui`, type three instructions in quick succession, and assert none
+31. Open `jod tui`, type three instructions in quick succession, and assert none
     of them queue for more than two seconds. This is the check the whole spec
     exists for, and it is the one that cannot be faked in a unit test.
+32. Ask a scratch-shaped question, wait for the answer, then ask a follow-up that
+    only makes sense as a continuation. Assert the second one lands on the same
+    session as the first.
 
 ## Out of scope
 
