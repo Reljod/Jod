@@ -662,3 +662,43 @@ Status: **open** · Severity: low · Owner: unclaimed
 only trace is a per-tick `held` counter nobody reads. In practice a manager has
 a session by the time it has spawned an engineer, so this is latent. It has no
 floor.
+
+## Part 4 — reuse hands a writing task to an engineer sitting on the checkout
+
+### M6. A free engineer on the real checkout is the recommended answer to anything, so no worktree is ever cut
+Status: **specced, not built** · Severity: high · Owner: unclaimed
+Check: `cargo test -p jod-core` — the thirty numbered checks in
+[`SPEC.md`](../SPEC.md), which is the whole of this finding.
+
+Reljod: *"it seems like we still don't follow the rule where manager should ask
+engineer to create new worktree if working on an existing ones. Maybe because it
+re-uses an engineer and since that engineer is already working on main, it
+didn't create a new one."*
+
+Confirmed from the code, in three places that all say it deliberately:
+
+- `core/src/mcp.rs`, the `reuse` sentence built around line 1591 — *"Prefer it
+  for any instruction here, including one on a different subject."*
+- `core/src/orchestrator.rs`, the manager's brief from line 662, which says it
+  three times and ends with *"Different subject, same repository, same
+  engineer."*
+- `docs/decisions.md`, which records the contrast with the scratch rule as
+  settled reasoning.
+
+`continue_agent` resumes a session with the cwd it was launched on, so when the
+free engineer is one that started on the checkout, a task that writes writes
+into Reljod's working copy. The placement machinery is correct and is simply
+never reached, because reuse is decided first.
+
+The fix is not a patch to any one of those three. Reuse inverts — an engineer is
+offered only for an instruction carrying on its own subject — and two archive
+rules put stranded and finished engineers away. Specced end to end in
+[`SPEC.md`](../SPEC.md), with the reasoning recorded under *"An engineer is
+reused on its own subject only"* in [`docs/decisions.md`](../docs/decisions.md).
+
+Two things anyone picking this up should know before starting. It needs a
+migration, so take the number by reading every worktree at that moment rather
+than trusting the spec's line. And it will make managers hit
+`max_engineers_per_project` — 3 by default — far more often; the spec argues
+that is survivable and says explicitly not to pre-empt it by raising the
+default.
