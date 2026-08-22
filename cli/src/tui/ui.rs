@@ -36,7 +36,6 @@ use super::mention;
 use super::picker;
 use super::rail;
 use super::secret;
-use super::sessions;
 use super::text;
 use super::traffic;
 use super::workspace::Workspace;
@@ -107,6 +106,32 @@ pub struct Painted {
     pub viewport: usize,
     pub rail: RailHits,
     pub panel: PanelHits,
+    /// The preview pane of the frame just drawn.
+    pub preview: Preview,
+}
+
+/// The shape of the preview pane the last frame drew.
+///
+/// Reported back for the same reason [`Painted::viewport`] is: scrolling has to
+/// be clamped to what is on screen, and only the frame knows. Deriving it in the
+/// key handler would mean a second copy of the layout arithmetic — the pane
+/// disappears below 90 columns, and its content is a different length for a
+/// project row, a run and the pinned chat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Preview {
+    /// Rows of content the pane can show at once, inside its border. Zero when
+    /// the terminal was too narrow to draw a preview at all, which is how `⇥`
+    /// knows not to stop on it.
+    pub rows: usize,
+    /// Lines the content came to.
+    pub lines: usize,
+}
+
+impl Preview {
+    /// The furthest the pane can be scrolled before its last line is at the top.
+    pub fn max_scroll(self) -> u16 {
+        self.lines.saturating_sub(self.rows).min(u16::MAX as usize) as u16
+    }
 }
 
 /// Where the side panel's clickable parts landed.
@@ -253,6 +278,7 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     // longer at a fixed place — the splash moves it — so the rect travels back
     // out rather than being recomputed from the layout.
     let mut input = Rect::new(0, 0, 0, 0);
+    let mut preview = Preview::default();
     let height = if app.workspace == Workspace::Chat {
         let column = measure(body);
         if fresh(app) {
@@ -275,7 +301,7 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
             height
         }
     } else {
-        draw_workspace(f, app, body);
+        preview = draw_workspace(f, app, body);
         // A workspace list pages by its own height, not the transcript's.
         body.height.saturating_sub(4).max(1) as usize
     };
@@ -301,10 +327,9 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     draw_mention(f, app, input);
     draw_overlay(f, app);
     // After the overlay, and that ordering is load-bearing. An overlay can raise
-    // a notice without closing itself — `continue_session` refuses a thread the
-    // harness never named and leaves the session list up — so a flash drawn
-    // underneath would be a refusal nobody can see, which is the fault this
-    // whole thing exists to fix, one layer further in.
+    // a notice without closing itself, so a flash drawn underneath would be a
+    // refusal nobody can see, which is the fault this whole thing exists to fix,
+    // one layer further in.
     //
     // Only off the chat screen. There the same words went into the transcript,
     // which is on screen, and saying them twice is worse than saying them once.
@@ -315,6 +340,7 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
         viewport: height,
         rail: hits,
         panel: panel_hits,
+        preview,
     }
 }
 
@@ -1664,8 +1690,8 @@ fn splash_where(app: &App, width: usize) -> Option<String> {
 /// startup and `/new` pushes "new conversation", so the transcript is never
 /// literally empty and the splash would never appear at all. Nor can it be
 /// "nothing but notices" — that was the first attempt, and it swallowed every
-/// command whose whole answer is notices (`/root`, `/config`, `/sessions`, the
-/// delegation confirmation, most errors): the splash kept the column and
+/// command whose whole answer is notices (`/root`, `/config`, the delegation
+/// confirmation, most errors): the splash kept the column and
 /// painted over real output, so a cold session's first command rendered as
 /// nothing at all.
 ///
@@ -2559,10 +2585,6 @@ fn draw_keybar(f: &mut Frame, app: &App, area: Rect) {
             "searching every transcript · ⏎ opens the conversation".to_string(),
             "Esc closes",
         ),
-        Overlay::Sessions(_) => (
-            "type to narrow · ↑↓ choose · ⏎ carries on with it".to_string(),
-            "Esc closes",
-        ),
         // The rail is checked before the screen's own filter and before the
         // screen's own verbs, because while it has the keyboard the screen's
         // verbs are *not* in force — printing `s stop` beside a rail where `x`
@@ -2708,7 +2730,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // the user can ignore but a model call the console makes on its own. The
     // hedge is what keeps that honest. What makes it an acceptable trade is that
     // compacting deletes nothing: the earlier turns stay searchable and the
-    // thread behind the summary is still in `/sessions`.
+    // thread behind the summary is still on the fleet.
     if app.should_compact() {
         badges.push((
             if app.auto_compact {
@@ -2963,92 +2985,7 @@ fn draw_overlay(f: &mut Frame, app: &App) {
             selected,
             hits,
         } => draw_search(f, query, *selected, hits),
-        Overlay::Sessions(browser) => draw_session_list(f, browser, app.now_ms),
     }
-}
-
-/// Every conversation you could go back into, with a cursor on it.
-///
-/// Shaped like [`draw_search`] on purpose — a typed line, a blank, then rows —
-/// because the two are the same gesture aimed at different things, and a user
-/// who has learned one should not have to learn the other. What differs is the
-/// footer verb: search *opens* a conversation to read, and this *carries on*
-/// with one.
-fn draw_session_list(f: &mut Frame, browser: &sessions::Browser, now_ms: i64) {
-    /// The widest a title is allowed to get. Past this the extra characters buy
-    /// nothing — two threads that are still indistinguishable at fifty
-    /// characters are two threads you tell apart by their age, not their name —
-    /// and the detail column drifts further right on every wider terminal.
-    const TITLE: usize = 50;
-    /// The badge column: a glyph, up to two digits of abandoned count, and a
-    /// space. Wide enough that the count never pushes the title right.
-    const BADGE: usize = 4;
-    let screen = f.area();
-    let rows = browser.visible();
-    let width = screen.width.saturating_sub(8).clamp(40, 110);
-    let height = (rows.len() as u16 + 6)
-        .min(screen.height.saturating_sub(2))
-        .max(6);
-    let panel = centred(screen, width, height);
-    let room = width.saturating_sub(4) as usize;
-
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled("  ▸ ".to_string(), fg(USER)),
-            Span::styled(browser.query.clone(), fg(AGENT)),
-            Span::styled("▏".to_string(), fg(USER)),
-        ]),
-        Line::from(""),
-    ];
-    // Three states, not two. A list nobody has answered for yet is not an empty
-    // one, and saying "no conversations" while the loop is still fetching them
-    // would be a sentence that is false for one frame and unforgettable.
-    if !browser.loaded {
-        lines.push(Line::from(Span::styled("  …".to_string(), fg(MUTED))));
-    } else if browser.rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no conversations yet — every run starts one".to_string(),
-            fg(MUTED),
-        )));
-    } else if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no conversation matches".to_string(),
-            fg(MUTED),
-        )));
-    }
-    // Cut and pad the title to the *same* width, and one that does not depend
-    // on the row: cutting to one number and padding to another lets a long
-    // title push the harness and the message count off their column.
-    //
-    let for_title = room
-        .saturating_sub(sessions::SessionRow::DETAIL + BADGE + 2)
-        .clamp(8, TITLE);
-    let room_for = height.saturating_sub(5) as usize;
-    let first = window_start(browser.selected, room_for.max(1), rows.len());
-    for (at, row) in rows.iter().enumerate().skip(first).take(room_for.max(1)) {
-        let here = at == browser.selected;
-        lines.push(Line::from(vec![
-            Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
-            Span::styled(format!("{:<BADGE$}", row.badge()), fg(MUTED)),
-            Span::styled(
-                format!("{:<for_title$}", cut(&row.title, for_title)),
-                if here { bold(AGENT) } else { fg(AGENT) },
-            ),
-            Span::styled(row.detail(now_ms), fg(MUTED)),
-        ]));
-    }
-
-    f.render_widget(Clear, panel);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(fg(USER))
-                .title(" every conversation ")
-                .title_bottom(" ⏎ carries on with it · ↑↓ choose · Esc closes "),
-        ),
-        panel,
-    );
 }
 
 /// The background shells this console started.
@@ -3364,7 +3301,6 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         // are now reachable at all — a route nothing prints is a route nobody
         // takes. See `on_which_key`.
         rows.push(("j".into(), "jobs        background shells".into()));
-        rows.push(("r".into(), "resume      any past conversation".into()));
         rows.push(("u".into(), "unread      the oldest thing unread".into()));
         rows.push(("l".into(), "clear       empty the screen only".into()));
         rows.push(("d".into(), "add dir     a directory to work in".into()));
@@ -3620,9 +3556,12 @@ fn centred(area: Rect, w: u16, h: u16) -> Rect {
 
 // ---- workspaces --------------------------------------------------------
 
-fn draw_workspace(f: &mut Frame, app: &App, area: Rect) {
+/// Returns the shape of the preview pane, for the one screen that has a
+/// focusable one. Every other screen reports nothing, which is what keeps `⇥`
+/// from offering a stop that does not exist.
+fn draw_workspace(f: &mut Frame, app: &App, area: Rect) -> Preview {
     match app.workspace {
-        Workspace::Fleet => draw_fleet(f, app, area),
+        Workspace::Fleet => return draw_fleet(f, app, area),
         Workspace::Memory => draw_memory(f, app, area),
         Workspace::MemoryGraph => draw_graph(f, app, area),
         Workspace::Schedules => draw_schedules(f, app, area),
@@ -3634,6 +3573,7 @@ fn draw_workspace(f: &mut Frame, app: &App, area: Rect) {
         Workspace::Traffic => draw_traffic(f, app, area),
         Workspace::Chat => {}
     }
+    Preview::default()
 }
 
 /// A master/detail split, or the master alone when there is not room for both.
@@ -3954,49 +3894,37 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// What the selected node is, in full.
-fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
+fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) -> Preview {
     // The pinned chat gets the pane the flat list gives it, title and all:
     // none of `kind`, `id` or `state` means anything to a conversation, and
     // `selected_node` answers `None` for it — which would draw "nothing
     // selected" beside a row that is plainly selected.
     if app.tree_main_selected() {
-        f.render_widget(
-            Paragraph::new(main_detail(app, area.width)).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(fg(USER))
-                    .title(" the chat ")
-                    .title_bottom(fit_verbs(" ⏎ enter · /new leaves ", area.width)),
-            ),
+        return preview_pane(
+            f,
+            app,
             area,
+            main_detail(app, area.width),
+            " the chat ",
+            " ⏎ enter · /new leaves ",
+            USER,
         );
-        return;
     }
     // A run from the pane below the tree gets the pane the flat list gives it,
     // footer and all. `selected_node` answers `None` for it — it is a sentinel,
     // not a node — so without this the detail pane read "nothing selected"
     // beside a row that is plainly highlighted, and offered none of the verbs
     // the row actually answers.
-    if let Some(a) = app
-        .loose_selected()
-        .and_then(|_| app.selected_agent())
-    {
-        f.render_widget(
-            Paragraph::new(agent_detail(app, a, area.width))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(fg(MUTED))
-                        .title(" run ")
-                        .title_bottom(fit_verbs(
-                            " ⏎ watch · s stop · r resume · a attach ",
-                            area.width,
-                        )),
-                )
-                .wrap(Wrap { trim: false }),
+    if let Some(a) = app.loose_selected().and_then(|_| app.selected_agent()) {
+        return preview_pane(
+            f,
+            app,
             area,
+            agent_detail(app, a, area.width),
+            " run ",
+            " ⏎ watch · s stop · r resume · a attach ",
+            MUTED,
         );
-        return;
     }
     let mut lines: Vec<Line> = Vec::new();
     match app.selected_node() {
@@ -4089,17 +4017,62 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
             fg(MUTED),
         ))),
     }
+    preview_pane(f, app, area, lines, " node ", "", MUTED)
+}
+
+/// The fleet's preview pane, scrolled to where the keyboard left it.
+///
+/// One function for all three of the things that pane can hold — the pinned
+/// chat, a node, a run — because the scroll, the clamp and the border that says
+/// who has the keyboard are the same for all three, and three copies of that is
+/// three places for them to disagree about which pane is focused.
+///
+/// The clamp is here rather than only in the key handler because the content
+/// changes underneath a scroll that does not: a run that was forty lines long
+/// when `End` was pressed is nine lines long after it is stopped, and a
+/// paragraph scrolled past its end draws an empty box.
+fn preview_pane(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    title: &str,
+    verbs: &str,
+    resting: Color,
+) -> Preview {
+    let shape = Preview {
+        rows: area.height.saturating_sub(2) as usize,
+        lines: lines.len(),
+    };
+    // `resting` is the colour this pane wears when the rows have the keyboard,
+    // and it is the caller's because it is not about focus: the chat is the
+    // anchor of the screen and is drawn in `USER` whatever is selected, while a
+    // node and a run are `MUTED`. Focus overrides all three, because the border
+    // is the whole of how this pane says it has the keys — the loose pane below
+    // the tree already brightens for the same reason, and a preview that looked
+    // focused whether or not `↑` scrolled it would make its one key
+    // unpredictable.
+    let (border, footer) = if app.preview_focused {
+        (USER, " ↑↓ scroll · ⇥ next pane · Esc back to the rows ")
+    } else {
+        (resting, verbs)
+    };
     f.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(fg(MUTED))
-                    .title(" node "),
+                    .border_style(fg(border))
+                    .title(title.to_string())
+                    // An empty `verbs` draws nothing, which is what the node
+                    // pane has always done — it has no verbs of its own.
+                    .title_bottom(fit_verbs(footer, area.width)),
             )
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((app.preview_scroll.min(shape.max_scroll()), 0)),
         area,
     );
+    shape
 }
 
 /// A work's colour name as one of the eight the terminal's own theme controls.
@@ -4241,7 +4214,7 @@ fn draw_loose(f: &mut Frame, app: &App, area: Rect, runs: &[&super::AgentLine]) 
     );
 }
 
-fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
+fn draw_fleet(f: &mut Frame, app: &App, area: Rect) -> Preview {
     // The tree the moment there is one. Not a replacement for the flat list
     // below but the other half of the same screen: a session belonging to no
     // work has no node in the forest, and the list is what shows it.
@@ -4267,10 +4240,10 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
             rows[0]
         };
         draw_tree(f, app, tree_area);
-        if let Some(right) = right {
-            draw_tree_detail(f, app, right);
-        }
-        return;
+        return match right {
+            Some(right) => draw_tree_detail(f, app, right),
+            None => Preview::default(),
+        };
     }
     let (left, right) = split(area);
     let rows = app.fleet_rows();
@@ -4330,40 +4303,36 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     }
     f.render_widget(body(Workspace::Fleet, items, left.width), left);
 
-    let Some(right) = right else { return };
+    let Some(right) = right else {
+        return Preview::default();
+    };
     // Its own pane, and its own footer: none of `s stop · r resume · a attach`
     // means anything to a conversation, and offering keys that quietly do
     // nothing is how a list teaches people not to trust its footer.
     if app.main_selected() {
-        f.render_widget(
-            Paragraph::new(main_detail(app, right.width)).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(fg(USER))
-                    .title(" the chat ")
-                    .title_bottom(fit_verbs(" ⏎ enter · /new leaves ", right.width)),
-            ),
+        return preview_pane(
+            f,
+            app,
             right,
+            main_detail(app, right.width),
+            " the chat ",
+            " ⏎ enter · /new leaves ",
+            USER,
         );
-        return;
     }
     let lines = match app.selected_agent() {
         None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
         Some(a) => agent_detail(app, a, right.width),
     };
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(fg(MUTED))
-                .title(" run ")
-                .title_bottom(fit_verbs(
-                    " ⏎ watch · s stop · r resume · a attach ",
-                    right.width,
-                )),
-        ),
+    preview_pane(
+        f,
+        app,
         right,
-    );
+        lines,
+        " run ",
+        " ⏎ watch · s stop · r resume · a attach ",
+        MUTED,
+    )
 }
 
 /// One run, as the detail pane beside the fleet describes it.
@@ -4402,12 +4371,16 @@ fn agent_detail(app: &App, a: &super::AgentLine, width: u16) -> Vec<Line<'static
         // Above the spend on purpose: the question this pane is most often
         // opened with is "did that do what I asked", and a run launched
         // somewhere other than where you meant answers it before the cost does.
+        // Cut from the left rather than left to wrap. A path is read from its
+        // end — the repository and the slug — and a field that wrapped would
+        // also make the pane one row taller than the line count the scroll is
+        // clamped against, which puts its own last row out of reach.
         field(
             "in",
-            if a.cwd.is_empty() {
-                "not recorded"
+            &if a.cwd.is_empty() {
+                "not recorded".to_string()
             } else {
-                &a.cwd
+                fit_path(&a.cwd, width.saturating_sub(13) as usize)
             },
         ),
         field(
@@ -6950,19 +6923,22 @@ mod tests {
         );
     }
 
-    /// An overlay can raise a notice and stay open — `continue_session` refuses
-    /// a thread the harness never named and leaves the session list up. Drawn
-    /// under the overlay that raised it, the refusal is invisible, which is the
-    /// original fault one layer further in.
+    /// An overlay can raise a notice and stay open. Drawn under the overlay that
+    /// raised it, the refusal is invisible, which is the original fault one
+    /// layer further in.
     #[test]
     fn a_notice_raised_by_an_open_overlay_is_drawn_over_it() {
         let mut a = flashing(&["a fresh fork never reported a conversation"]);
-        a.overlay = Overlay::Sessions(super::super::sessions::Browser::default());
+        a.overlay = Overlay::Search {
+            query: String::new(),
+            selected: 0,
+            hits: Vec::new(),
+        };
         let frame = rendered(&a, 120, 30);
         assert!(frame.contains("never reported a conversation"), "{frame}");
         assert!(
-            frame.contains("every conversation"),
-            "and the list that raised it is still readable above: {frame}"
+            frame.contains("search every transcript"),
+            "and the overlay that raised it is still readable above: {frame}"
         );
     }
 
@@ -9493,8 +9469,8 @@ mod tests {
 
     /// A short terminal must not drop menu entries in silence.
     ///
-    /// At 100×10 the workspace menu stopped after `a activity` and lost ten
-    /// rows — including the only routes to jobs, resume, search and the keymap
+    /// At 100×10 the workspace menu stopped after `a activity` and lost the
+    /// rows below it — including the only routes to jobs, search and the keymap
     /// — with nothing on screen saying they were there. The `?` overlay in the
     /// same situation has always said "N more — widen the window", so the two
     /// overlays disagreed about whether truncation is worth mentioning.
@@ -9511,7 +9487,7 @@ mod tests {
         // The count is of entries, so it has to be a real number rather than
         // the word "some".
         assert!(
-            short.contains("· 10 more"),
+            short.contains("· 9 more"),
             "and say how many:\n{short}"
         );
 
@@ -12256,74 +12232,101 @@ mod tests {
         assert!(frame.contains("compacted turns included"), "{frame}");
     }
 
-    // ---- the session list ----
+    // ---- the fleet's preview pane ----
 
-    fn session_row(title: &str, abandoned: usize) -> sessions::SessionRow {
-        sessions::SessionRow {
-            id: format!("conv-{title}"),
-            short: "conv-abc".into(),
-            title: title.into(),
-            harness: "claude".into(),
-            model: None,
-            session_id: Some("sess-abc".into()),
-            messages: 4,
-            updated_at_ms: 0,
-            forked_from: None,
-            abandoned,
-        }
+    /// A fleet on the flat list with one run whose last message is long enough
+    /// to overflow the pane beside it.
+    fn a_talkative_run() -> App {
+        let mut a = app();
+        let mut run = agent_line("run-1", "port the parser", "completed");
+        run.last = Some(
+            (1..=40)
+                .map(|n| format!("line {n} of what it said"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        a.agents = vec![run];
+        a.go(Workspace::Fleet);
+        a.reconcile();
+        a
     }
 
-    /// A row has to say enough to be chosen off: what the thread was about,
-    /// which harness it is on, and whether there is abandoned work in it.
+    /// The frame reports the pane so the key that scrolls it can be clamped to
+    /// what is on screen. Working it out again in the key handler would be a
+    /// second copy of the arithmetic that decides the pane exists at all.
     #[test]
-    fn the_session_list_names_every_conversation_and_marks_the_cursor() {
-        let mut a = app();
-        a.now_ms = 60_000;
-        a.overlay = Overlay::Sessions(sessions::Browser {
-            rows: vec![session_row("port the parser", 2), session_row("the deploy", 0)],
-            loaded: true,
-            selected: 1,
-            ..Default::default()
-        });
-        let frame = rendered(&a, 120, 24);
-        assert!(frame.contains("port the parser"), "{frame}");
-        assert!(frame.contains("the deploy"), "{frame}");
-        assert!(frame.contains("⚑2"), "the abandoned count rides with the flag: {frame}");
-        assert!(frame.contains("carries on with it"), "{frame}");
+    fn the_frame_reports_the_preview_it_drew() {
+        let a = a_talkative_run();
+
+        let wide = painted(&a, 120, 30).preview;
+        assert!(wide.rows > 0, "a preview was drawn: {wide:?}");
+        assert!(
+            wide.lines > wide.rows,
+            "and it holds more than fits, so there is something to scroll: {wide:?}"
+        );
+
+        assert_eq!(
+            painted(&a, 80, 30).preview,
+            Preview::default(),
+            "below 90 columns there is no preview, and `⇥` must not stop on one"
+        );
     }
 
-    /// "Nothing loaded yet" and "no conversations" would draw the same empty
-    /// box, and only the second of them has a sentence that is true.
+    /// Nothing scrolls until the pane is asked to. A screen that opened halfway
+    /// down a run's output would look like output that had been lost.
     #[test]
-    fn an_empty_session_list_says_so_only_once_it_has_been_answered() {
-        let mut a = app();
-        a.overlay = Overlay::Sessions(sessions::Browser::default());
-        let waiting = rendered(&a, 120, 24);
-        assert!(!waiting.contains("no conversations yet"), "{waiting}");
-
-        a.overlay = Overlay::Sessions(sessions::Browser {
-            loaded: true,
-            ..Default::default()
-        });
-        let answered = rendered(&a, 120, 24);
-        assert!(answered.contains("no conversations yet"), "{answered}");
+    fn an_unscrolled_preview_starts_at_the_top() {
+        let a = a_talkative_run();
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("line 1 of what it said"), "{frame}");
+        assert!(!frame.contains("line 30 of what it said"), "{frame}");
     }
 
-    /// A filter that matches nothing is a different message from an empty
-    /// store: one of them means "type less", the other means "there is nothing
-    /// here at all".
     #[test]
-    fn a_session_filter_that_matches_nothing_says_that_rather_than_nothing() {
-        let mut a = app();
-        a.overlay = Overlay::Sessions(sessions::Browser {
-            rows: vec![session_row("port the parser", 0)],
-            loaded: true,
-            query: "zzz".into(),
-            ..Default::default()
-        });
-        let frame = rendered(&a, 120, 24);
-        assert!(frame.contains("no conversation matches"), "{frame}");
-        assert!(!frame.contains("no conversations yet"), "{frame}");
+    fn a_scrolled_preview_draws_from_where_the_keyboard_left_it() {
+        let mut a = a_talkative_run();
+        a.preview_focused = true;
+        a.preview_scroll = 12;
+
+        let frame = rendered(&a, 120, 30);
+
+        assert!(
+            !frame.contains("line 1 of what it said"),
+            "the top has scrolled off: {frame}"
+        );
+        assert!(frame.contains("line 20 of what it said"), "{frame}");
+    }
+
+    /// A scroll kept from a longer run must not leave the pane blank when the
+    /// content shrinks under it — the state survives the frame, the content
+    /// does not.
+    #[test]
+    fn a_preview_scrolled_past_its_end_is_pulled_back_to_it() {
+        let mut a = a_talkative_run();
+        a.preview_focused = true;
+        a.preview_scroll = u16::MAX;
+
+        let frame = rendered(&a, 120, 30);
+
+        assert!(
+            frame.contains("line 40 of what it said"),
+            "the last line is still on screen rather than an empty box: {frame}"
+        );
+    }
+
+    /// The pane has to say when it has the keyboard, because the two keys it
+    /// takes are the two the rows would otherwise answer. The border colour
+    /// says it in a terminal; the footer is what a test can read.
+    #[test]
+    fn the_preview_says_when_it_has_the_keyboard() {
+        let mut a = a_talkative_run();
+        let rows = rendered(&a, 120, 30);
+        assert!(rows.contains("⏎ watch"), "the row verbs, unfocused: {rows}");
+
+        a.preview_focused = true;
+        let focused = rendered(&a, 120, 30);
+        assert!(focused.contains("↑↓ scroll"), "{focused}");
+        assert!(focused.contains("Esc back to the rows"), "{focused}");
     }
 
     // ---- the fleet tree ----
@@ -14089,6 +14092,7 @@ mod tests {
             &mut crate::tui::Thread::default(),
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
             20,
+            Preview::default(),
         );
         let screen = rendered(&a, 120, 30);
         assert!(
@@ -14115,6 +14119,7 @@ mod tests {
             &mut crate::tui::Thread::default(),
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             20,
+            Preview::default(),
         );
         assert!(a.panel && a.projects_open && a.panel_focused);
         let screen = rendered(&a, 120, 30);

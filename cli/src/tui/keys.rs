@@ -287,7 +287,7 @@ const CHAT: &[Key] = &[
 
 /// The fleet is the widest screen, because it is the only one that is both a
 /// list of runs and a handle on the conversation graph behind them: `s r d a`
-/// act on the run under the cursor, `c b u U g f t` act on its thread. `/` is
+/// act on the run under the cursor, `b u U g f t` act on its thread. `/` is
 /// last because it is the spine's, not the fleet's — see the module header.
 ///
 /// `u` undoes and `U` puts it back. Lower case is undo on every screen that has
@@ -295,17 +295,16 @@ const CHAT: &[Key] = &[
 /// inverse, and that is the one case where a habit transferring between screens
 /// does damage rather than nothing.
 ///
-/// `c` says **conversations** rather than "threads" because the two are
-/// different things here and the screen's own prose already draws the line:
-/// `c` opens the list of conversations and `⏎` on one carries on with it, while
-/// `b` "opens the branches of the selected run's thread". A bar reading
-/// `c threads · b branches` would say `b` drills into what `c` lists, which is
-/// not what either key does.
+/// `⇥` is first because it is the key that makes the screen navigable: the
+/// fleet draws three panes and one of them is the runs that belong to no work,
+/// which is otherwise only reachable by walking the cursor past every row of
+/// every project above it.
 ///
 /// `g` is spelled `go to #` because `#` is the exact token printed beside each
 /// branch in the listing — the label names what is on screen rather than
 /// describing it.
 const FLEET: &[Key] = &[
+    k("⇥", "next pane"),
     k("⏎", "watch"),
     k("s", "stop"),
     k("r", "resume"),
@@ -319,7 +318,6 @@ const FLEET: &[Key] = &[
     // call it the same thing. Six characters shorter is why it now survives
     // eighty columns, but matching the board is the reason.
     k("d", "delegate"),
-    k("c", "conversations"),
     // The work's bus. High in the table because it is the only verb here that
     // answers "what are these agents saying to each other", and a work whose
     // traffic cannot be read is a work you can only watch spend money — see

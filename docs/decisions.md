@@ -3670,3 +3670,44 @@ the harness talking, and Jod's answers to questions that were actually typed.
 That is why `/thinking` still replies in words while `Ctrl-T` does not: a typed
 question deserves a reply, and a chord that visibly changes the screen has
 already given one.
+
+## The fleet is the list of conversations, and ⇥ is how you move around it
+
+The session list came out. It was an overlay reached three ways — `/sessions`,
+`c` on the fleet, `Ctrl-G r` — and it existed because the fleet listed *runs*
+while the chat was one conversation, so neither was the list of every thread you
+could go back into. That is no longer true. The forest holds a `Session` row
+under each project, and the pane below the tree holds every run that belongs to
+no work, so the fleet already draws the same set from the same store. Two
+screens over one subject is one screen too many, and the one being kept is the
+one that also tells you what is running.
+
+What went with it is the abandoned-branch flag. The list drew `⚑2` beside a
+conversation a revert had left work in, which was a reason to look. The count is
+still one keypress away — `b` on the fleet prints the thread and every branch
+hanging off it — but nothing on screen now makes you press it. That is a real
+loss, recorded here rather than argued away.
+
+`⇥` moves between the fleet's panes instead of cycling the permission mode. The
+fleet is three boxes sharing one cursor — the tree, the loose runs under it, the
+preview beside them — and the only way from the first to the second was `↓`
+through every project and every session in between. One keypress each way now,
+and the cursor comes back to the row it left rather than to the top of the tree,
+which is what `App::tree_mark` is for.
+
+The mode keeps the key everywhere else. It is set from the chat, where it
+applies to the thing you are about to say, and a screen full of finished runs is
+not where anyone decides how much the next turn may do.
+
+The preview is the third stop because a run's last message is prose of unknown
+length, and until now the pane holding it drew the first thirty lines and
+nothing said the rest was there. With the keyboard in it, `↑` and `↓` scroll and
+the selection stays put — which is the whole point, since those are the two keys
+that would otherwise move the cursor out from under what you are reading.
+
+Both ends are clamped against the frame that was drawn rather than against a
+guess. `ui::draw` reports the pane's height and line count in `Painted`, the way
+it already reports the transcript's viewport, and the key handler clamps to
+that. Deriving it a second time in the handler would be a second copy of the
+arithmetic that decides the pane exists at all — it disappears below 90 columns,
+and `⇥` has to know that or it offers a stop nobody can see.

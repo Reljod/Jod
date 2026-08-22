@@ -194,27 +194,25 @@ async fn main() -> anyhow::Result<()> {
         app.tree.first(&rows);
     }
 
-    // The session list, which is an overlay rather than a workspace and so is
-    // not in the menu above. Worth its own screen for the same reason the
-    // traffic log is: it is the only one whose rows are *conversations*, and
-    // the nine above list runs, memories, schedules and tasks. If this comes
-    // out empty on a database with a chat history, the loader is wrong.
-    if let Some(store) = jod.store() {
-        app.go(Workspace::Chat);
-        app.overlay = tui::Overlay::Sessions(tui::sessions::Browser {
-            rows: tui::sessions::session_rows(store.as_ref(), tui::sessions::LIST_LIMIT),
-            loaded: true,
-            ..Default::default()
-        });
+    // The pane cycle `⇥` walks, driven through `App::next_pane` itself rather
+    // than by setting the flags it sets — so this says whether the real fleet
+    // on this database has the panes the key promises, which is the half a
+    // fixture cannot answer.
+    if !app.forest.is_empty() {
+        app.go(Workspace::Fleet);
+        for stop in ["the loose pane", "the preview"] {
+            app.next_pane(true);
+            println!();
+            println!("── fleet · ⇥ to {} {}", stop, "─".repeat(40));
+            println!("{}", render(&app));
+        }
+        app.next_pane(true);
         println!();
-        println!("── every conversation {}", "─".repeat(52));
+        println!("── fleet · ⇥ back to the tree {}", "─".repeat(38));
         println!("{}", render(&app));
-        app.overlay = tui::Overlay::None;
     }
 
-    // The leader menu, which now has a row that is not a workspace: the
-    // session list has no digit and no screen of its own, so the menu is the
-    // only place it is named.
+    // The leader menu.
     app.go(Workspace::Chat);
     app.overlay = tui::Overlay::WhichKey;
     println!();

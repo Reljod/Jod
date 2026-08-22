@@ -271,7 +271,7 @@ than expecting them to be remembered.
 | `/harness <name>` | switch harness mid-session |
 | `/model <name>` | set the model; no argument restores the default |
 | `/thinking` · `/details` | show or hide reasoning, and what tools returned |
-| `/new` · `/resume <id>` · `/sessions` | move between conversations — and `/new` is how you leave the main chat |
+| `/new` · `/resume <id>` | move between conversations — and `/new` is how you leave the main chat |
 | `/main` · `/main <instruction>` | go into the main chat · send it one instruction and stay where you are |
 | `/delegate <prompt>` | run it in the background, same as `Ctrl-B` |
 | `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
@@ -309,16 +309,15 @@ back rather than quietly accepted.
 | `/models` listing | No harness lists its models through Jod — `jod models` does not exist, so `/model` can set a name but not offer one. |
 | `/themes` | Colours are constants in `ui.rs`. |
 
-`/sessions` is now a picker you can arrow through: every conversation, newest
-first, with a filter you type into and `⏎` to carry on with the one under the
-cursor. It is also `c` on the fleet and `Ctrl-G r` from anywhere, because the
-fleet lists runs and the chat is one conversation, so neither of them is the
-list of every thread you could go back into. Typing an id still works —
-`/resume` takes a prefix of either the agent id on screen or the harness's own
-conversation id and resolves it. It refuses an ambiguous prefix, and both it and
-the picker refuse a conversation that has never reported a harness session,
-because resuming that would silently start a fresh one instead of continuing
-anything.
+There is no separate conversation picker any more. The fleet is the list of
+every thread you could go back into: its tree holds the sessions belonging to
+each project, and the pane under the tree holds the runs that belong to no work
+at all. `⇥` moves between the two, so reaching the second no longer means
+walking the cursor down through the first. Typing an id still works — `/resume`
+takes a prefix of either the agent id on screen or the harness's own
+conversation id and resolves it. It refuses an ambiguous prefix, and it refuses
+a conversation that has never reported a harness session, because resuming that
+would silently start a fresh one instead of continuing anything.
 
 **Blocked on something Jod does not have:**
 

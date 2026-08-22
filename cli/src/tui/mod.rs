@@ -729,6 +729,9 @@ async fn event_loop(
     let mut hits = ui::RailHits::default();
     // ...and where it put the catalog, for the same reason.
     let mut panel_hits = ui::PanelHits::default();
+    // ...and how tall the fleet's preview pane was and how much it held, so the
+    // key that scrolls it is clamped to the frame the user is looking at.
+    let mut preview = ui::Preview::default();
     // Four frames a second: enough for the spinner to read as motion and for an
     // elapsed counter to look like a clock, cheap enough to be free.
     let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -767,6 +770,7 @@ async fn event_loop(
             viewport = painted.viewport;
             hits = painted.rail;
             panel_hits = painted.panel;
+            preview = painted.preview;
         })?;
         if app.should_quit {
             return Ok(());
@@ -789,7 +793,7 @@ async fn event_loop(
                         // query per keystroke, which is what the comparison
                         // buys.
                         let asked = app.rail.query(app.conversation.clone());
-                        match on_key(&mut app, &mut thread, key, viewport) {
+                        match on_key(&mut app, &mut thread, key, viewport, preview) {
                             // The editor takes the terminal, so it can only be
                             // done from here — with the same discipline as
                             // `enter`/`restore`, panic hook included.
@@ -829,6 +833,7 @@ async fn event_loop(
                                     viewport = painted.viewport;
                                     hits = painted.rail;
                                     panel_hits = painted.panel;
+                                    preview = painted.preview;
                                 })?;
                                 perform(&jod, &mut app, &opts, &mut thread, action).await
                             }
@@ -841,7 +846,6 @@ async fn event_loop(
                         // almost always.
                         refresh_mention(&jod, &mut app);
                         refresh_search(&jod, &mut app);
-                        refresh_sessions(&jod, &mut app);
                     }
                     // The pointer. The rail claims the events that land on it —
                     // a click answers a card, and the wheel walks the stack or
@@ -3162,7 +3166,13 @@ fn short(id: &str) -> String {
 /// are in: an **overlay** owns the keyboard while it is up, a **workspace**
 /// makes letters into commands, and **chat** makes them text again. Quitting is
 /// ahead of all three, because a key that cannot always leave is a trap.
-fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) -> Option<Action> {
+fn on_key(
+    app: &mut App,
+    thread: &mut Thread,
+    key: KeyEvent,
+    viewport: usize,
+    preview: ui::Preview,
+) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -3198,8 +3208,8 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
     if alt && matches!(key.code, KeyCode::Char(_)) {
         return None;
     }
-    // Tab and Shift-Tab, on every screen, because they answer two questions you
-    // have everywhere: how much may this thing do, and what else is running.
+    // Tab and Shift-Tab, on every screen, because they answer questions you have
+    // everywhere: how much may this thing do, and what else is running.
     //
     // Tab defers to the completion popup, which owns it while it is up — one
     // key doing two jobs is only safe while the layer that has it is visible,
@@ -3214,7 +3224,19 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
             app.sync_focus();
             return None;
         }
+        // On the fleet it moves between the panes instead of cycling the mode.
+        //
+        // The fleet is the one screen drawn as three boxes sharing a single
+        // cursor, and until now the only way from the tree into the runs below
+        // it was `↓` through every project and every session above them. That
+        // is the complaint this answers, and the mode is not what the key is
+        // worth there: it is set from the chat, where it applies to the next
+        // thing you say, and it stays on `⇥` everywhere else.
         KeyCode::Tab if command::completions(&app.input, app).is_empty() => {
+            if app.workspace == Workspace::Fleet {
+                app.next_pane(preview.rows > 0);
+                return None;
+            }
             let said = app.cycle_mode();
             if app.workspace == Workspace::Chat {
                 app.push(Entry::Notice(said));
@@ -3242,7 +3264,7 @@ fn on_key(app: &mut App, thread: &mut Thread, key: KeyEvent, viewport: usize) ->
         return on_catalog_key(app, key);
     }
     if app.workspace.is_list() {
-        return on_workspace_key(app, key, viewport);
+        return on_workspace_key(app, key, viewport, preview);
     }
     on_chat_key(app, thread, key, viewport)
 }
@@ -3956,43 +3978,6 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
     }
 
-    // The session list owns every key while it is up, for the same reason
-    // search does: it is a line being typed into plus a cursor, and a bare `s`
-    // in it must narrow the list rather than stop a run. Its rows come from the
-    // loop — `refresh_sessions` — because this function does no I/O.
-    if let Overlay::Sessions(browser) = &mut app.overlay {
-        match key.code {
-            KeyCode::Char(c) => {
-                browser.push(c);
-                return None;
-            }
-            KeyCode::Backspace => {
-                browser.pop();
-                return None;
-            }
-            KeyCode::Up => {
-                browser.up();
-                return None;
-            }
-            KeyCode::Down => {
-                browser.down();
-                return None;
-            }
-            // Go into the conversation, which is the whole point: finding the
-            // thread is not the job, carrying on with it is.
-            KeyCode::Enter => {
-                let chosen = browser.chosen().cloned();
-                app.overlay = Overlay::None;
-                return chosen.and_then(|row| continue_session(app, &row));
-            }
-            KeyCode::Esc => {
-                app.overlay = Overlay::None;
-                return None;
-            }
-            _ => return None,
-        }
-    }
-
     // The full-screen picker, which owns every key while it is up for the same
     // reason the `@` popup does: it is a line being typed into plus a cursor.
     if let Overlay::Picker(p) = &mut app.overlay {
@@ -4114,7 +4099,6 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // falling through keeps an unexpected state from stranding the
         // keyboard in an overlay nothing dismisses.
         Overlay::Search { .. }
-        | Overlay::Sessions(_)
         | Overlay::Picker(_)
         | Overlay::Secret { .. }
         | Overlay::Prompt { .. }
@@ -4123,40 +4107,6 @@ fn on_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             None
         }
     }
-}
-
-/// Carry on with the conversation picked off the session list.
-///
-/// The same three writes `r` on the fleet makes, because it is the same act
-/// reached from a different handle: the fleet resumes the run under the cursor,
-/// and this resumes a thread that may have no run on screen at all. The harness
-/// is set from the row rather than left alone — a Claude session handed to
-/// OpenCode is not a resume, it is a fresh conversation wearing the wrong id.
-///
-/// A conversation the harness never named is refused out loud. Passing `None`
-/// through would silently start a new session under the title of an old one,
-/// which is the one outcome someone who came here to *go back* to something
-/// cannot check.
-fn continue_session(app: &mut App, row: &sessions::SessionRow) -> Option<Action> {
-    let Some(session) = row.session_id.clone() else {
-        app.push(Entry::Notice(format!(
-            "{} never reported a conversation, so there is nothing to continue — \
-             ⏎ on it would start a fresh one",
-            row.short
-        )));
-        return None;
-    };
-    app.go(Workspace::Chat);
-    app.resume = Resume::Session(session.clone());
-    app.session = Some(session);
-    app.harness_from_label(&row.harness);
-    app.push(Entry::Notice(format!(
-        "next turn continues “{}” — type to carry on",
-        row.title
-    )));
-    // Out of whatever the chat box was bound to, for the reason `/resume` does
-    // the same: the next turn belongs to this thread now.
-    Some(Action::NewThread)
 }
 
 /// Stop looking at what is on screen and go back to the fleet.
@@ -4265,18 +4215,6 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.overlay = Overlay::Jobs;
             None
         }
-        // Every conversation you could go back into. `r` for *resume*, which is
-        // the word the command line already uses for this and the word for what
-        // pressing ⏎ on a row does — `s` is schedules and `c` is chat, so the
-        // two letters the subject is named after were both spoken for.
-        //
-        // Behind the leader rather than on a chord because it is a destination,
-        // and that is the rule the eleven free Ctrl letters were spent under.
-        // See `keys.rs`'s module header.
-        'r' => {
-            app.overlay = Overlay::Sessions(sessions::Browser::default());
-            None
-        }
         // Only meaningful once cron, goals and webhooks report endings while
         // nobody is at the terminal.
         'u' => {
@@ -4343,7 +4281,12 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 }
 
 /// Keys while a workspace owns the keyboard.
-fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Action> {
+fn on_workspace_key(
+    app: &mut App,
+    key: KeyEvent,
+    viewport: usize,
+    preview: ui::Preview,
+) -> Option<Action> {
     let ws = app.workspace;
     if ws == Workspace::MemoryGraph {
         return on_graph_key(app, key);
@@ -4387,6 +4330,23 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
     // — `/`, `S`, `?`, a digit — falls through to the spine as before, which is
     // what keeps the fleet's filter line the one the tree reads its needle
     // from.
+    // The preview, while it has the keyboard. Before the tree and before the
+    // spine, because the two keys it takes — `↑` and `↓` — are the two the rows
+    // below would otherwise answer, and a pane you have focused that still
+    // moves the selection out from under you is a pane you cannot read.
+    //
+    // Only those keys and the two ways out. Everything else falls through, so
+    // `s` still stops the run the preview is describing.
+    //
+    // And only while the pane was actually drawn. The flag survives leaving the
+    // screen and coming back to a narrower terminal, where there is no preview
+    // at all — and a pane nobody can see holding `↑` and `↓` is a fleet whose
+    // cursor has stopped moving for no visible reason.
+    if ws == Workspace::Fleet && app.preview_focused && preview.rows > 0 {
+        if let Some(action) = on_preview_key(app, key, preview) {
+            return action;
+        }
+    }
     if ws == Workspace::Fleet && app.has_tree() {
         if let Some(action) = on_tree_key(app, key, viewport) {
             return action;
@@ -4478,6 +4438,39 @@ fn on_workspace_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Act
         Workspace::Traffic => on_traffic_key(app, key),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
+}
+
+/// The preview pane's keys, while `⇥` has given it the keyboard.
+///
+/// `Some` means the pane took the key, on the same terms as [`on_tree_key`]: a
+/// key it does not know falls through to the row verbs, so the run being read
+/// can still be stopped, resumed or delegated again without tabbing back.
+///
+/// Both ends are clamped against the frame that was actually drawn rather than
+/// against a guess — `shape` comes back out of `ui::draw` — so `End` lands on
+/// the last line of a nine-line pane and of a nine-hundred-line one, and `↓` at
+/// the bottom does nothing instead of scrolling into blank space.
+fn on_preview_key(app: &mut App, key: KeyEvent, shape: ui::Preview) -> Option<Option<Action>> {
+    let last = shape.max_scroll();
+    // One row short of the pane, so the line you were reading is still on
+    // screen after the page turns. That is the same overlap the transcript's
+    // own paging keeps.
+    let page = shape.rows.saturating_sub(1).max(1) as u16;
+    let at = app.preview_scroll.min(last);
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => app.preview_scroll = at.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => app.preview_scroll = (at + 1).min(last),
+        KeyCode::PageUp => app.preview_scroll = at.saturating_sub(page),
+        KeyCode::PageDown => app.preview_scroll = at.saturating_add(page).min(last),
+        KeyCode::Home => app.preview_scroll = 0,
+        KeyCode::End => app.preview_scroll = last,
+        // The short way out. `⇥` also leaves, by going round the rest of the
+        // cycle; this is the one for when you are done reading and want the
+        // rows back where they were.
+        KeyCode::Esc => app.leave_preview(),
+        _ => return None,
+    }
+    Some(None)
 }
 
 /// The traffic log's own verbs.
@@ -5170,24 +5163,11 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
         // ---- the conversation graph ------------------------------------
         //
-        // Five keys, and only the first is about the *list*. The other four are
-        // about the run under the cursor, because that is the handle this
-        // screen already has: a fleet row is a run, `Store::conversation_for_run`
-        // turns one into a thread, and `sessions::resolve` makes that the
-        // caller's problem instead of this function's.
-        //
-        // `c` opens the session list — every conversation, with a cursor on it.
-        //
-        // It used to print the same list into the transcript, which was a list
-        // you could read and not a list you could use: the fleet's rows are
-        // *runs*, so the only way from here back into a thread that no longer
-        // has a run on screen was to read an id off the printout and type
-        // `/resume` at it. The overlay is the same rows with the last step
-        // joined on.
-        KeyCode::Char('c') => {
-            app.overlay = Overlay::Sessions(sessions::Browser::default());
-            None
-        }
+        // Every key below is about the run under the cursor, because that is
+        // the handle this screen already has: a fleet row is a run,
+        // `Store::conversation_for_run` turns one into a thread, and
+        // `sessions::resolve` makes that the caller's problem instead of this
+        // function's.
         // `b` — the branches of the selected run's thread: the turns, which one
         // the head is on, and every leaf a revert left behind, each named.
         KeyCode::Char('b') => Some(Action::Sessions(sessions::Request::Open(
@@ -6111,11 +6091,6 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 }
             }
         }
-        // The session list itself, rather than directions to it. This used to
-        // send you to the fleet with an instruction to read an id off a row and
-        // type it back — which is a way in only for someone who already knows
-        // which of fifty threads they want.
-        Slash::Sessions => app.overlay = Overlay::Sessions(sessions::Browser::default()),
         Slash::Resume(id) => match app.resolve_session(&id) {
             app::Resolved::Session(session) => {
                 app.resume = Resume::Session(session.clone());
@@ -7174,35 +7149,6 @@ fn refresh_search(jod: &Arc<Jod>, app: &mut App) {
 /// its own right; the number here is what fits on a screen worth reading.
 const SEARCH_HITS: usize = 40;
 
-/// Fill the session list, once, the first time it is opened.
-///
-/// Once rather than on every keystroke, which is the difference between this
-/// and [`refresh_search`]: the search box asks the store a new question with
-/// each letter, while the session list already holds every row and the typing
-/// only narrows what is drawn. Loading again per keystroke would re-run a tip
-/// query per conversation for a filter that needs no database at all.
-///
-/// Left alone entirely while the overlay is shut, which is almost always.
-fn refresh_sessions(jod: &Arc<Jod>, app: &mut App) {
-    let Overlay::Sessions(browser) = &app.overlay else {
-        return;
-    };
-    if browser.loaded {
-        return;
-    }
-    // `LIST_LIMIT` rather than a number of this screen's own: it is also what
-    // `sessions::resolve` matches an id against, and a list that showed a
-    // fifty-first thread would offer a row nothing else in the module can find.
-    let rows = match jod.store() {
-        Some(store) => sessions::session_rows(store.as_ref(), sessions::LIST_LIMIT),
-        None => Vec::new(),
-    };
-    if let Overlay::Sessions(browser) = &mut app.overlay {
-        browser.rows = rows;
-        browser.loaded = true;
-    }
-}
-
 fn refresh_mention(jod: &Arc<Jod>, app: &mut App) {
     if app.mention.is_none() {
         return;
@@ -7995,6 +7941,7 @@ mod tests {
                 &mut thread,
                 KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
                 20,
+                ui::Preview::default(),
             );
         }
         assert_eq!(app.input, "hello", "not \"/model hello\"");
@@ -8005,6 +7952,7 @@ mod tests {
             &mut thread,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             20,
+            ui::Preview::default(),
         );
         assert_eq!(
             action,
@@ -9150,6 +9098,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::NONE),
             20,
+            ui::Preview::default(),
         )
     }
 
@@ -9674,6 +9623,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::CONTROL),
             20,
+            ui::Preview::default(),
         )
     }
 
@@ -9683,6 +9633,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::ALT),
             20,
+            ui::Preview::default(),
         )
     }
 
@@ -9949,18 +9900,18 @@ mod tests {
         }
     }
 
-    /// The list's own verbs still work with the cursor on the pinned row —
-    /// `c` especially, which is the way out of a fleet holding nothing else.
+    /// The screen's own verbs still work with the cursor on the pinned row. The
+    /// row verbs need a run and refuse without one, but sorting the list is the
+    /// screen's rather than the row's, and a pinned row that disabled it would
+    /// make an empty fleet a screen nothing works on.
     #[test]
     fn the_pinned_row_does_not_disable_the_screen_it_sits_on() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.go(Workspace::Fleet);
         assert!(app.main_selected(), "an empty fleet selects the chat");
-        assert_eq!(press(&mut app, KeyCode::Char('c')), None);
-        assert!(
-            matches!(app.overlay, Overlay::Sessions(_)),
-            "`c` opens the session list from the pinned row too"
-        );
+        let was = app.here().sort;
+        assert_eq!(press(&mut app, KeyCode::Char('S')), None);
+        assert_ne!(app.here().sort, was, "`S` sorts from the pinned row too");
     }
 
     /// Opening the fleet means managing the work, so the cursor starts on the
@@ -12752,7 +12703,13 @@ mod tests {
     /// box is bound to. The throwaway `Thread` the ordinary helper mints is
     /// bound to nothing, which is exactly the state these are contrasting with.
     fn press_in(app: &mut App, thread: &mut Thread, code: KeyCode) -> Option<Action> {
-        on_key(app, thread, KeyEvent::new(code, KeyModifiers::NONE), 20)
+        on_key(
+            app,
+            thread,
+            KeyEvent::new(code, KeyModifiers::NONE),
+            20,
+            ui::Preview::default(),
+        )
     }
 
     /// Check 16. `⏎` on a manager row goes *into* that conversation, the same
@@ -13867,6 +13824,301 @@ mod tests {
         );
     }
 
+    // ---- the fleet's three panes ----
+    //
+    // The tree, the runs that belong to no work under it, and the preview
+    // beside them. They share one cursor — see `App::tree_rows` — which is why
+    // reaching the loose pane used to mean walking `↓` through every project
+    // and every session above it. `⇥` moves the keyboard between them instead.
+
+    /// A fleet with both halves of the left column populated: a project with a
+    /// work under it, and a run belonging to neither.
+    fn fleet_with_a_loose_run() -> App {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        let node = |id: NodeId, parent, kind, depth, label: &str| Node {
+            id,
+            parent,
+            kind,
+            depth,
+            label: label.into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            stalled: 0,
+            colour: "cyan".into(),
+            branch: None,
+            worktree: None,
+            expanded: true,
+            has_children: kind == NodeKind::Project,
+        };
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.forest = vec![
+            node(NodeId::project("p1"), None, NodeKind::Project, 0, "tetris"),
+            node(
+                NodeId::work("w1"),
+                Some(NodeId::project("p1")),
+                NodeKind::Work,
+                1,
+                "port the parser",
+            ),
+        ];
+        // In no work, so the tree has no node for it and the pane below draws
+        // it. That is the row `⇥` exists to reach.
+        app.agents = vec![agent_line("loose-1", None)];
+        app.go(Workspace::Fleet);
+        app.reconcile();
+        // A project is shut until it is opened, so the work under it is not a
+        // row until this — and a cursor parked on a hidden row is not the case
+        // any of these tests are about.
+        app.tree.opened.insert(NodeId::project("p1"));
+        app.tree.selected = Some(NodeId::work("w1"));
+        app
+    }
+
+    /// A screen wide enough to have drawn a preview, which `press` cannot say:
+    /// it hands the handler a default shape, and a shape of no rows is how the
+    /// frame reports that the terminal was too narrow to draw one.
+    const WIDE: ui::Preview = ui::Preview { rows: 10, lines: 30 };
+
+    fn tab(app: &mut App) {
+        on_key(
+            app,
+            &mut Thread::default(),
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            20,
+            WIDE,
+        );
+    }
+
+    /// The whole point of the key: one press from the tree into the pane below
+    /// it, whatever is in between, and one more back to the row it left.
+    #[test]
+    fn tab_walks_the_fleet_panes_and_comes_back_to_the_row_it_left() {
+        use jod_core::tree::NodeId;
+        let mut app = fleet_with_a_loose_run();
+        assert!(app.has_tree());
+        assert_eq!(app.loose_rows().len(), 1, "there is a loose run to reach");
+
+        tab(&mut app);
+        assert_eq!(
+            app.loose_selected(),
+            Some(0),
+            "one press leaves the tree for the pane below it"
+        );
+
+        tab(&mut app);
+        assert!(app.preview_focused, "the next stop is the preview");
+        assert_eq!(
+            app.loose_selected(),
+            Some(0),
+            "and the cursor stays put, so the preview still describes that run"
+        );
+
+        tab(&mut app);
+        assert!(!app.preview_focused);
+        assert_eq!(
+            app.tree.selected,
+            Some(NodeId::work("w1")),
+            "back on the row the first press left, not on the top of the tree"
+        );
+    }
+
+    /// A pane with nothing in it is not a stop. The loose pane is empty on most
+    /// fleets, and a `⇥` that landed there would look like a key that does
+    /// nothing every other press.
+    #[test]
+    fn tab_skips_a_loose_pane_that_has_no_runs_in_it() {
+        let mut app = fleet_with_a_loose_run();
+        app.agents.clear();
+        app.reconcile();
+
+        tab(&mut app);
+        assert!(app.preview_focused, "the tree's next stop is the preview");
+        tab(&mut app);
+        assert!(!app.preview_focused, "and then the tree again");
+    }
+
+    /// Below 90 columns the preview is not drawn at all. `⇥` is told so by the
+    /// frame rather than working it out again, so it stops on the two panes
+    /// that are there.
+    #[test]
+    fn a_terminal_too_narrow_for_a_preview_has_no_third_stop() {
+        let mut app = fleet_with_a_loose_run();
+        let narrow = |app: &mut App| {
+            on_key(
+                app,
+                &mut Thread::default(),
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                20,
+                ui::Preview::default(),
+            )
+        };
+
+        narrow(&mut app);
+        assert_eq!(app.loose_selected(), Some(0));
+        narrow(&mut app);
+        assert!(!app.preview_focused, "there is no preview to focus");
+        assert_eq!(app.loose_selected(), None, "so it goes back to the tree");
+    }
+
+    /// Everywhere else `⇥` still cycles how much the next turn may do. The mode
+    /// is set from the chat, where it applies to the thing you are about to
+    /// say, and taking the key away there would be a trade nobody asked for.
+    #[test]
+    fn tab_still_cycles_the_mode_off_the_fleet() {
+        for ws in [Workspace::Chat, Workspace::Memory, Workspace::Tasks] {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.go(ws);
+            let was = app.mode;
+            assert_eq!(press(&mut app, KeyCode::Tab), None, "{ws:?}");
+            assert_ne!(app.mode, was, "{ws:?}");
+        }
+    }
+
+    /// A pane of thirty lines in a box ten rows tall, so there is something to
+    /// scroll and an end to reach.
+    fn reading(lines: usize, rows: usize) -> (App, ui::Preview) {
+        let mut app = fleet_with_a_loose_run();
+        // Where `⇥` twice puts you: the cursor on the loose run, the keyboard
+        // in the pane describing it.
+        tab(&mut app);
+        tab(&mut app);
+        assert!(app.preview_focused);
+        (app, ui::Preview { rows, lines })
+    }
+
+    fn scroll(app: &mut App, shape: ui::Preview, code: KeyCode) {
+        on_key(
+            app,
+            &mut Thread::default(),
+            KeyEvent::new(code, KeyModifiers::NONE),
+            20,
+            shape,
+        );
+    }
+
+    /// What the focused preview is for: reading a run's last message without
+    /// the selection moving out from under it.
+    #[test]
+    fn the_focused_preview_scrolls_and_stops_at_both_ends() {
+        let (mut app, shape) = reading(30, 10);
+
+        scroll(&mut app, shape, KeyCode::Down);
+        scroll(&mut app, shape, KeyCode::Down);
+        assert_eq!(app.preview_scroll, 2);
+        assert_eq!(
+            app.loose_selected(),
+            Some(0),
+            "and `↓` did not walk the cursor off the row being described"
+        );
+
+        scroll(&mut app, shape, KeyCode::Up);
+        assert_eq!(app.preview_scroll, 1);
+
+        for _ in 0..50 {
+            scroll(&mut app, shape, KeyCode::Down);
+        }
+        assert_eq!(
+            app.preview_scroll, 20,
+            "the last line comes to the bottom of the pane and stops there"
+        );
+        for _ in 0..50 {
+            scroll(&mut app, shape, KeyCode::Up);
+        }
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    /// `Home` and `End` reach the ends in one press, and a page keeps one row
+    /// of overlap so the line you were reading survives the turn.
+    #[test]
+    fn the_preview_pages_and_jumps_to_its_ends() {
+        let (mut app, shape) = reading(30, 10);
+
+        scroll(&mut app, shape, KeyCode::End);
+        assert_eq!(app.preview_scroll, 20);
+        scroll(&mut app, shape, KeyCode::Home);
+        assert_eq!(app.preview_scroll, 0);
+
+        scroll(&mut app, shape, KeyCode::PageDown);
+        assert_eq!(app.preview_scroll, 9);
+        scroll(&mut app, shape, KeyCode::PageUp);
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    /// A pane shorter than its box has nothing to scroll, and `↓` in it has to
+    /// do nothing rather than push the content off the top.
+    #[test]
+    fn a_preview_that_fits_does_not_scroll() {
+        let (mut app, shape) = reading(4, 10);
+
+        scroll(&mut app, shape, KeyCode::Down);
+        scroll(&mut app, shape, KeyCode::End);
+
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    /// The pane takes two keys, not the keyboard. Reading what a run said and
+    /// then stopping it is one gesture, and tabbing back out first would be a
+    /// step that exists only because of how this is implemented.
+    #[test]
+    fn a_key_the_preview_does_not_know_still_reaches_the_run() {
+        let (mut app, shape) = reading(30, 10);
+        scroll(&mut app, shape, KeyCode::Tab);
+        assert!(!app.preview_focused, "`⇥` is the pane's, and it moves on");
+
+        let (mut app, shape) = reading(30, 10);
+        assert_eq!(
+            on_key(
+                &mut app,
+                &mut Thread::default(),
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                20,
+                shape,
+            ),
+            Some(Action::Delegate("work".into())),
+            "`d` still delegates the run the preview is describing"
+        );
+    }
+
+    /// The flag outlives the frame that set it: leave the fleet, narrow the
+    /// window, come back, and the pane it points at is not being drawn. The
+    /// rows have to keep the cursor keys in that state or the screen looks
+    /// stuck.
+    #[test]
+    fn a_preview_that_is_not_on_screen_does_not_hold_the_cursor_keys() {
+        let (mut app, _) = reading(30, 10);
+        let before = app.tree.selected.clone();
+
+        on_key(
+            &mut app,
+            &mut Thread::default(),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            20,
+            ui::Preview::default(),
+        );
+
+        assert_eq!(app.preview_scroll, 0, "nothing was scrolled");
+        assert_ne!(app.tree.selected, before, "the cursor moved instead");
+    }
+
+    /// `Esc` is the short way out. It gives the rows the keyboard back and
+    /// leaves the screen alone — on a screen whose `Esc` otherwise goes back to
+    /// the chat, which is not what someone finished reading a pane wants.
+    #[test]
+    fn escape_leaves_the_preview_rather_than_the_screen() {
+        let (mut app, shape) = reading(30, 10);
+        scroll(&mut app, shape, KeyCode::End);
+
+        scroll(&mut app, shape, KeyCode::Esc);
+
+        assert!(!app.preview_focused);
+        assert_eq!(app.preview_scroll, 0, "and the next read starts at the top");
+        assert_eq!(app.workspace, Workspace::Fleet, "the screen is still here");
+    }
+
     // ---- the conversation graph, from the fleet ----
 
     fn on_fleet_with_a_run() -> App {
@@ -14018,8 +14270,7 @@ mod tests {
     }
 
     /// The run under the cursor is what these act on, so with no cursor they
-    /// must do nothing — not act on a thread the user cannot see. `c` is the
-    /// exception by design: the list is the way *out* of an empty fleet.
+    /// must do nothing — not act on a thread the user cannot see.
     #[test]
     fn a_conversation_verb_with_no_run_selected_does_nothing_at_all() {
         for key in ['b', 'u', 'U', 'f', 't', 'm'] {
@@ -14027,132 +14278,6 @@ mod tests {
             app.go(Workspace::Fleet);
             assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");
         }
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.go(Workspace::Fleet);
-        assert_eq!(press(&mut app, KeyCode::Char('c')), None);
-        assert!(matches!(app.overlay, Overlay::Sessions(_)));
-    }
-
-    // ---- the session list ----
-    //
-    // The fleet lists runs and the chat is one conversation, so from either
-    // one there was no way to reach the list of every thread and pick one:
-    // `/sessions` printed directions to the fleet, and the fleet printed ids
-    // to type back into `/resume`. These cover the three routes in and what
-    // choosing a row does.
-
-    fn a_session(title: &str, session: Option<&str>) -> sessions::SessionRow {
-        sessions::SessionRow {
-            id: format!("conv-{title}"),
-            short: format!("conv-{title}"),
-            title: title.to_string(),
-            harness: "claude".to_string(),
-            model: None,
-            session_id: session.map(str::to_string),
-            messages: 4,
-            updated_at_ms: 0,
-            forked_from: None,
-            abandoned: 0,
-        }
-    }
-
-    /// On `ws` with one row loaded and the cursor on it, so `⏎` has something
-    /// to land on without the loop having run.
-    ///
-    /// The workspace is set before the overlay because `App::go` closes
-    /// whatever is open — going somewhere is how you leave an overlay.
-    fn holding(ws: Workspace, row: sessions::SessionRow) -> App {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.go(ws);
-        app.overlay = Overlay::Sessions(sessions::Browser {
-            rows: vec![row],
-            loaded: true,
-            ..Default::default()
-        });
-        app
-    }
-
-    #[test]
-    fn the_session_list_opens_from_the_fleet_the_chat_and_the_menu() {
-        let mut from_fleet = app_on(HarnessKind::ClaudeCode);
-        from_fleet.go(Workspace::Fleet);
-        press(&mut from_fleet, KeyCode::Char('c'));
-        assert!(matches!(from_fleet.overlay, Overlay::Sessions(_)), "`c`");
-
-        let mut typed = app_on(HarnessKind::ClaudeCode);
-        apply_slash(&mut typed, command::Slash::Sessions);
-        assert!(matches!(typed.overlay, Overlay::Sessions(_)), "/sessions");
-
-        // From the chat, where every bare letter is text, so the leader is the
-        // only route that can exist.
-        let mut from_chat = app_on(HarnessKind::ClaudeCode);
-        ctrl(&mut from_chat, KeyCode::Char('g'));
-        press(&mut from_chat, KeyCode::Char('r'));
-        assert!(matches!(from_chat.overlay, Overlay::Sessions(_)), "Ctrl-G r");
-    }
-
-    /// The point of the whole screen: choosing a row aims the next turn at that
-    /// conversation, rather than printing it back at you.
-    #[test]
-    fn choosing_a_session_points_the_next_turn_at_it() {
-        let mut app = holding(Workspace::Fleet, a_session("port the parser", Some("sess-abc")));
-
-        assert_eq!(press(&mut app, KeyCode::Enter), Some(Action::NewThread));
-
-        assert_eq!(app.resume, Resume::Session("sess-abc".into()));
-        assert_eq!(app.session.as_deref(), Some("sess-abc"));
-        assert_eq!(app.workspace, Workspace::Chat, "and it takes you there");
-        assert_eq!(app.overlay, Overlay::None);
-        let said = format!("{:?}", app.transcript);
-        assert!(said.contains("port the parser"), "{said}");
-    }
-
-    /// A fork does not inherit its parent's harness session — `Store` says so
-    /// in as many words — so a row can have no id to resume from. Starting a
-    /// fresh session under the old title would be the one failure the person
-    /// who came here to go back to something could not spot.
-    #[test]
-    fn choosing_a_session_the_harness_never_named_refuses_out_loud() {
-        let mut app = holding(Workspace::Chat, a_session("a fresh fork", None));
-
-        assert_eq!(press(&mut app, KeyCode::Enter), None);
-
-        assert_eq!(app.resume, Resume::Fresh, "nothing was pointed anywhere");
-        let said = format!("{:?}", app.transcript);
-        assert!(said.contains("nothing to continue"), "{said}");
-    }
-
-    /// While the list is up it owns the keyboard, letters and all — otherwise
-    /// typing the name of a thread would stop a run behind it.
-    #[test]
-    fn typing_in_the_session_list_narrows_it_rather_than_running_a_verb() {
-        let mut app = holding(Workspace::Fleet, a_session("port the parser", Some("sess-abc")));
-        app.agents = vec![agent_line("run-7", None)];
-        app.reconcile();
-
-        for key in ['s', 'p', 'o'] {
-            assert_eq!(press(&mut app, KeyCode::Char(key)), None, "`{key}`");
-        }
-
-        let Overlay::Sessions(browser) = &app.overlay else {
-            panic!("the list is still up: {:?}", app.overlay);
-        };
-        assert_eq!(
-            browser.query, "spo",
-            "the letters went into the filter, and `s` in particular did not \
-             stop the run behind the list"
-        );
-    }
-
-    #[test]
-    fn escape_closes_the_session_list_and_leaves_the_screen_alone() {
-        let mut app = holding(Workspace::Fleet, a_session("port the parser", Some("sess-abc")));
-
-        assert_eq!(press(&mut app, KeyCode::Esc), None);
-
-        assert_eq!(app.overlay, Overlay::None);
-        assert_eq!(app.workspace, Workspace::Fleet);
-        assert_eq!(app.resume, Resume::Fresh);
     }
 
     /// The five letters must stay letters everywhere they are not verbs. `f`

@@ -23,7 +23,6 @@ use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::RailState;
 use super::secret::Typed;
-use super::sessions::Browser;
 use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
@@ -239,14 +238,6 @@ pub enum Overlay {
         /// store. Empty until the first keystroke has been searched for.
         hits: Vec<Hit>,
     },
-    /// Every conversation you could go back into, as a list with a cursor.
-    ///
-    /// An overlay for the same reason [`Overlay::Search`] is one: it is a way
-    /// *to* somewhere. The fleet lists runs and the chat is one conversation,
-    /// so neither of them is the place to keep this — and until it existed,
-    /// getting back into an old session from either screen meant already
-    /// knowing its id. See [`super::sessions::Browser`].
-    Sessions(Browser),
 }
 
 /// What a tier-1 prompt is collecting.
@@ -814,6 +805,33 @@ pub struct App {
     /// this is where `s`, `a` and `t` find the process to act on.
     pub run_of: HashMap<NodeId, String>,
     pub tree: TreeState,
+
+    // ---- the fleet's panes ----------------------------------------------
+    /// Whether the pane beside the rows has the keyboard rather than the rows
+    /// themselves.
+    ///
+    /// The fleet draws three panes and they used to share one cursor and one
+    /// set of keys, so the only way from the tree to the runs below it was to
+    /// walk down through every project and every session above them. `⇥` moves
+    /// the keyboard between the three instead — see [`App::next_pane`] — and
+    /// this is the third stop, where `↑` and `↓` scroll what is being read
+    /// rather than moving the selection out from under it.
+    pub preview_focused: bool,
+    /// How far the preview is scrolled, in lines from the top.
+    ///
+    /// Reset whenever the keyboard enters or leaves the pane, so a long run's
+    /// output never opens halfway down. The renderer clamps it again to what
+    /// the pane actually drew, because the content changes between frames while
+    /// this number does not.
+    pub preview_scroll: u16,
+    /// The tree row the cursor was on when `⇥` moved it down into the loose
+    /// pane, so the next `⇥` can put it back where it was.
+    ///
+    /// Needed because the two panes share one cursor — see [`App::tree_rows`].
+    /// Without it, coming back up from the loose pane would land on the first
+    /// row of the tree, and a cycle of three panes that loses your place on
+    /// every lap is one people use once.
+    pub tree_mark: Option<NodeId>,
 
     // ---- the traffic log ------------------------------------------------
     /// Which scope's bus the traffic screen is reading, or `None` before one
@@ -1402,6 +1420,9 @@ impl App {
             tree_runs: HashSet::new(),
             run_of: HashMap::new(),
             tree: TreeState::default(),
+            preview_focused: false,
+            preview_scroll: 0,
+            tree_mark: None,
             traffic_of: None,
             traffic: traffic::Log::default(),
             traffic_shown: traffic::Shown::Everything,
@@ -1475,6 +1496,79 @@ impl App {
             return None;
         }
         self.loose_rows().iter().position(|a| a.id == id.id)
+    }
+
+    /// Hand the keyboard to the fleet's next pane: the tree, then the runs that
+    /// belong to no work, then the preview beside them, then the tree again.
+    ///
+    /// This is what `⇥` does on the fleet, and it is the answer to the one
+    /// complaint the screen kept earning: the tree and the pane under it share
+    /// a single cursor, so reaching a loose run meant walking down through every
+    /// project, every session and every row of the tree above it. Now it is one
+    /// keypress, and one more comes back to the row you left.
+    ///
+    /// `has_preview` is whether the frame just drawn had a preview pane at all —
+    /// below 90 columns it does not — because a stop on a pane nobody can see is
+    /// a keypress that appears to do nothing.
+    ///
+    /// A fleet with no tree has two panes rather than three: its flat list, and
+    /// the preview beside it.
+    pub fn next_pane(&mut self, has_preview: bool) {
+        self.preview_scroll = 0;
+        if self.preview_focused {
+            self.preview_focused = false;
+            self.back_into_the_tree();
+            return;
+        }
+        if !self.has_tree() {
+            self.preview_focused = has_preview;
+            return;
+        }
+        if self.loose_selected().is_some() {
+            if has_preview {
+                self.preview_focused = true;
+            } else {
+                self.back_into_the_tree();
+            }
+            return;
+        }
+        // In the tree. The loose pane is the next stop when it has rows, and
+        // when it has none the preview is — a screen that stopped on an empty
+        // box would spend a keypress on nothing.
+        let first = self.loose_rows().first().map(|a| loose_id(&a.id));
+        match first {
+            Some(first) => {
+                self.tree_mark = self.tree.selected.clone();
+                self.tree.selected = Some(first);
+            }
+            None => self.preview_focused = has_preview,
+        }
+    }
+
+    /// Give the rows the keyboard back, without moving the cursor.
+    ///
+    /// `Esc` in the preview, which is the way out that does not have to go all
+    /// the way round the cycle.
+    pub fn leave_preview(&mut self) {
+        self.preview_focused = false;
+        self.preview_scroll = 0;
+    }
+
+    /// Put the cursor back on the tree row it left when `⇥` sent it down into
+    /// the loose pane.
+    ///
+    /// Does nothing when the cursor is already in the tree, which is the case
+    /// on every fleet that has no loose runs to visit.
+    fn back_into_the_tree(&mut self) {
+        if self.loose_selected().is_none() {
+            return;
+        }
+        let rows = self.tree_rows();
+        let back = self
+            .tree_mark
+            .take()
+            .filter(|id| !is_loose(id) && rows.contains(id));
+        self.tree.selected = back.or_else(|| rows.first().cloned());
     }
 
     /// Whether the tree's cursor is on the pinned chat rather than on a node.
@@ -2147,8 +2241,9 @@ impl App {
     /// Say one line over the current screen rather than in the conversation.
     ///
     /// Lines raised on the same animation frame are one answer and collect into
-    /// one flash — `Action::Sessions` pushes the session list a row at a time,
-    /// and fifty flashes each replacing the last would show only the last row.
+    /// one flash — `Action::Sessions` pushes a conversation's turns a row at a
+    /// time, and fifty flashes each replacing the last would show only the last
+    /// row.
     /// A later keypress is at least one tick away and starts a fresh one.
     pub fn notify(&mut self, line: String) {
         match &mut self.flash {
@@ -3723,7 +3818,7 @@ mod tests {
     }
 
     /// `Action::Sessions` pushes its answer one row at a time. Each replacing
-    /// the last would show the fiftieth conversation and none of the other
+    /// the last would show the fiftieth turn of a thread and none of the other
     /// forty-nine.
     #[test]
     fn every_line_of_one_answer_collects_into_one_flash() {
