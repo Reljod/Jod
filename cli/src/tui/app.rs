@@ -573,10 +573,20 @@ pub struct App {
     /// is not a failure.
     pub interrupting: Option<String>,
     pub agents: Vec<AgentLine>,
-    /// Prompts typed while the watched conversation was still working. They are
-    /// sent in order as the turn ends, so thinking ahead is not punished by
-    /// having to wait with a finished sentence in your hands.
-    pub queued: Vec<String>,
+    /// How many messages typed into this conversation are still waiting.
+    ///
+    /// **A count, not the messages.** They live in the store's
+    /// `pending_deliveries` — see `jod_core::delivery` — and they have to,
+    /// because an assistant reads them there and decides whether they can wait
+    /// for the turn to end. A `Vec<String>` here was a second queue only this
+    /// screen could see: the doorman would have been judging an empty queue, the
+    /// CLI and the Telegram bridge would have been filling a different one, and
+    /// closing the terminal would have thrown away what was typed.
+    ///
+    /// Kept in sync by the loop, which is the only thing here that may touch a
+    /// database. What it is for is the status line and the box's title, and both
+    /// of those want a number.
+    pub queued: usize,
     /// Everything sent this session, oldest first, for ↑/↓ recall.
     pub history: Vec<String>,
     /// How far back through `history` the user has walked. `None` means "in the
@@ -1393,7 +1403,7 @@ impl App {
             busy: false,
             interrupting: None,
             agents: Vec::new(),
-            queued: Vec::new(),
+            queued: 0,
             history: Vec::new(),
             history_at: None,
             draft: String::new(),
@@ -2480,17 +2490,19 @@ impl App {
 
     // ---- queued prompts -------------------------------------------------
 
-    /// Hold a prompt until the turn on screen finishes.
-    pub fn queue(&mut self, prompt: String) {
-        self.queued.push(prompt);
+    /// Say that one more message is waiting, before the store has confirmed it.
+    ///
+    /// Counted here on the keypress rather than after the write, so the notice
+    /// and the box's title are right the instant Enter is pressed. The loop
+    /// reads the real number back from the store straight afterwards, and that
+    /// is what corrects this if the write did not land.
+    pub fn queue(&mut self) {
+        self.queued += 1;
     }
 
-    /// The next queued prompt, if any.
-    pub fn next_queued(&mut self) -> Option<String> {
-        if self.queued.is_empty() {
-            return None;
-        }
-        Some(self.queued.remove(0))
+    /// What the store says is really waiting.
+    pub fn set_queued(&mut self, waiting: usize) {
+        self.queued = waiting;
     }
 
     // ---- navigation -----------------------------------------------------
@@ -3680,8 +3692,8 @@ impl App {
         // to miss looked exactly like `ready`; and both callers `cut` the
         // string to the room they have, which drops the tail first — so on a
         // narrow terminal the fragment that mattered was the first to go.
-        if !self.queued.is_empty() {
-            parts.push(format!("{} queued", self.queued.len()));
+        if self.queued > 0 {
+            parts.push(format!("{} queued", self.queued));
         }
         parts.join(" · ")
     }
@@ -5314,14 +5326,22 @@ mod tests {
 
     // ---- queueing ----
 
+    /// The order the queue comes back in is no longer this file's property.
+    ///
+    /// `queued_prompts_come_back_in_the_order_they_were_typed` lived here, over
+    /// a `Vec<String>` this screen owned. The messages live in the store now, so
+    /// the property is asserted where they are —
+    /// `delivery::tests::the_queue_comes_back_oldest_first` — and what is left
+    /// here is a number the loop keeps in step with that table.
     #[test]
-    fn queued_prompts_come_back_in_the_order_they_were_typed() {
+    fn what_is_waiting_is_counted_rather_than_held() {
         let mut a = app();
-        a.queue("one".into());
-        a.queue("two".into());
-        assert_eq!(a.next_queued().as_deref(), Some("one"));
-        assert_eq!(a.next_queued().as_deref(), Some("two"));
-        assert_eq!(a.next_queued(), None);
+        assert_eq!(a.queued, 0);
+        a.queue();
+        a.queue();
+        assert_eq!(a.queued, 2, "counted on the keypress, before the write lands");
+        a.set_queued(1);
+        assert_eq!(a.queued, 1, "and corrected to whatever the store really holds");
     }
 
     // ---- the fleet ----
@@ -5514,7 +5534,7 @@ mod tests {
     #[test]
     fn the_status_line_says_how_many_prompts_are_waiting() {
         let mut a = app();
-        a.queue("next".into());
+        a.queue();
         assert!(a.status().contains("1 queued"), "{}", a.status());
     }
 

@@ -5358,12 +5358,14 @@ fn draw_schedules(f: &mut Frame, app: &App, area: Rect) {
 /// The chain of command, and what each layer of it is spawned on.
 ///
 /// Drawn as a tree because the nesting *is* the information: `main` hands to
-/// `assistant`, which hands to `scratch` and `manager`, which hands to
-/// `engineer`. `Store::role_list` answers alphabetically and cannot say any of
-/// that — see [`roles::rows`], which is where the shape lives.
+/// `scratch` and `manager`, and `manager` hands to `engineer`.
+/// `Store::role_list` answers alphabetically and cannot say any of that — see
+/// [`roles::rows`], which is where the shape lives.
 ///
 /// `●` is a role somebody has configured and `○` is one inheriting everything,
-/// which is every role until this screen is opened.
+/// which is every role until this screen is opened. A `○` row is not
+/// necessarily an empty one: the assistant shows the harness and model Jod
+/// starts it on by default, dimmed, because nobody chose them here.
 fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
     let rows = app.role_rows();
     let selected = app
@@ -5434,6 +5436,9 @@ fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
                 fg(MUTED),
             )));
         }
+        if let Some(note) = roles::default_note(&row) {
+            lines.push(Line::from(Span::styled(format!("  {note}"), fg(MUTED))));
+        }
     }
 
     if let Some(choosing) = &app.choosing {
@@ -5445,11 +5450,14 @@ fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(page(Workspace::Roles, app, lines, area.width), area);
 }
 
-/// One column of a role's row: the value, or the dash that says it inherits.
+/// One column of a role's row: the value, the built-in behind it, or the dash
+/// that says it inherits.
 ///
-/// Muted when it inherits, so a screen of defaults reads as a screen of
-/// defaults at a glance rather than as a table you have to compare cell by
-/// cell.
+/// Muted for both of the things nobody chose, so a screen of defaults reads as
+/// a screen of defaults at a glance rather than as a table you have to compare
+/// cell by cell. A built-in is shown rather than dashed — it is what the layer
+/// will really run on, and that is the only question this screen is asked — but
+/// it is dimmed like the dash, because it is not something Reljod set.
 fn cell(row: &roles::Row, field: RoleField, width: usize) -> Span<'static> {
     let text = row.cell(field);
     let colour = if row.value(field).is_some() {
@@ -7064,10 +7072,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .where_you_are()
         .map(|where_| format!(" you → {where_} "))
         .unwrap_or_else(|| " you ".to_string());
-    let title = match (app.busy, app.queued.len()) {
+    let title = match (app.busy, app.queued) {
         (_, n) if n > 0 => format!(" you · {n} queued "),
         (true, _) => format!(
-            " you · sends after this turn{} ",
+            " you · queues while this runs{} ",
             app.elapsed().map(|t| format!(" ({t})")).unwrap_or_default()
         ),
         _ => bound,
@@ -7304,18 +7312,24 @@ mod tests {
             row[..at].chars().count()
         };
         assert!(
-            indent("assistant") > indent("main"),
-            "assistant is not drawn under main:\n{frame}"
+            indent("manager") > indent("main"),
+            "manager is not drawn under main:\n{frame}"
         );
         assert!(
             indent("engineer") > indent("manager"),
             "engineer is not drawn under manager:\n{frame}"
         );
-        assert_eq!(
-            indent("housekeeping"),
-            indent("main"),
-            "nothing delegates to housekeeping, so it belongs at the root:\n{frame}"
-        );
+        // Both of the loose ones, and the assistant is the newer of the two.
+        // It used to sit between main and everything else and it does not any
+        // more: nothing delegates to it, so an indent here would draw an edge
+        // that no longer exists.
+        for loose in ["assistant", "housekeeping"] {
+            assert_eq!(
+                indent(loose),
+                indent("main"),
+                "nothing delegates to {loose}, so it belongs at the root:\n{frame}"
+            );
+        }
     }
 
     /// A column nobody has set says *inherit* rather than sitting empty, which
@@ -8277,7 +8291,7 @@ mod tests {
     fn the_input_box_says_a_prompt_is_waiting_rather_than_looking_broken() {
         let mut a = app();
         a.busy = true;
-        a.queue("next thing".into());
+        a.queue();
         assert!(rendered(&a, 80, 12).contains("1 queued"));
     }
 
@@ -8285,7 +8299,7 @@ mod tests {
     fn a_busy_input_box_says_when_the_line_will_be_sent() {
         let mut a = app();
         a.busy = true;
-        assert!(rendered(&a, 80, 12).contains("sends after this turn"));
+        assert!(rendered(&a, 80, 12).contains("queues while this runs"));
     }
 
     /// A transcript that could belong to any of several agents is one you
@@ -10448,7 +10462,7 @@ mod tests {
         a.busy = true;
         a.turn_started_ms = Some(0);
         a.advance(5_000);
-        a.queue("next".into());
+        a.queue();
         let screen = rendered(&a, 60, 12);
         let bar = screen.lines().last().unwrap();
         assert!(bar.contains("1 queued"), "the status wins: {bar}");

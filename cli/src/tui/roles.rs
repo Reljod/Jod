@@ -1,10 +1,11 @@
 //! The roles panel — what each layer of the chain of command is spawned on.
 //!
 //! Six roles, and the shape they are drawn in is the *delegation edge* rather
-//! than anything the `roles` table knows: `main` hands to `assistant`, which
-//! hands to `scratch` and to `manager`, which hands to `engineer`.
-//! `housekeeping` hangs off the root because nothing delegates to it — the
-//! titler and the compaction run start themselves.
+//! than anything the `roles` table knows: `main` hands to `scratch` and to
+//! `manager`, and `manager` hands to `engineer`. `assistant` and
+//! `housekeeping` hang off the root because nothing delegates to them — Jod
+//! starts the assistant itself when Reljod types into a chat that is already
+//! working, and the titler and the compaction run start themselves.
 //!
 //! That shape lives here as a constant because it is a fact about the code, not
 //! about the database. `Store::role_list` answers alphabetically and says so:
@@ -50,8 +51,16 @@ struct Layer {
 
 /// The chain of command, in the order the panel draws it.
 ///
-/// `main` → `assistant` → {`scratch`, `manager`} → `engineer`, then
+/// `main` → {`scratch`, `manager`} → `engineer`, then `assistant` and
 /// `housekeeping` at the root.
+///
+/// **The assistant moved out from under main, and the move is the whole of
+/// what changed here.** For one release it sat between main and everything
+/// else and made every routing decision, so it was genuinely a layer. It is not
+/// one now: it reads a message Reljod typed into a busy chat and decides
+/// whether that message can wait. Main does not hand anything to it, and it
+/// hands nothing on, so drawing it under main would draw an edge that no longer
+/// exists — which is exactly the mistake this constant exists to prevent.
 const CHAIN: [Layer; 6] = [
     Layer {
         role: Role::Main,
@@ -59,24 +68,24 @@ const CHAIN: [Layer; 6] = [
         branch: "",
     },
     Layer {
-        role: Role::Assistant,
+        role: Role::Scratch,
+        depth: 1,
+        branch: "├ ",
+    },
+    Layer {
+        role: Role::Manager,
         depth: 1,
         branch: "└ ",
     },
     Layer {
-        role: Role::Scratch,
-        depth: 2,
-        branch: "  ├ ",
-    },
-    Layer {
-        role: Role::Manager,
+        role: Role::Engineer,
         depth: 2,
         branch: "  └ ",
     },
     Layer {
-        role: Role::Engineer,
-        depth: 3,
-        branch: "    └ ",
+        role: Role::Assistant,
+        depth: 0,
+        branch: "",
     },
     Layer {
         role: Role::Housekeeping,
@@ -105,9 +114,41 @@ pub struct Row {
 }
 
 impl Row {
-    /// What one column holds, or [`INHERIT`] when nobody has said.
+    /// What one column holds: what was configured, then what this layer runs on
+    /// by default, then [`INHERIT`] when neither says anything.
+    ///
+    /// Showing the built-in rather than a dash is the honest answer to "what
+    /// will this run on", which is the only question this screen is asked. A
+    /// dash over a row that really starts on AGY would be a settings panel
+    /// lying about the setting.
     pub fn cell(&self, field: RoleField) -> &str {
-        self.value(field).unwrap_or(INHERIT)
+        self.value(field)
+            .or_else(|| self.default_value(field))
+            .unwrap_or(INHERIT)
+    }
+
+    /// What this layer runs on when nobody has configured it.
+    ///
+    /// Only the assistant has one — see [`Role::default_spawn`], where the
+    /// reasoning lives. It is deliberately *not* a row in the `roles` table: an
+    /// empty table still means "nothing is configured", so Reljod can always
+    /// tell what he set from what Jod assumed.
+    pub fn default_value(&self, field: RoleField) -> Option<&'static str> {
+        let (harness, model) = self.role.default_spawn()?;
+        match field {
+            RoleField::Harness => Some(harness.id()),
+            RoleField::Model => Some(model),
+            RoleField::Thinking | RoleField::Permission => None,
+        }
+    }
+
+    /// Whether this cell is showing a built-in rather than something set here.
+    ///
+    /// What the panel dims by. A value nobody chose has to read differently
+    /// from one somebody did, or the screen cannot be used to answer "what have
+    /// I actually changed".
+    pub fn is_default(&self, field: RoleField) -> bool {
+        self.value(field).is_none() && self.default_value(field).is_some()
     }
 
     /// What one column holds, as the store keeps it.
@@ -127,7 +168,13 @@ impl Row {
     /// which harness will run this role, so only the levels *every* harness
     /// takes may be offered.
     pub fn harness_kind(&self) -> Option<HarnessKind> {
-        self.harness.as_deref().and_then(HarnessKind::from_id)
+        // The effective harness, built-in included, because the one caller asks
+        // in order to decide which effort levels to offer — and an assistant
+        // row that says nothing still really starts on AGY.
+        self.harness
+            .as_deref()
+            .and_then(HarnessKind::from_id)
+            .or_else(|| self.role.default_harness())
     }
 }
 
@@ -316,7 +363,30 @@ pub const OPENCODE_VARIANT_CAVEAT: &str =
 
 /// Whether that caveat applies to a row: OpenCode, with a level actually set.
 pub fn variant_caveat_applies(row: &Row) -> bool {
-    row.harness_kind() == Some(HarnessKind::OpenCode) && row.thinking.is_some()
+    row.harness.as_deref().and_then(HarnessKind::from_id) == Some(HarnessKind::OpenCode)
+        && row.thinking.is_some()
+}
+
+/// The line under the table when the selected row is showing a built-in.
+///
+/// A cell nobody set still shows a value on the assistant's row, and a value
+/// with no explanation reads as a setting somebody made and forgot. This says
+/// whose it is and how to be rid of it, which is the question a settings screen
+/// owes an answer to.
+pub fn default_note(row: &Row) -> Option<String> {
+    let showing: Vec<&str> = FIELDS
+        .into_iter()
+        .filter(|f| row.is_default(*f))
+        .filter_map(|f| row.default_value(f))
+        .collect();
+    if showing.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} is what Jod starts this on unless you say otherwise — nothing is set here, \
+         and choosing a value replaces it",
+        showing.join(" on ")
+    ))
 }
 
 #[cfg(test)]
@@ -341,23 +411,24 @@ mod tests {
             named,
             [
                 "main",
-                "assistant",
                 "scratch",
                 "manager",
                 "engineer",
+                "assistant",
                 "housekeeping"
             ]
         );
         assert_eq!(row_named(&drawn, Role::Main).depth, 0);
-        assert_eq!(row_named(&drawn, Role::Assistant).depth, 1);
-        assert_eq!(row_named(&drawn, Role::Manager).depth, 2);
-        assert_eq!(row_named(&drawn, Role::Scratch).depth, 2);
-        assert_eq!(row_named(&drawn, Role::Engineer).depth, 3);
-        assert_eq!(
-            row_named(&drawn, Role::Housekeeping).depth,
-            0,
-            "nothing delegates to housekeeping, so it hangs off the root"
-        );
+        assert_eq!(row_named(&drawn, Role::Manager).depth, 1);
+        assert_eq!(row_named(&drawn, Role::Scratch).depth, 1);
+        assert_eq!(row_named(&drawn, Role::Engineer).depth, 2);
+        for loose in [Role::Assistant, Role::Housekeeping] {
+            assert_eq!(
+                row_named(&drawn, loose).depth,
+                0,
+                "nothing delegates to {loose:?}, so it hangs off the root"
+            );
+        }
     }
 
     /// A column nobody has set reads as inheriting rather than as empty. An
@@ -486,8 +557,10 @@ mod tests {
                 harness: Some(harness.into()),
                 thinking: thinking.map(str::to_string),
                 ..RoleRow::default()
-            }])[2]
-                .clone()
+            }])
+            .into_iter()
+            .find(|r| r.role == Role::Scratch)
+            .expect("scratch is drawn")
         };
         assert!(variant_caveat_applies(&with("open_code", Some("high"))));
         assert!(!variant_caveat_applies(&with("open_code", None)));

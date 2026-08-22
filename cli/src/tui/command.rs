@@ -74,6 +74,12 @@ pub enum Slash {
     EnterMain,
     /// Stop an agent, by an id prefix or its name.
     Stop(String),
+    /// Stop every run anywhere and keep every conversation.
+    ///
+    /// `Shift-Esc` in words. Both are wanted because the key needs the
+    /// terminal's keyboard-enhancement protocol to arrive at all, and plenty of
+    /// terminals decline it — see `tui::enter`.
+    StopEverything,
     /// Keep a heartbeat on an agent, so a run that wedges is reaped.
     ///
     /// For a run you are going to walk away from for a few hours. Putting one
@@ -291,13 +297,18 @@ pub fn parse(line: &str) -> Option<Slash> {
                 ))
             }
         }
-        "stop" | "kill" => {
-            if arg.is_empty() {
-                Slash::NeedsArgument("/stop <id>")
-            } else {
-                Slash::Stop(arg.to_string())
-            }
-        }
+        // Bare `/stop` is the fleet, and it used to be an error message.
+        //
+        // The twin of `Shift-Esc`, and an equal rather than a fallback: most
+        // terminals will not report a modified Escape at all, so on a lot of
+        // machines this is the only way to reach the gesture. Named `stop` and
+        // not something of its own because it is the same verb at a different
+        // scope — one run with an id, everything without one — and a second
+        // word for it would be a second thing to remember.
+        "stop" | "kill" => match arg {
+            "" | "all" => Slash::StopEverything,
+            _ => Slash::Stop(arg.to_string()),
+        },
         // `/heartbeat <id>` arms it, `/heartbeat <id> off` disarms it. A
         // trailing word rather than a flag, because the TUI's commands take
         // prose arguments and `--off` would be the only flag in the set.
@@ -1413,12 +1424,22 @@ mod tests {
     /// argument, so a bare one must ask rather than act.
     #[test]
     fn the_agent_management_commands_all_want_an_argument() {
-        for (text, usage) in [
-            ("/stop", "/stop <id>"),
-            ("/heartbeat", "/heartbeat <id> [off]"),
-        ] {
+        for (text, usage) in [("/heartbeat", "/heartbeat <id> [off]")] {
             assert_eq!(parse(text), Some(Slash::NeedsArgument(usage)), "{text}");
         }
+    }
+
+    /// `/stop` used to be on the list above and is the one exception to it.
+    ///
+    /// Bare, it is the whole fleet — the twin of `Shift-Esc`, which a lot of
+    /// terminals will never report. With an id it is still one run, which is
+    /// what it has always been.
+    #[test]
+    fn stop_means_the_fleet_with_no_argument_and_one_run_with_one() {
+        assert_eq!(parse("/stop"), Some(Slash::StopEverything));
+        assert_eq!(parse("/stop all"), Some(Slash::StopEverything));
+        assert_eq!(parse("/kill"), Some(Slash::StopEverything));
+        assert_eq!(parse("/stop abc123"), Some(Slash::Stop("abc123".into())));
     }
 
     /// Retyping a UUID is not a user interface.
