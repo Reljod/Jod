@@ -58,12 +58,13 @@ the ones that were not, and the gaps here are larger than the coverage.
   subject reuses a warm engineer, and whether a different subject correctly
   opens a new one, is the whole of `worktree-engineer-reuse-rules` (#236, merged)
   and none of it was driven.
-- **The doorman's judgement, which is the half of the assistant that matters.**
-  The queue works — a message typed into a busy chat waits and is answered after
-  the turn. But every message queued in these runs was one that could wait, so
-  the assistant was never asked to decide, and `interrupt_main` was never seen
-  to fire. Nothing here tests an *urgent* message cutting a running turn short,
-  which is the behaviour Reljod actually asked for.
+- **~~The doorman's judgement~~ — since tested, and it is broken. See X14 and
+  X15.** This entry originally said the assistant had never been asked to decide
+  and that `interrupt_main` had never been seen to fire. Both were true when it
+  was written and neither is true now: a later run put an urgent message into a
+  busy chat, a doorman read it, judged it correctly, called `interrupt_main`
+  five times and was refused every time. What remains untested is a doorman
+  whose interrupt *succeeds*, because none has yet.
 - **Shift-Esc.** `/stop` was tested and works. Its twin was not, and D8 exists
   because the terminal may not deliver the modified key at all.
 - **Multi-turn work with cards answered.** Cards were raised and left sitting.
@@ -1031,7 +1032,7 @@ returns to `queued` rather than sticking.
 
 ---
 
-## X15. A doorman that starts and then dies strands its message for ever and blocks every doorman after it
+## X15. A doorman that starts and then dies strands its message for ever, and later messages go unjudged
 Status: **open** · Severity: critical · Owner: —
 
 The mechanism behind half of X14, established from the code and confirmed
@@ -1079,16 +1080,39 @@ both in its own tests. This is the same shape as the `claim_lease` case
 `docs/decisions.md` already records: a function that existed, was tested, and
 had no caller outside the test.
 
-**It is not one lost message — it disables the tier.** Because a row sitting in
-`reviewing` is a claim, no further doorman starts for that conversation. Watched
-live: delivery 12 stuck in `reviewing` from the first attempt; two more urgent
-messages typed later became deliveries 15 and 16, both `queued`; **no second
-doorman run was ever created**, while main was busy and a doorman was exactly
-what should have run. The console counted up — `1 queued`, then `2 queued` —
-and no assistant read any of them.
+**The stranded row never recovers.** Polled every twenty seconds for twenty
+minutes from a script rather than by eye. Delivery 12 read `reviewing`,
+`run_id = NULL`, on every single sample and was still doing so at twenty-two
+minutes. Main's turn ended during that window and Esc was pressed during it, and
+neither released it. Nothing sweeps it, exactly as `finish_review`'s comment
+warns.
 
-So a single doorman failure switches off the assistant for that conversation
-permanently, and the only sign is a queue counter that goes up and never down.
+**What it costs after that is a lost judgement, not lost messages — an earlier
+draft of this finding said the latter and was wrong.** Two more urgent messages
+typed while the row was stuck became deliveries 15 and 16. Both were
+**delivered** about fourteen minutes later, when main's turn ended, by the
+ordinary queue drain. They were not lost. The correction matters because "the
+message vanishes" and "the message arrives late and unjudged" call for different
+urgency, and only the second is true of the messages after the first.
+
+What they did lose is the doorman. **Exactly one doorman run exists in the
+store**, for delivery 12, despite two later messages arriving while main was
+busy — which is precisely when a doorman should read them. So those two never
+got the judgement the tier exists to provide: nobody decided whether they could
+wait, and they waited by default. For a message that says "STOP, drop the essay,
+answer me now", waiting for the essay to finish is the wrong answer arrived at
+by not deciding.
+
+**The causal link is probable rather than proven.** A row sitting in `reviewing`
+is a claim, and the natural reading is that it suppresses further doorman starts
+for that conversation. That fits what was seen — one doorman, two unjudged
+messages — but it was not isolated from the alternative, which is that the
+ticker simply did not find main busy at the moment it looked. Whoever fixes this
+should establish which, because if it is the claim then one failure degrades the
+tier until the conversation is restarted, and if it is timing then the stranding
+of row 12 is the whole of the bug.
+
+Either way delivery 12 itself is genuinely lost, and that part is certain.
 
 **Fix shape, and it is genuinely small.** Call `under_review_for` on the tick
 and requeue anything whose doorman run is no longer alive. The comments above
