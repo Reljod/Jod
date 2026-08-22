@@ -3736,3 +3736,72 @@ answer — BSD `stat` has no `-c` and exits non-zero, while GNU `stat -f` means
 belongs. Paths are compared in their resolved spelling on both sides, since the
 kernel reports `/private/var/…` for a cwd under `/var` and no string match
 reconciles the two.
+
+## The rail is a queue to clear, not a stack of cards to read
+
+Six blocked runs took a bordered box each, four rows tall, so five of the six
+fit and the sixth read as never having been raised. Of the two lines inside each
+box, the first truncated the title at twenty-eight characters and the second
+spent the whole width on three hex identifiers — six characters of work id,
+eight of conversation, four of run. Nothing on the card said what answering it
+would do, so clearing a queue of permission requests meant opening each one,
+reading three options and pressing a digit, six times over.
+
+**A card is one row now, and cards gather under the project that raised them.**
+The identifiers moved to the group heading, where they are said once for the
+whole project instead of once a card — and where there is room for the work's
+own title, which is a paraphrase of what that agent was asked to do, rather than
+six characters of its id. The right-hand column says what the quick answer would
+send. A column of `allow` beside a column of commands is a queue you can clear;
+`—` beside one says plainly that this one has to be read.
+
+Three things the boxes were carrying had to find new homes, and two of them are
+smaller than they look:
+
+- **`blocked`, as a word rather than a colour.** Colour is never the only
+  channel in this program, and on the one card that stopped a run that is not a
+  nicety. The word is still on the rail's header and on every group heading with
+  a blocked card under it; per row, the channel is now `!` in the glyph column.
+- **`answered, queued`, whole.** Decision D2 is that answering during a turn
+  *queues* the answer, and that "answered" alone reads as done. Sixteen columns
+  of a thirty-four column rail leaves four for the card, so the sentence is
+  joined on the row wherever there is room — the phone's bottom panel, the
+  expanded card — and split between the header and the row where there is not. A
+  row saying `queued` under a header saying `answered` says both facts exactly
+  once between them. What is forbidden is saying only one, and neither form
+  does.
+- **The run id.** Gone from the collapsed row, still in full on the expanded
+  card. The session is what identifies the agent an answer is written against,
+  and the heading names it.
+
+## `Ctrl-R` answers a card instead of revealing a column
+
+`Ctrl-R` showed and hid the rail. That is the cheapest thing the rail can do and
+not the thing anybody wants from a rail full of stopped runs, which is to clear
+it. It is a prefix now: `Ctrl-R` puts the rail on screen and arms the digits,
+and `Ctrl-R` `3` accepts the third row's recommendation. The old job survives at
+both ends — the first press still reveals a hidden rail, and a second press
+still takes it away — and `Ctrl-N`, which opens the rail *and* takes the
+keyboard, is untouched.
+
+**Bare digits, not `Ctrl`-digits.** The chord was asked for as `Ctrl-R Ctrl-1`.
+A terminal speaking the ordinary protocol cannot send `Ctrl-1` — it arrives as a
+plain `1`, indistinguishable from the digit — and Jod does not ask for the Kitty
+keyboard extensions that would change that. So the second keystroke is a bare
+digit, which is the same two keypresses and works in every terminal; the
+`Ctrl`-spelled version is accepted as well, for the terminals that do send it.
+
+**The recommendation is the least committal affirmative, and often there is
+none.** A permission card recommends `allow once` and never `always allow`: two
+keystrokes may let one call through, but they may never write a standing grant
+that widens what Jod runs unasked from then on — that stays a digit pressed on
+an opened card. A decision the agent has already taken recommends itself, since
+accepting agrees with what already happened. Everything else — an open question,
+a missing credential — recommends nothing, prints `—`, and the digit selects the
+card rather than guessing at it. A quick answer that could invent an answer to a
+question would be worse than no quick answer.
+
+**The digit counts drawn rows, not queried ones.** Grouping moves cards past
+each other, so the renderer, the cursor and the digit all resolve against one
+order — `rail::order` — and a digit read against the query's order would answer
+a different card from the one it is printed beside.

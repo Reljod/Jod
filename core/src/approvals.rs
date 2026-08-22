@@ -336,6 +336,28 @@ pub const CARD_KEY: &str = "approval:";
 /// where the rail offers a promise nothing keeps.
 pub const ALWAYS: &str = "always allow";
 
+/// The option text that means "yes, this once, and ask me again next time".
+///
+/// Here rather than in the hook that offers it for the same reason as
+/// [`ALWAYS`], and for one more: the rail's quick answer picks this option by
+/// name. Two keystrokes must never write a standing grant, so the chord needs
+/// the *least* committal affirmative, and it can only find it by matching the
+/// exact string the hook wrote.
+pub const ONCE: &str = "allow once";
+
+/// The option text that refuses the call.
+pub const DENY: &str = "deny";
+
+/// Whether this card is a permission request rather than an ordinary question.
+///
+/// Asked of the dedupe key, which is structural, and never of the prose — the
+/// same reason [`CARD_KEY`] exists at all. A card raised by
+/// [`crate::cards::Store::raise_card`] with no key is not an approval, which is
+/// the common case and the cheap one.
+pub fn is_approval(card: &crate::cards::Card) -> bool {
+    parse_card_key(card.dedupe_key.as_deref()).is_some()
+}
+
 /// Turn an answered approval card into a standing grant, if that is what was
 /// chosen.
 ///

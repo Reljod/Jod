@@ -561,8 +561,21 @@ const RAIL_BELOW: u16 = 12;
 /// sentence beats two unreadable halves.
 const RAIL_BELOW_MIN: u16 = 6;
 
-/// A collapsed card: a border, two lines of card, a border.
-const CARD_HEIGHT: u16 = 4;
+/// A collapsed card: one row.
+///
+/// It was four — a border, two lines, a border — and that is what made the rail
+/// unreadable. Six cards cost twenty-four rows, so five were drawn and the
+/// sixth read as never having been raised; the border said nothing the gap
+/// between rows does not; and the second line spent a thirty-four column rail
+/// on three hex ids while the title, the only thing anybody reads, truncated at
+/// twenty-eight characters. The ids moved to the group heading, where they are
+/// said once for the whole project instead of once a card, and the row they
+/// used to occupy went back to the chat.
+const CARD_HEIGHT: u16 = 1;
+
+/// The columns a row spends before the title starts: cursor, digit, gap, glyph,
+/// gap.
+const ROW_CHROME: usize = 5;
 
 /// How many rows the bottom rail gets on a terminal too narrow for a column.
 ///
@@ -671,28 +684,76 @@ fn draw_rail_summary(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// The stack: a header, and one bordered two-line card per row.
+/// One drawable line of the stack.
+///
+/// The stack is built whole — every group heading and every card row — and then
+/// windowed, rather than windowed and then built. Headings make the two
+/// different: how many cards fit depends on how many headings fall between
+/// them, so counting cards first would either overshoot the pane or leave a row
+/// of it blank.
+enum Row {
+    /// The gap above a heading. Never the first line, and dropped when it would
+    /// be — a stack that opens on an empty row looks like a rendering fault.
+    Gap,
+    /// A project's heading, as an index into the groups.
+    Head(usize),
+    /// A card, as an index into `app.cards`, carrying the quick-answer digit it
+    /// was given — or `None` past the ninth, which has no key to print.
+    Card(usize, Option<usize>),
+}
+
+/// The stack: a header, then each project's cards under a heading of their own.
 fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
     let ids = app.card_ids();
     let selected = app.rail.index(&ids);
+    let groups = app.rail_groups();
 
     // The sort and the two filters are printed whenever they are in force, and
     // whenever the rail has the keyboard. A stack silently showing a subset is
     // a stack whose missing card reads as a card that was never raised.
     let filter = rail_filter_line(app);
     let settled = rail_settings(app).is_some();
-    // How many cards fit under a header of a given height. Five at most,
-    // however tall the terminal is — see [`rail::VISIBLE`].
-    let fits = |head: u16| {
-        let room = area.height.saturating_sub(head.min(area.height));
-        (room / CARD_HEIGHT).max(1).min(rail::VISIBLE as u16) as usize
-    };
-    let plain = 1 + settled as u16 + filter.iter().count() as u16;
+    let armed = rail_armed(app);
+    let plain = 1 + settled as u16 + filter.iter().count() as u16 + armed.iter().count() as u16;
+
+    // Every line the stack would draw if it had unlimited room.
+    let mut rows: Vec<Row> = Vec::new();
+    let mut digit = 0usize;
+    for (at_group, group) in groups.iter().enumerate() {
+        if !rows.is_empty() {
+            rows.push(Row::Gap);
+        }
+        rows.push(Row::Head(at_group));
+        for card in &group.cards {
+            digit += 1;
+            rows.push(Row::Card(
+                *card,
+                (digit <= rail::QUICK).then_some(digit),
+            ));
+        }
+    }
+
+    // Where the cursor's own row landed, so the window can be built around it
+    // rather than around a card count that does not know about the headings.
+    let here = ids.get(selected).copied();
+    let at_cursor = rows
+        .iter()
+        .position(|row| match row {
+            Row::Card(at, _) => app.cards.get(*at).map(|c| c.id) == here,
+            _ => false,
+        })
+        .unwrap_or(0);
+
     // Measured twice, because the line saying which cards are on screen is only
     // drawn when some of them are not — and drawing it takes a row off the
     // stack, which is what decides whether some of them are not. The second
     // pass settles it: a stack that overflows the shorter list overflows the
     // taller one too, so this cannot oscillate.
+    let room = |head: u16| area.height.saturating_sub(head.min(area.height)) as usize;
+    let fits = |head: u16| {
+        let first = window_start(at_cursor, room(head).max(1), rows.len());
+        shown_cards(&rows, first, room(head))
+    };
     let crowded = app.cards.len() > fits(plain + !settled as u16);
     let used = (plain + (crowded && !settled) as u16).min(area.height);
 
@@ -701,18 +762,33 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
         height: area.height.saturating_sub(used),
         ..area
     };
-    let rows = fits(used);
-    let first = window_start(selected, rows, app.cards.len());
-    let shown = rows.min(app.cards.len().saturating_sub(first));
+    let height = room(used);
+    let mut first = window_start(at_cursor, height.max(1), rows.len());
+    // Never open the window on the gap above a heading: it reads as the rail
+    // having lost its first row.
+    if matches!(rows.get(first), Some(Row::Gap)) {
+        first += 1;
+    }
+    // The window is sized in rows and capped in cards, so on a tall terminal
+    // holding more than nine cards it can start at the top and stop before the
+    // cursor — which is how a stack ends up scrolling nowhere. Push it down
+    // until the cursor is inside it. Bounded by construction: every step moves
+    // `first` one row closer to `at_cursor`.
+    while first < at_cursor && at_cursor >= window_end(&rows, first, height) {
+        first += 1;
+    }
+    let last = window_end(&rows, first, height);
+    let shown = shown_cards(&rows, first, height);
 
     let mut head = vec![rail_header(app)];
     // Below the header rather than in it. The header already carries the count,
     // the scope and the blocker tally, and thirty-four columns truncates from
     // the right — a window note appended there pushes `2 blocked` off the end,
     // which trades one honest line for a less honest one.
-    if let Some(line) = rail_window(app, first, shown) {
+    if let Some(line) = rail_window(app, shown) {
         head.push(line);
     }
+    head.extend(armed);
     head.extend(filter);
     f.render_widget(
         Paragraph::new(head),
@@ -734,100 +810,237 @@ fn draw_rail_stack(f: &mut Frame, app: &App, area: Rect, hits: &mut RailHits) {
         return;
     }
 
-    for (slot, (at, card)) in app.cards.iter().enumerate().skip(first).take(rows).enumerate() {
-        let y = rest.y + slot as u16 * CARD_HEIGHT;
-        if y + CARD_HEIGHT > rest.y + rest.height {
+    let width = rest.width as usize;
+    // Measured over the rows actually on screen, not over every card the query
+    // returned: an answer nobody can see must not take columns from the titles
+    // of the ones they can.
+    let on_screen: Vec<&Card> = rows[first..last]
+        .iter()
+        .filter_map(|row| match row {
+            Row::Card(at, _) => app.cards.get(*at),
+            _ => None,
+        })
+        .collect();
+    let answer_col = answer_width(&on_screen, width);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // A window that opens partway down a project must still say which project.
+    // Scrolling into a list of bare commands with no heading over them is the
+    // failure grouping was added to fix, arriving one keypress later.
+    if let Some(Row::Card(at, _)) = rows.get(first) {
+        if let Some(group) = groups.iter().find(|g| g.cards.contains(at)) {
+            if !matches!(rows.get(first.saturating_sub(1)), Some(Row::Head(_))) {
+                lines.push(group_heading(group, width, true));
+            }
+        }
+    }
+    for row in &rows[first..last] {
+        if lines.len() >= rest.height as usize {
             break;
         }
-        hits.cards.push(CardHit {
-            id: card.id,
-            top: y,
-            bottom: y + CARD_HEIGHT,
-        });
-        let box_ = Rect {
-            y,
-            height: CARD_HEIGHT,
-            ..rest
-        };
-        let here = at == selected;
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(card_border(card))
-            // The cursor rides the top border rather than a column of its own:
-            // thirty-two columns has none to spare, and a marker inside the box
-            // would cost every card two cells of title to mark one card.
-            .title(if here { " ▸ " } else { "" });
-        f.render_widget(
-            Paragraph::new(card_lines(
-                card,
-                box_.width.saturating_sub(2) as usize,
-                here,
-                app.rail.cascade,
-            ))
-            .block(block),
-            box_,
-        );
+        match row {
+            Row::Gap => lines.push(Line::from("")),
+            Row::Head(at) => match groups.get(*at) {
+                Some(group) => lines.push(group_heading(group, width, false)),
+                None => lines.push(Line::from("")),
+            },
+            Row::Card(at, digit) => {
+                let Some(card) = app.cards.get(*at) else {
+                    continue;
+                };
+                let y = rest.y + lines.len() as u16;
+                hits.cards.push(CardHit {
+                    id: card.id,
+                    top: y,
+                    bottom: y + CARD_HEIGHT,
+                });
+                lines.push(card_row(card, *digit, width, answer_col, *at == selected));
+            }
+        }
+    }
+    f.render_widget(Paragraph::new(lines), rest);
+}
+
+/// Where a window of `height` rows starting at `first` has to stop.
+///
+/// Two limits, and either can bite first: the rows the pane actually has, and
+/// [`rail::VISIBLE`] cards. Walked rather than calculated, because headings and
+/// gaps take rows the cards were going to have and how many depends on where
+/// the group boundaries fell.
+fn window_end(rows: &[Row], first: usize, height: usize) -> usize {
+    let mut cards = 0;
+    let mut at = first;
+    while at < rows.len() && at - first < height {
+        if matches!(rows[at], Row::Card(_, _)) {
+            if cards == rail::VISIBLE {
+                break;
+            }
+            cards += 1;
+        }
+        at += 1;
+    }
+    at
+}
+
+/// How many cards a window of `height` rows starting at `first` actually shows.
+fn shown_cards(rows: &[Row], first: usize, height: usize) -> usize {
+    rows[first..window_end(rows, first, height)]
+        .iter()
+        .filter(|row| matches!(row, Row::Card(_, _)))
+        .count()
+}
+
+/// What a row's right-hand column says.
+///
+/// One question, and which question depends on whether the card is still
+/// waiting. An open card's is *what would the digit do*; an answered one's is
+/// *has the agent heard yet*, which is the fact decision D2 exists to keep on
+/// screen — a card that reads as done while its answer is still queued is a lie
+/// the reader acts on.
+fn answer_text(card: &Card, cap: usize) -> String {
+    if let Some(rec) = rail::recommended(card) {
+        return rec.label;
+    }
+    // The whole sentence when the rail is wide enough to hold it beside a
+    // readable title, and the one-word form when it is not. The bottom panel a
+    // phone gets is seventy-eight columns and takes the sentence; the column
+    // beside a chat is thirty-four and takes the word.
+    if let Some(note) = rail::delivery_note(card) {
+        if note.chars().count() <= cap {
+            return note.to_string();
+        }
+    }
+    match rail::delivery_short(card) {
+        Some(note) => note.to_string(),
+        // An em dash rather than a blank: the column is a promise about what the
+        // digit does, and an empty cell reads as one nobody got round to filling
+        // in rather than as "there is nothing to accept here".
+        None => "—".to_string(),
     }
 }
 
-/// The two lines of a collapsed card: what it says, and what state it is in.
+/// The most columns the answers may take before the titles start suffering.
 ///
-/// `cascading` decides whether the second line has to name the session. With
-/// the subtree scope on, the rail holds cards from agents all over the fleet
-/// and answering writes against one specific one, so the provenance is not
-/// optional — it is what stops "answer the top one" being a coin flip about
-/// which agent gets unblocked. With the scope narrowed to one conversation
-/// every card came from the same place, and printing it would spend a third of
-/// a thirty-four column line saying so.
-fn card_lines(card: &Card, width: usize, here: bool, cascading: bool) -> Vec<Line<'static>> {
-    let title = Line::from(vec![
-        Span::styled(
-            format!("{} ", rail::kind_glyph(card.kind)),
-            fg(card_colour(card)),
-        ),
-        Span::styled(
-            cut(&card.title, width.saturating_sub(2)),
-            if here { bold(AGENT) } else { fg(AGENT) },
-        ),
-    ]);
+/// Fourteen columns of title is the floor, which is roughly where a command
+/// stops being recognisable. Everything to the right of that is the answers'
+/// to use and no more.
+fn answer_cap(width: usize) -> usize {
+    width.saturating_sub(ROW_CHROME + 14).max(6)
+}
 
-    // The session leads the line when cascading, ahead of the id: which agent
-    // is asking outranks which card number it is.
-    let stamp = if cascading {
-        match rail::work_tag(card) {
-            Some(work) => format!("{work}/{} ", rail::raised_by(card)),
-            None => format!("{} ", rail::raised_by(card)),
-        }
+/// How wide the answer column has to be for every row to fit in it.
+///
+/// The widest answer on screen, floored so a stack of nothing but em dashes
+/// still leaves a column rather than a stripe, and capped by [`answer_cap`].
+fn answer_width(cards: &[&Card], width: usize) -> usize {
+    let cap = answer_cap(width);
+    cards
+        .iter()
+        .map(|card| answer_text(card, cap).chars().count())
+        .max()
+        .unwrap_or(1)
+        .clamp(1, cap)
+}
+
+/// A project's heading: what it is called, and how much of it is stopped.
+///
+/// The name comes from the work's own title, which is a paraphrase of what that
+/// agent was asked to do — so the heading reads as the thing you delegated
+/// rather than as the identifier it was filed under. `carried` marks a heading
+/// re-drawn at the top of a scrolled window, which is a repeat rather than the
+/// start of a group and is dimmed to say so.
+fn group_heading(group: &rail::Group, width: usize, carried: bool) -> Line<'static> {
+    let blocked = if group.blocked > 0 {
+        format!("{} {}", group.blocked, rail::BLOCKED)
     } else {
-        format!("#{} ", card.id)
+        String::new()
     };
-    let mut spans = vec![Span::styled(stamp.clone(), fg(MUTED))];
-    let mut used = stamp.chars().count();
-    // The literal word, beside the coloured border. Colour is never the only
-    // channel in this program, and on the one card that stopped a run that
-    // rule is not a nicety.
-    if card.blocking {
-        spans.push(Span::styled(format!("{} ", rail::BLOCKED), bold(BAD)));
-        used += rail::BLOCKED.chars().count() + 1;
-    }
-    let mut tail: Vec<String> = Vec::new();
-    // First, ahead of the kind, because it is the fact a reader of an answered
-    // card actually needs — `status` is what the human did and `delivery` is
-    // whether the agent has heard, and the second is the one that decides
-    // whether there is anything left to wait for. Last in the line is where a
-    // narrow rail truncates.
-    if let Some(note) = rail::delivery_note(card) {
-        tail.push(note.to_string());
-    }
-    tail.push(card.kind.as_str().to_string());
-    if card.importance != Importance::Normal {
-        tail.push(card.importance.as_str().to_string());
-    }
-    spans.push(Span::styled(
-        cut(&tail.join(" · "), width.saturating_sub(used)),
-        fg(MUTED),
-    ));
-    vec![title, Line::from(spans)]
+    let room = width.saturating_sub(blocked.chars().count() + 2);
+    let label = cut(&group.label, room);
+    let pad = width
+        .saturating_sub(label.chars().count() + blocked.chars().count() + 2)
+        .max(1);
+    Line::from(vec![
+        Span::styled(
+            format!(" {label}"),
+            if carried { fg(MUTED) } else { bold(AGENT) },
+        ),
+        Span::styled(" ".repeat(pad), fg(MUTED)),
+        Span::styled(blocked, bold(BAD)),
+    ])
+}
+
+/// One card, in one row: what it is, what it says, and what the digit would do.
+///
+/// The row is a sentence read left to right — *this one, number three, blocked,
+/// `rm -rf node_modules`, allow* — and everything that is not one of those five
+/// things has been taken off it. What went, and where it went instead:
+///
+/// - **The border.** It said nothing; the gap between rows says the same.
+/// - **The session and run ids.** Now on the group heading, once for the
+///   project rather than once a card, which is the whole point of grouping. The
+///   expanded card still carries all three in full.
+/// - **The words `question`, `high` and `blocked`.** The first two are the
+///   glyph and the colour restating themselves. The third is the one that
+///   mattered, and it is still said — on the heading, on the rail's own header,
+///   and by [`rail::row_glyph`] putting `!` in the glyph column, which is the
+///   non-colour channel that rule actually asks for.
+///
+/// What arrived is the right-hand column: the answer `Ctrl-R` and this row's
+/// digit would send. It is what makes the rail answerable without opening
+/// anything — a column of `allow` beside a column of commands is a queue you
+/// can clear, and a `—` says plainly that this one needs reading.
+fn card_row(
+    card: &Card,
+    digit: Option<usize>,
+    width: usize,
+    answer_col: usize,
+    here: bool,
+) -> Line<'static> {
+    let recommended = rail::recommended(card);
+    let answer = cut(&answer_text(card, answer_cap(width)), answer_col);
+    // Every row gives the answer column the same width, so the titles start and
+    // stop in the same place down the whole stack. Sizing each row to its own
+    // answer was a column of ragged left edges, and the point of the redesign is
+    // that the rail can be read in one downward glance.
+    let room = width
+        .saturating_sub(ROW_CHROME + answer_col + 2)
+        .max(4);
+    let title = cut(&card.title, room);
+    let pad = width
+        .saturating_sub(ROW_CHROME + title.chars().count() + answer.chars().count() + 1)
+        .max(1);
+    Line::from(vec![
+        Span::styled(
+            if here { "▸" } else { " " }.to_string(),
+            bold(USER),
+        ),
+        Span::styled(
+            digit.map(|d| d.to_string()).unwrap_or_else(|| " ".into()),
+            if recommended.is_some() {
+                bold(USER)
+            } else {
+                fg(MUTED)
+            },
+        ),
+        Span::styled(
+            format!(" {} ", rail::row_glyph(card)),
+            if card.blocking {
+                bold(BAD)
+            } else {
+                fg(card_colour(card))
+            },
+        ),
+        Span::styled(title, if here { bold(AGENT) } else { fg(AGENT) }),
+        Span::styled(" ".repeat(pad), fg(MUTED)),
+        Span::styled(
+            answer,
+            if recommended.is_some() {
+                fg(GOOD)
+            } else {
+                fg(MUTED)
+            },
+        ),
+    ])
 }
 
 fn rail_header(app: &App) -> Line<'static> {
@@ -844,12 +1057,18 @@ fn rail_header(app: &App) -> Line<'static> {
             fg(MUTED)
         },
     )];
+    // The count always; the stack's name only when it is not the resting one.
+    // ` rail · 6 open · subtree · 4 blocked` is thirty-five columns in a
+    // thirty-four column rail, and what fell off the end was `blocked` — the one
+    // word on the line that had to survive. `open` is what the rail shows unless
+    // somebody pressed `t`, so it is the cheapest of the four to drop.
+    let stack = app.rail.stack_now();
     spans.push(Span::styled(
-        format!(
-            " · {} {}",
-            app.cards.len(),
-            app.rail.stack_now().as_str()
-        ),
+        if stack == Status::Open {
+            format!(" · {}", app.cards.len())
+        } else {
+            format!(" · {} {}", app.cards.len(), stack.as_str())
+        },
         fg(MUTED),
     ));
     // The scope rides the always-drawn header rather than the settings line,
@@ -874,7 +1093,24 @@ fn rail_header(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Which slice of the stack is on screen, when it is not the whole of it.
+/// The line that says the digits are live, while they are.
+///
+/// A line of its own rather than a clause on the header, which has no columns
+/// to spare and drops what it cannot fit off the right-hand end. An armed prefix
+/// is a state the keyboard is in and nothing else on screen would show it —
+/// without this, digits that answer cards look exactly like digits that do not.
+fn rail_armed(app: &App) -> Option<Line<'static>> {
+    if !app.rail.quick {
+        return None;
+    }
+    let numbered = app.cards.len().min(rail::QUICK);
+    Some(Line::from(vec![
+        Span::styled(format!(" 1–{numbered}"), bold(USER)),
+        Span::styled(" accepts · Esc cancels".to_string(), fg(MUTED)),
+    ]))
+}
+
+/// How much of the stack is on screen, when it is not all of it.
 ///
 /// Not decoration: five cards drawn out of twelve, with nothing saying so, is
 /// seven cards that read as never having been raised — the same failure the
@@ -882,12 +1118,17 @@ fn rail_header(app: &App) -> Line<'static> {
 /// settings are already being printed, and takes one of its own when they are
 /// not, because it is drawn from a cap the reader never chose and so cannot be
 /// expected to remember.
-fn rail_window(app: &App, first: usize, shown: usize) -> Option<Line<'static>> {
+///
+/// A count rather than the `1–5 of 12` range it used to print. Grouping moved
+/// cards past each other, so a card's position in the drawn list is no longer
+/// its position in the query — and a range over one, read as a range over the
+/// other, is a more confident wrong answer than no range at all.
+fn rail_window(app: &App, shown: usize) -> Option<Line<'static>> {
     let settings = rail_settings(app);
     if shown == 0 || shown >= app.cards.len() {
         return settings;
     }
-    let window = format!("{}–{} of {}", first + 1, first + shown, app.cards.len());
+    let window = format!("{shown} of {} shown", app.cards.len());
     Some(match settings {
         Some(line) => {
             let mut spans = line.spans;
@@ -11339,10 +11580,17 @@ mod tests {
         );
     }
 
-    /// **E2's check, word for word:** a rendered frame showing three cards, one
-    /// bordered `blocked`, the answered one hidden until toggled.
+    /// **E2's check:** a rendered frame showing three cards, one marked
+    /// `blocked`, the answered one hidden until toggled.
+    ///
+    /// E2 asked for the blocked card to be *bordered*. It is marked instead:
+    /// a border round a one-row card is three rows of box for one row of card,
+    /// and the boxes are what made five of six cards the most the rail could
+    /// draw. What E2 was actually protecting — that blocking is never carried by
+    /// colour alone — is unchanged and asserted below, on the `!` in the glyph
+    /// column and on the word itself in the header.
     #[test]
-    fn the_rail_shows_three_cards_one_bordered_blocked_and_the_answered_one_only_on_toggle() {
+    fn the_rail_shows_three_cards_one_marked_blocked_and_the_answered_one_only_on_toggle() {
         let (store, conversation) = rail_store();
 
         let open = rail_app(&store, &conversation, Default::default());
@@ -11359,10 +11607,28 @@ mod tests {
             !frame.contains("retry the flaky test?"),
             "an answered card is out of the stack until it is toggled back: {frame}"
         );
-        // Bordered, not merely listed: three cards means three boxes.
+        // Three cards means three rows, each carrying one card and no other.
+        for title in [
+            "chat DB: chose SQLite",
+            "which port for the API?",
+            "GITHUB_TOKEN is missing",
+        ] {
+            assert_eq!(
+                frame.lines().filter(|line| line.contains(title)).count(),
+                1,
+                "{title} gets a row of its own: {frame}"
+            );
+        }
+        // And blocking is said in something other than colour, which is the
+        // rule the border used to satisfy.
+        let blocked = frame
+            .lines()
+            .find(|line| line.contains("which port for the API?"))
+            .expect("the blocking card is drawn")
+            .to_string();
         assert!(
-            frame.matches('┌').count() >= 3,
-            "each card gets a border of its own: {frame}"
+            blocked.contains('!'),
+            "the blocking card carries a mark as well as a colour: {blocked}"
         );
 
         // `t` cycles the stack, and the answered card comes back — saying both
@@ -11372,9 +11638,29 @@ mod tests {
         let answered = rail_app(&store, &conversation, rail);
         let frame = rendered(&answered, 150, 40);
         assert!(frame.contains("retry the flaky test?"), "{frame}");
+        // D2: an answer is asynchronous and the rail must not pretend
+        // otherwise, so **both** facts are on screen — what the human did and
+        // whether the agent has heard. In a thirty-four column column they are
+        // said between the header and the row rather than joined on the row,
+        // because `answered, queued` there leaves four columns for the card and
+        // a state note beside an unreadable question is not the honest trade.
+        // Joined on one row wherever there is room for it — see the phone panel
+        // below, and the expanded card, which never abbreviates.
         assert!(
-            frame.contains("answered, queued"),
-            "an answer is asynchronous and the rail must not pretend otherwise: {frame}"
+            frame.contains("answered"),
+            "what the human did: {frame}"
+        );
+        assert!(
+            frame.contains("queued"),
+            "and whether the agent has heard: {frame}"
+        );
+
+        // The phone's bottom panel is wide enough for the sentence, so it gets
+        // the sentence.
+        let wide = rendered(&answered, 78, 30);
+        assert!(
+            wide.contains("answered, queued"),
+            "a rail with room for both words joins them: {wide}"
         );
     }
 
@@ -11570,10 +11856,89 @@ mod tests {
         out
     }
 
-    /// A tall terminal used to fill the whole column with cards. Five is the
-    /// cap, and the cards past it are reached by moving the cursor.
+    /// The rail as it now reads: a heading a project, a row a card, and a
+    /// column down the right saying what the digit beside each one would do.
     #[test]
-    fn the_stack_draws_five_cards_at_most_however_tall_the_terminal_is() {
+    fn the_stack_groups_by_project_and_prints_what_the_digit_would_answer() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let conversation = store
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .expect("a conversation")
+            .id;
+        let approval = |command: &str| NewCard {
+            conversation_id: conversation.clone(),
+            run_id: Some("3f2ab1c0".into()),
+            blocking: true,
+            importance: Some(Importance::High),
+            title: format!("Bash: {command}"),
+            options: vec![
+                format!("{} `{command}*`", jod_core::approvals::ALWAYS),
+                jod_core::approvals::ONCE.to_string(),
+                jod_core::approvals::DENY.to_string(),
+            ],
+            dedupe_key: Some(format!("approval:Bash:{command}*")),
+            ..Default::default()
+        };
+        store.raise_card(approval("cargo test ")).expect("a card");
+        store.raise_card(approval("gh pr create ")).expect("a card");
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                title: "which port for the API?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+
+        let a = rail_app(&store, &conversation, Default::default());
+        let frame = rendered(&a, 150, 40);
+
+        // Every permission card says what the digit sends, so the queue can be
+        // cleared without opening any of them.
+        for command in ["cargo test", "gh pr create"] {
+            let row = frame
+                .lines()
+                .find(|line| line.contains(command))
+                .unwrap_or_else(|| panic!("{command} is drawn: {frame}"))
+                .to_string();
+            assert!(
+                row.contains("allow"),
+                "the row says what accepting it does: {row}"
+            );
+        }
+        // And the one that cannot be answered blind says so rather than
+        // offering a word that would be a guess.
+        // Matched on a prefix: beside a column of `allow` the title has
+        // twenty-two columns, and this one is twenty-three.
+        let open = frame
+            .lines()
+            .find(|line| line.contains("which port for the"))
+            .expect("the question is drawn")
+            .to_string();
+        assert!(
+            open.contains('—') && !open.contains("allow"),
+            "an open question offers nothing to accept: {open}"
+        );
+
+        // One heading over the lot of them, naming where they came from.
+        let session: String = conversation.chars().take(8).collect();
+        assert!(
+            frame.contains(&format!("session {session}")),
+            "the group is headed by the session that raised them: {frame}"
+        );
+        // Three cards in five rows — a heading and three rows — where the
+        // bordered version spent twelve.
+        assert_eq!(
+            painted(&a, 150, 40).rail.cards.len(),
+            3,
+            "all three drawn"
+        );
+    }
+
+    /// A tall terminal used to fill the whole column with cards. Nine is the
+    /// cap — the digits `Ctrl-R` arms — and the cards past it are reached by
+    /// moving the cursor.
+    #[test]
+    fn the_stack_draws_nine_cards_at_most_however_tall_the_terminal_is() {
         let (store, conversation) = crowded_store(12);
         let a = rail_app(&store, &conversation, Default::default());
         assert_eq!(a.cards.len(), 12, "all twelve are in hand");
@@ -11582,19 +11947,19 @@ mod tests {
         assert_eq!(
             hits.cards.len(),
             rail::VISIBLE,
-            "a sixty-row terminal still draws five: {:?}",
+            "a sixty-row terminal still draws nine: {:?}",
             hits.cards
         );
 
         let frame = rendered(&a, 150, 60);
         assert!(
-            frame.contains("1–5 of 12"),
-            "and it says the other seven exist: {frame}"
+            frame.contains("9 of 12 shown"),
+            "and it says the other three exist: {frame}"
         );
     }
 
     /// The cap is on the cards, not on the cursor. Every card in the stack has
-    /// to be reachable, or five cards is five cards and the rest were dropped.
+    /// to be reachable, or nine cards is nine cards and the rest were dropped.
     #[test]
     fn the_window_follows_the_cursor_to_the_bottom_of_a_crowded_stack() {
         let (store, conversation) = crowded_store(12);
@@ -11610,8 +11975,8 @@ mod tests {
         );
         let frame = rendered(&a, 150, 60);
         assert!(
-            frame.contains("8–12 of 12"),
-            "and the header says which five those are: {frame}"
+            frame.contains("9 of 12 shown"),
+            "and the header says how many of the twelve those are: {frame}"
         );
     }
 
@@ -11638,25 +12003,24 @@ mod tests {
         // answer whatever card happens to share its row.
         assert!(!hits.holds(0, 0), "the top-left corner is the chat's");
 
-        // The phone, where the rail is a twelve-row panel with room for two of
-        // the three. The two it drew are still clickable, and the header says
-        // the third is there.
+        // The phone, where the rail is a twelve-row panel. It used to have room
+        // for two of the three cards, because a card was four rows; at one row
+        // each all three fit, which is the point of the change — the panel that
+        // used to hide a third of the fleet's questions now hides none of them.
         let narrow = painted(&a, 78, 30).rail;
-        assert!(
-            !narrow.cards.is_empty(),
-            "the panel draws what it has room for: {:?}",
+        assert_eq!(
+            narrow.cards.len(),
+            3,
+            "all three fit the phone panel now: {:?}",
             narrow.cards
         );
-        let hit = narrow.cards[0];
-        assert_eq!(
-            narrow.card_at(narrow.area.expect("a rail").x + 2, hit.top + 1),
-            Some(hit.id)
-        );
-        let frame = rendered(&a, 78, 30);
-        assert!(
-            frame.contains(&format!("of {}", a.cards.len())),
-            "and the panel says how many it is not showing: {frame}"
-        );
+        for hit in &narrow.cards {
+            assert_eq!(
+                narrow.card_at(narrow.area.expect("a rail").x + 2, hit.top),
+                Some(hit.id),
+                "every card the panel drew is clickable"
+            );
+        }
     }
 
     /// An option is answered by tapping the option, which means the row it is
@@ -11855,7 +12219,7 @@ mod tests {
             "and that one of them stopped a run: {squat}"
         );
         assert!(
-            squat.contains("Ctrl-N"),
+            squat.contains("Ctrl-R"),
             "and which key answers it: {squat}"
         );
     }
@@ -13678,8 +14042,14 @@ mod tests {
     // ---- cascading cards ----
 
     /// E4.S5: with the subtree scope on, the rail holds cards from agents all
-    /// over the fleet and answering writes against one of them, so every row
-    /// has to say whose question it is.
+    /// over the fleet and answering writes against one of them, so the reader
+    /// has to be able to see whose question each one is.
+    ///
+    /// **Said once per group rather than once per card.** That is the whole
+    /// point of grouping, and it is strictly more information than the row
+    /// carried before: a heading has room for the work's own title, where a
+    /// thirty-four column row had room for six characters of its id. What the
+    /// row must still never do is spend its own columns repeating it.
     #[test]
     fn a_cascaded_rail_names_the_session_on_every_card() {
         let store = RealStore::in_memory().expect("an in-memory store");
@@ -13701,22 +14071,39 @@ mod tests {
         let frame = rendered(&a, 150, 40);
         let session: String = conversation.chars().take(8).collect();
         assert!(frame.contains(&session), "the session that raised it: {frame}");
-        assert!(frame.contains("3f2a"), "and which run: {frame}");
         assert!(
             frame.contains("· subtree"),
             "the scope is on the header, always: {frame}"
         );
 
-        // Narrowed to one conversation, every card came from the same place,
-        // so the line spends its columns on the card instead — and the header
-        // says which of the two states this is, because a narrowed rail and a
-        // quiet fleet look identical otherwise.
+        // The heading carries it; the card's own row does not. This is the half
+        // of E4.S5 that has to keep holding whichever way the provenance is
+        // drawn — a row that repeats what the heading above it just said is the
+        // crowding the redesign removed.
+        let row = frame
+            .lines()
+            .find(|line| line.contains("which port for the API?"))
+            .expect("the card is drawn")
+            .to_string();
+        assert!(
+            !row.contains(&session),
+            "the row spends its columns on the card, not on the id above it: {row}"
+        );
+
+        // Narrowed to one conversation, every card came from the same place —
+        // and the header says which of the two states this is, because a
+        // narrowed rail and a quiet fleet look identical otherwise.
         a.rail.cascade = false;
         let frame = rendered(&a, 150, 40);
         assert!(frame.contains("· here"), "{frame}");
+        let row = frame
+            .lines()
+            .find(|line| line.contains("which port for the API?"))
+            .expect("the card is drawn")
+            .to_string();
         assert!(
-            !frame.contains(&session),
-            "narrowed, every card came from here, so the columns go to the card: {frame}"
+            !row.contains(&session),
+            "narrowed or not, the row is the card's: {row}"
         );
     }
 

@@ -204,7 +204,7 @@ pub const GLOBAL: &[Key] = &[
     // reason, and it is the reason E2.S3 gives: the chat box owns every bare
     // key, so a rail verb on `c` would type a `c` into the sentence being
     // written. See [`RAIL`].
-    k("Ctrl-R", "show or hide the rail"),
+    k("Ctrl-R", "the rail, then 1–9 to accept"),
     k("Ctrl-N", "the cards — and away again"),
     // The side panel, which is where the projects, the sessions, the mode, the
     // harness, the spend and the context left are drawn — a large fraction of

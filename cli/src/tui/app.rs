@@ -21,7 +21,7 @@ use super::fleet::{is_loose, loose_id, main_id, TreeState};
 use super::todo;
 use super::mention::Mention;
 use super::picker::Picker;
-use super::rail::RailState;
+use super::rail::{self, RailState};
 use super::secret::Typed;
 use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
@@ -717,6 +717,14 @@ pub struct App {
     /// store. Refreshed on the tick, off the render path, so `draw()` stays a
     /// pure function of state.
     pub cards: Vec<Card>,
+    /// Work id to the work's own title, for the rail's group headings.
+    ///
+    /// A cache rather than a load: the rail refreshes on every keystroke of its
+    /// filter box, and a work's title does not change, so an id already looked
+    /// up is never looked up again. It only ever grows, and it grows by the
+    /// handful — the rail asks for fifty cards at most and they come from a few
+    /// works.
+    pub work_titles: HashMap<String, String>,
     pub rail: RailState,
     /// The conversation's roots, in the user's own order. The first is the one
     /// an unqualified mention resolves against.
@@ -1398,6 +1406,7 @@ impl App {
             cwd: PathBuf::new(),
             conversation: None,
             cards: Vec::new(),
+            work_titles: HashMap::new(),
             rail: RailState::default(),
             roots: Vec::new(),
             candidates: Vec::new(),
@@ -1854,6 +1863,28 @@ impl App {
         }
     }
 
+    /// `Ctrl-R`: put the rail on screen and watch for a digit, or put it away.
+    ///
+    /// The same bookkeeping as [`App::toggle_rail_shown`] on the way out, and
+    /// deliberately *not* the same on the way in: this never calls
+    /// [`App::take_keyboard`]. The prefix's whole value is that it costs
+    /// nothing — press it mid-sentence, read the numbered rows, then press a
+    /// digit or carry on typing — and a chord that took the bare keys would
+    /// cost the sentence. `Ctrl-N` is the key that takes them.
+    ///
+    /// Returns whether it armed rather than disarmed.
+    pub fn arm_rail(&mut self) -> bool {
+        if self.rail.quick {
+            self.rail.close();
+            self.release_keyboard(Layer::Rail);
+            return false;
+        }
+        self.rail.shown = true;
+        self.rail.quick = true;
+        self.sync_focus();
+        true
+    }
+
     /// A pointer landing in the rail, which says the same thing `Ctrl-N` does.
     pub fn focus_rail(&mut self) {
         self.rail.shown = true;
@@ -1891,8 +1922,39 @@ impl App {
 
     /// The cards on screen, by id, in the order they are drawn. This is what
     /// the rail's cursor moves over.
+    /// The rail's cards gathered under their project headings.
+    ///
+    /// Recomputed rather than cached: it is a pass over at most fifty cards, and
+    /// a cached grouping is one more thing that can disagree with `cards` after
+    /// a refresh — which is the one failure the whole ordering has to be free
+    /// of. See [`rail::group`].
+    pub fn rail_groups(&self) -> Vec<rail::Group> {
+        rail::group(&self.cards, &self.work_titles)
+    }
+
+    /// The cards in the order the rail draws them, as indices into `cards`.
+    pub fn rail_order(&self) -> Vec<usize> {
+        rail::order(&self.rail_groups())
+    }
+
+    /// The card the rail's `n`th quick-answer digit points at, one-based.
+    pub fn quick_card(&self, n: usize) -> Option<&Card> {
+        if n == 0 || n > rail::QUICK {
+            return None;
+        }
+        self.cards.get(*self.rail_order().get(n - 1)?)
+    }
+
+    /// The cursor's world, in the order the rail draws it.
+    ///
+    /// Grouped, not the query's order: `↑↓` walk the rows a reader can see, and
+    /// stepping down from the last card of one project has to land on the first
+    /// card of the next one rather than wherever the sort put it.
     pub fn card_ids(&self) -> Vec<i64> {
-        self.cards.iter().map(|c| c.id).collect()
+        self.rail_order()
+            .into_iter()
+            .filter_map(|at| self.cards.get(at).map(|c| c.id))
+            .collect()
     }
 
     pub fn selected_card(&self) -> Option<&Card> {

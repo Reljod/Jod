@@ -3209,6 +3209,15 @@ fn on_key(
     if app.overlay.is_open() {
         return on_overlay_key(app, key);
     }
+    // An armed rail is watching for exactly one keystroke. Ahead of the chords
+    // and of every screen's own keys, because the digit it wants is one every
+    // screen would otherwise spend on something else; behind the overlays,
+    // which own the keyboard outright while they are up.
+    if app.rail.quick {
+        if let Some(outcome) = on_quick_key(app, key) {
+            return outcome;
+        }
+    }
     if ctrl || alt {
         if let Some(action) = on_chord(app, key) {
             return action;
@@ -3600,6 +3609,82 @@ fn on_rail_wheel(app: &mut App, hits: &ui::RailHits, delta: i16) {
     app.rail.step(delta as isize, &ids);
 }
 
+/// The one keystroke an armed rail is waiting for, after `Ctrl-R`.
+///
+/// `Some` means the key was the rail's and is spent; `None` hands it back to
+/// whatever would have had it, which is what makes an armed rail safe to leave
+/// armed — press `Ctrl-R`, change your mind, carry on typing, and the letter you
+/// typed is the letter that appears.
+///
+/// **Bare digits, and Ctrl-digits where a terminal sends them.** `Ctrl-1` is not
+/// a distinct keystroke in a terminal that speaks the ordinary protocol — it
+/// arrives as a plain `1`, indistinguishable from the digit — and Jod does not
+/// ask for the Kitty extensions that would change that. So the chord is
+/// `Ctrl-R` then `1`, and the Ctrl-spelled version is accepted too rather than
+/// refused, for the terminals that do send it and the fingers that expect it.
+fn on_quick_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+    match key.code {
+        // The way out that changes nothing. `Esc` everywhere else in this
+        // program undoes one level, and this is a level.
+        KeyCode::Esc => {
+            app.rail.disarm();
+            Some(None)
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            app.rail.disarm();
+            let n = c.to_digit(10).unwrap_or(0) as usize;
+            Some(quick_answer(app, n))
+        }
+        // Everything else puts the prefix down and is handled as though it had
+        // never been armed — including `Ctrl-R` itself, which falls through to
+        // the chord and closes the rail.
+        _ => {
+            if !matches!(key.code, KeyCode::Char('r')) {
+                app.rail.disarm();
+            }
+            None
+        }
+    }
+}
+
+/// Accept the `n`th rail row's recommendation, one-based.
+///
+/// Refuses rather than guesses in both directions. A number with no row behind
+/// it says so; a row whose card cannot be answered blind — an open question, a
+/// missing credential — is *selected and shown* rather than answered, so the
+/// keystroke still gets you to the thing you meant even when it cannot finish
+/// the job. Answering one of those with a guess is the failure this whole
+/// feature would otherwise introduce.
+fn quick_answer(app: &mut App, n: usize) -> Option<Action> {
+    let Some(card) = app.quick_card(n) else {
+        app.push(Entry::Notice(format!(
+            "the rail has no card {n} — it holds {}",
+            app::plural(app.cards.len().min(rail::QUICK), "numbered card")
+        )));
+        return None;
+    };
+    let (id, title) = (card.id, app::one_line(&card.title, 48));
+    match rail::recommended(card) {
+        Some(rec) => {
+            app.rail.look_at(id);
+            app.push(Entry::Notice(format!("#{id} {title} — {}", rec.option)));
+            Some(Action::AnswerCard {
+                id,
+                chosen: Some(rec.option),
+                answer: None,
+            })
+        }
+        None => {
+            app.rail.look_at(id);
+            app.rail.shown = true;
+            app.push(Entry::Notice(format!(
+                "#{id} {title} — nothing to accept here; Ctrl-N then ⏎ opens it"
+            )));
+            None
+        }
+    }
+}
+
 /// A digit in the rail picks the numbered option under the cursor.
 ///
 /// A digit that names no option says so rather than doing nothing: the options
@@ -3745,12 +3830,28 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // has never implemented — the input is one prompt, not a history buffer
         // to walk — so the letter is free and `r` is the one that means rail.
         //
-        // A visibility toggle, deliberately separate from `Ctrl-N`: hiding the
-        // rail must not depend on where the cursor is, and showing it must not
-        // cost you the keyboard. Hiding it also hands the keyboard back, or the
-        // bare keys would still be the rail's with no rail on screen.
+        // **A prefix, not a visibility toggle.** It used to only show and hide
+        // the column, which is the cheapest thing the rail can do and not the
+        // thing anybody wants: what you want from a rail full of blocked runs is
+        // to clear it. So this shows it *and* arms a digit — `Ctrl-R` then `3`
+        // accepts card three's recommendation — and the old job survives at both
+        // ends, because the first press still reveals a hidden rail and the
+        // second press still takes it away.
+        //
+        // Still deliberately separate from `Ctrl-N`: this one never takes the
+        // keyboard, so it is free to press mid-sentence and costs nothing if you
+        // then decide to carry on typing.
         KeyCode::Char('r') if either => {
-            app.toggle_rail_shown();
+            let armed = app.arm_rail();
+            if armed && app.cards.is_empty() {
+                // An armed rail with nothing in it prints numbers for no rows,
+                // and the next digit typed would find no card and say so. Say it
+                // now instead, and do not sit there waiting.
+                app.rail.disarm();
+                app.push(Entry::Notice(
+                    "nothing is waiting — no agent has asked anything".into(),
+                ));
+            }
             handled(None)
         }
         // Open the rail, take the keyboard, and put it away again on the second
@@ -6928,6 +7029,10 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
 /// it can run on every keystroke of the filter box as well as on the tick.
 fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
     app.cards = data::cards(jod, &app.rail.query(app.conversation.clone()));
+    // The headings the rail groups under. Cached, so this is a query only for a
+    // work whose name is not known yet — which is once per work, not once per
+    // refresh, and the refresh runs on every keystroke of the filter box.
+    data::learn_work_titles(jod, &app.cards, &mut app.work_titles);
     app.reconcile_rail();
     // The rail opens itself once per session — a column that appears on its own
     // without explanation reads as a rendering fault, so that is said out loud
@@ -14703,8 +14808,162 @@ mod tests {
         assert_eq!(app.input, "half a sentence!", "the letters are the chat's again");
     }
 
+    /// A permission card as `jod approve-hook` raises one, filed under a work.
+    fn an_approval(id: i64, work: &str, conversation: &str, command: &str) -> jod_core::cards::Card {
+        let mut card = a_card(
+            id,
+            &format!("Bash: {command}"),
+            true,
+            &[
+                &format!("{} `{command}*`", jod_core::approvals::ALWAYS),
+                jod_core::approvals::ONCE,
+                jod_core::approvals::DENY,
+            ],
+        );
+        card.work_id = Some(work.into());
+        card.conversation_id = conversation.into();
+        card.dedupe_key = Some(format!("approval:Bash:{command}*"));
+        card
+    }
+
+    /// A rail holding two projects' permission cards, interleaved the way the
+    /// query returns them rather than the way the rail draws them.
+    fn with_two_projects() -> App {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.cards = vec![
+            an_approval(1, "work-a", "conv-a", "cargo test "),
+            an_approval(2, "work-b", "conv-b", "gh pr create "),
+            an_approval(3, "work-a", "conv-a", "rm -rf node_modules"),
+        ];
+        app.reconcile_rail();
+        app
+    }
+
+    /// The chord the redesign exists for: two keystrokes, from the chat box,
+    /// with no card opened and no cursor moved.
+    #[test]
+    fn ctrl_r_then_a_digit_allows_the_card_that_digit_is_printed_beside() {
+        let mut app = with_two_projects();
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert!(app.rail.quick, "armed");
+        assert!(!app.rail.focused, "and the keyboard is still the chat's");
+
+        assert_eq!(
+            press(&mut app, KeyCode::Char('1')),
+            Some(Action::AnswerCard {
+                id: 1,
+                chosen: Some(jod_core::approvals::ONCE.into()),
+                answer: None,
+            })
+        );
+        assert!(!app.rail.quick, "and the prefix is spent");
+    }
+
+    /// **The digit counts the rows on screen, not the rows the query returned.**
+    /// Grouping draws both of `work-a`'s cards before `work-b`'s, so `2` is the
+    /// second card *drawn* — card 3 — and not the second card queried.
+    #[test]
+    fn the_quick_digit_follows_the_order_the_rail_draws() {
+        let mut app = with_two_projects();
+        assert_eq!(
+            app.cards.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the query's order"
+        );
+        assert_eq!(app.card_ids(), vec![1, 3, 2], "the drawn order");
+
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('2')),
+            Some(Action::AnswerCard {
+                id: 3,
+                chosen: Some(jod_core::approvals::ONCE.into()),
+                answer: None,
+            }),
+            "the second row drawn, which is work-a's second card"
+        );
+    }
+
+    /// An armed prefix must never eat a sentence. Any key that is not a digit
+    /// puts it down and is typed exactly as it would have been.
+    #[test]
+    fn a_letter_after_the_prefix_disarms_it_and_is_still_typed() {
+        let mut app = with_two_projects();
+        type_line(&mut app, "half a sentence");
+        ctrl(&mut app, KeyCode::Char('r'));
+        type_line(&mut app, "!");
+        assert!(!app.rail.quick, "the prefix is down");
+        assert_eq!(app.input, "half a sentence!", "and the key was still typed");
+    }
+
+    /// `Esc` is the way out that changes nothing — the rail stays where it was
+    /// and the typed line is untouched.
+    #[test]
+    fn esc_after_the_prefix_disarms_and_leaves_everything_alone() {
+        let mut app = with_two_projects();
+        type_line(&mut app, "half a sentence");
+        ctrl(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.rail.quick);
+        assert!(app.rail.shown, "the rail is still up");
+        assert_eq!(app.input, "half a sentence");
+    }
+
+    /// A card nobody can answer blind is opened rather than guessed at. The
+    /// keystroke still takes you to the thing you meant; what it does not do is
+    /// invent an answer for it.
+    #[test]
+    fn the_prefix_on_an_unanswerable_card_selects_it_instead_of_guessing() {
+        let mut app = with_cards();
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('1')),
+            None,
+            "an open question has no answer a digit can send"
+        );
+        assert_eq!(app.rail.selected, Some(1), "but it is the card you meant");
+        assert!(app.rail.shown);
+        assert!(
+            last_notice(&app).contains("nothing to accept"),
+            "and it says why: {}",
+            last_notice(&app)
+        );
+    }
+
+    /// A digit past the end of the rail says so rather than doing nothing.
+    #[test]
+    fn a_digit_past_the_last_card_is_answered_in_words() {
+        let mut app = with_two_projects();
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert_eq!(press(&mut app, KeyCode::Char('9')), None);
+        assert!(
+            last_notice(&app).contains("no card 9"),
+            "{}",
+            last_notice(&app)
+        );
+    }
+
+    /// Arming a rail with nothing in it would sit there waiting for a digit
+    /// that can never land on anything.
+    #[test]
+    fn the_prefix_on_an_empty_rail_says_so_and_does_not_arm() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        ctrl(&mut app, KeyCode::Char('r'));
+        assert!(!app.rail.quick);
+        assert!(
+            last_notice(&app).contains("nothing is waiting"),
+            "{}",
+            last_notice(&app)
+        );
+    }
+
     /// Hiding the rail has to hand the keyboard back with it, or the bare keys
     /// stay the rail's with no rail on screen to explain them.
+    ///
+    /// `Ctrl-R` is a prefix now, so it takes two presses rather than one: the
+    /// first arms the quick answer, the second puts the whole thing away. The
+    /// requirement is unchanged — whatever closes the rail hands the keyboard
+    /// back — and only the number of presses moved.
     #[test]
     fn alt_r_shows_and_hides_the_rail_and_takes_the_focus_with_it() {
         let mut app = with_cards();
@@ -14712,8 +14971,13 @@ mod tests {
         assert!(app.rail.focused);
 
         ctrl(&mut app, KeyCode::Char('r'));
+        assert!(app.rail.quick, "the first press arms rather than closes");
+        assert!(app.rail.shown, "and leaves the rail where it was");
+
+        ctrl(&mut app, KeyCode::Char('r'));
         assert!(!app.rail.shown);
         assert!(!app.rail.focused, "no rail, no rail keys");
+        assert!(!app.rail.quick, "and nothing left watching for a digit");
 
         type_line(&mut app, "hello");
         assert_eq!(app.input, "hello", "the letters are the chat's again");
@@ -14783,7 +15047,9 @@ mod tests {
         let hits = drawn(&app, 78, 30);
         let hit = *hits.cards.last().expect("a card was drawn");
 
-        assert_eq!(on_click(&mut app, &hits, &ui::PanelHits::default(), hits.area.unwrap().x + 2, hit.top + 1), None);
+        // `hit.top`, not `hit.top + 1`: a collapsed card is one row now, so the
+        // row under its first is the *next* card's.
+        assert_eq!(on_click(&mut app, &hits, &ui::PanelHits::default(), hits.area.unwrap().x + 2, hit.top), None);
         assert_eq!(app.rail.selected, Some(hit.id), "the card that was tapped");
         assert!(app.rail.expanded, "opened, not merely selected");
         assert!(app.rail.focused, "and the digits are the rail's now");
