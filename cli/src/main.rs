@@ -18,6 +18,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use jod_core::consolidate::{Consolidation, Provenance};
 use jod_core::conversation::PortableMessage;
+use jod_core::harness::Role;
 // The main chat's one hand-off, shared with the TUI's `/main` and the Telegram
 // bridge. It lives in `core` because the bridge lives there too.
 pub(crate) use jod_core::orchestrator::hand_to_orchestrator;
@@ -539,9 +540,21 @@ enum Command {
         max: u32,
     },
     /// Hold a conversation on a plain terminal, without the full-screen UI.
+    ///
+    /// The console without a screen, so it is configured the way the console
+    /// is: the `main` role decides the harness, the model, the thinking level
+    /// and the permission ceiling unless a flag here says otherwise.
     Chat {
-        #[arg(short = 'H', long, value_enum, default_value_t = HarnessArg::Claude)]
-        harness: HarnessArg,
+        /// Which harness to open on. Defaults to what the `main` role names.
+        //
+        // The `Option` is load-bearing rather than decorative, for the reason
+        // `Tui` gives above: a chat can only defer to the `main` role if it can
+        // tell "not given" from "given the value that happens to be the
+        // default". Clap collapses those two the moment a flag has a
+        // `default_value`, so the flag has none and the default lives at the
+        // point of use.
+        #[arg(short = 'H', long, value_enum)]
+        harness: Option<HarnessArg>,
         #[arg(short, long)]
         cwd: Option<PathBuf>,
         #[arg(short, long)]
@@ -1569,7 +1582,7 @@ enum TeamCommand {
     Ls,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum HarnessArg {
     Claude,
     Opencode,
@@ -4874,6 +4887,85 @@ fn continuing_conversation(
     })
 }
 
+/// Which layer of the chain of command a chat turn belongs to.
+///
+/// `jod chat` is the console without a screen, so it is main, and tagging it
+/// with main's role is what lets the roles table fill in the harness, the
+/// model, the thinking level and the permission ceiling that nobody named on
+/// the command line. Without the tag `apply_role` returns immediately and a
+/// chat runs on the fallback harness whatever the panel says.
+///
+/// The tag is dropped the moment `--harness` is given, which is the shape
+/// [`SpawnRequest::role`] asks every caller for: `harness` on a request is a
+/// bare [`HarnessKind`], so "the operator asked for Claude Code" and "nobody
+/// asked for anything" reach `apply_role` as the same value, and the call site
+/// is the last place that still knows the difference.
+fn chat_role(named: Option<HarnessArg>) -> Option<Role> {
+    named.is_none().then_some(Role::Main)
+}
+
+/// The harness a chat will actually open on.
+///
+/// Resolved here, before the first turn, because two things ahead of the spawn
+/// need it: the opening line names the harness, and `--continue` rejoins that
+/// harness's own last session rather than some other harness's. Both would be
+/// talking about Claude Code while the run happened on AGY if this waited for
+/// `apply_role` to run inside the spawn.
+///
+/// It asks `apply_role` rather than reading the role row itself, so there is
+/// still exactly one piece of code that knows how a role row is applied. The
+/// probe says `Resume::Fresh` because that is what a chat's first turn is, and
+/// because `apply_role` moves a harness only on a fresh run.
+///
+/// The cost of borrowing `apply_role` is that a `main` row it has something to
+/// complain about — an unknown harness id, a thinking level the harness has no
+/// word for — is complained about here as well as at the spawn, so the line
+/// appears once more than it otherwise would. That is the whole of the cost,
+/// and it only lands on a store that is already misconfigured, which is a
+/// better trade than a second copy of the precedence rules living out here.
+fn chat_harness(store: Option<&Store>, named: Option<HarnessArg>) -> HarnessKind {
+    let mut probe = SpawnRequest {
+        harness: named.map_or(HarnessKind::ClaudeCode, Into::into),
+        role: chat_role(named),
+        resume: Resume::Fresh,
+        ..SpawnRequest::default()
+    };
+    if let Some(store) = store {
+        jod_core::service::apply_role(store, &mut probe);
+    }
+    probe.harness
+}
+
+/// The spawn one turn of a chat asks for.
+///
+/// Lifted out of the loop so the request a chat builds can be asserted without
+/// a terminal, a harness or a stdin — which is the only honest way to check
+/// that a chat carries main's role, since the alternative is launching a real
+/// model and reading its answer.
+fn chat_request(
+    prompt: String,
+    harness: HarnessKind,
+    role: Option<Role>,
+    cwd: PathBuf,
+    model: Option<String>,
+    permission: PermissionPolicy,
+    resume: Resume,
+) -> SpawnRequest {
+    SpawnRequest {
+        name: default_name(&prompt),
+        harness,
+        prompt,
+        system: None,
+        cwd,
+        model,
+        permission,
+        role,
+        resume,
+        tools: None,
+        ..SpawnRequest::default()
+    }
+}
+
 /// One conversation, many turns.
 ///
 /// Every turn after the first resumes the harness session the previous turn
@@ -4883,7 +4975,7 @@ fn continuing_conversation(
 /// turn cheap, the conversation is what survives the harness being swapped.
 async fn chat(
     jod: std::sync::Arc<Jod>,
-    harness: HarnessArg,
+    harness: Option<HarnessArg>,
     cwd: Option<PathBuf>,
     model: Option<String>,
     permission: PermissionPolicy,
@@ -4891,7 +4983,8 @@ async fn chat(
 ) -> Result<()> {
     use std::io::Write;
 
-    let kind: HarnessKind = harness.into();
+    let role = chat_role(harness);
+    let kind = chat_harness(jod.store().map(|s| s.as_ref()), harness);
     // The directory this command was typed in. `jod chat` is the console
     // without a screen — you `cd` into a repository and start talking — so it
     // answers this the way `jod tui` and `jod main` do rather than starting in
@@ -4925,18 +5018,15 @@ async fn chat(
         let events = jod.subscribe();
         let agent = jod
             .spawn_agent_in(
-                SpawnRequest {
-                    name: default_name(&prompt),
-                    harness: kind,
+                chat_request(
                     prompt,
-                    system: None,
-                    cwd: cwd.clone(),
-                    model: model.clone(),
-                    permission: permission.into(),
-                    resume: resume.clone(),
-                    tools: None,
-                    ..SpawnRequest::default()
-                },
+                    kind,
+                    role,
+                    cwd.clone(),
+                    model.clone(),
+                    permission,
+                    resume.clone(),
+                ),
                 conversation.clone(),
             )
             .await?;
@@ -5058,6 +5148,151 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    /// The arguments `jod chat …` parses to, so the tests below start from the
+    /// real command line rather than from values typed out by hand.
+    fn chat_args(args: &[&str]) -> (Option<HarnessArg>, Option<String>, PermissionPolicy) {
+        use clap::Parser;
+        match Cli::try_parse_from(args).expect("parses").command {
+            Command::Chat {
+                harness,
+                model,
+                permission,
+                ..
+            } => (harness, model, permission),
+            _ => panic!("{args:?} parsed as something other than a chat"),
+        }
+    }
+
+    /// The whole of the finding, in one assertion: a chat that named no harness
+    /// must reach `apply_role` tagged, because an untagged request makes
+    /// `apply_role` return before it reads anything.
+    ///
+    /// `jod chat` is documented as the console without a screen. A console that
+    /// cannot be configured is not the console, and this is the flag that
+    /// decides which one it is.
+    #[test]
+    fn a_chat_that_named_no_harness_asks_to_be_configured_as_main() {
+        let (harness, _, _) = chat_args(&["jod", "chat"]);
+        assert_eq!(
+            harness, None,
+            "the flag cannot say `nobody chose` while it carries a default value"
+        );
+        assert_eq!(chat_role(harness), Some(Role::Main));
+    }
+
+    /// The reproduction, run rather than read. With the `main` role set to a
+    /// harness and a model that are not the fallback, the request a chat turn
+    /// builds must come out of `apply_role` carrying both.
+    ///
+    /// Before the fix this asserted Claude Code and `None`: the request went in
+    /// with no role, `apply_role` returned on its first line, and the roles
+    /// panel might as well not have existed.
+    #[test]
+    fn a_chat_takes_the_harness_and_model_the_main_role_names() {
+        use jod_core::store::RoleField;
+
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("main", RoleField::Harness, Some("agy"))
+            .unwrap();
+        store
+            .role_set("main", RoleField::Model, Some("gemini-3.7-flash-medium"))
+            .unwrap();
+
+        let (harness, model, permission) = chat_args(&["jod", "chat"]);
+        let mut req = chat_request(
+            "say which model and harness you are running on".into(),
+            chat_harness(Some(&store), harness),
+            chat_role(harness),
+            PathBuf::from("/tmp"),
+            model,
+            permission,
+            Resume::Fresh,
+        );
+        jod_core::service::apply_role(&store, &mut req);
+
+        assert_eq!(
+            req.harness,
+            HarnessKind::Agy,
+            "a chat still opens on the fallback harness with the `main` role set to AGY"
+        );
+        assert_eq!(req.model.as_deref(), Some("gemini-3.7-flash-medium"));
+    }
+
+    /// The opening line and `--continue` both run ahead of the spawn, so the
+    /// harness has to be settled before the first turn rather than inside it —
+    /// otherwise a chat announces Claude Code and then talks to AGY.
+    #[test]
+    fn a_chat_settles_its_harness_before_the_first_turn() {
+        use jod_core::store::RoleField;
+
+        let store = Store::in_memory().unwrap();
+        assert_eq!(
+            chat_harness(Some(&store), None),
+            HarnessKind::ClaudeCode,
+            "an unconfigured machine must chat exactly where it chatted before"
+        );
+
+        store
+            .role_set("main", RoleField::Harness, Some("open_code"))
+            .unwrap();
+        assert_eq!(chat_harness(Some(&store), None), HarnessKind::OpenCode);
+    }
+
+    /// The rung above the role wins. Somebody who types `--harness` is choosing
+    /// on purpose, and the row must not quietly move them back.
+    #[test]
+    fn naming_a_harness_on_a_chat_outranks_the_role() {
+        use jod_core::store::RoleField;
+
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("main", RoleField::Harness, Some("agy"))
+            .unwrap();
+
+        let (harness, model, permission) = chat_args(&["jod", "chat", "--harness", "opencode"]);
+        let mut req = chat_request(
+            "look it up".into(),
+            chat_harness(Some(&store), harness),
+            chat_role(harness),
+            PathBuf::from("/tmp"),
+            model,
+            permission,
+            Resume::Fresh,
+        );
+        assert_eq!(
+            req.role, None,
+            "a tagged request would let the `main` row take the harness back"
+        );
+        jod_core::service::apply_role(&store, &mut req);
+        assert_eq!(req.harness, HarnessKind::OpenCode);
+    }
+
+    /// The promise every roles change has to keep: a machine whose owner has
+    /// never opened the panel chats exactly as it did before the panel existed.
+    #[test]
+    fn an_empty_roles_table_changes_no_chat() {
+        let store = Store::in_memory().unwrap();
+        let (harness, model, permission) = chat_args(&["jod", "chat"]);
+        let before = chat_request(
+            "hello".into(),
+            chat_harness(Some(&store), harness),
+            chat_role(harness),
+            PathBuf::from("/tmp"),
+            model,
+            permission,
+            Resume::Fresh,
+        );
+        let mut after = before.clone();
+        jod_core::service::apply_role(&store, &mut after);
+
+        assert_eq!(after.harness, HarnessKind::ClaudeCode);
+        assert_eq!(after.harness, before.harness);
+        assert_eq!(after.model, before.model);
+        assert_eq!(after.effort, before.effort);
+        assert_eq!(after.permission, before.permission);
     }
 
     /// `jod kill` stops a branch of the fleet, and the help is where a person

@@ -359,7 +359,12 @@ Two behaviours it takes care over, both easy to get wrong:
   the restore leaves a shell that echoes nothing and needs a blind `reset`.
 
 `jod chat` is the same conversation on a plain terminal, for when a full-screen
-UI is in the way — over a flaky SSH link, or piped from a script.
+UI is in the way — over a flaky SSH link, or piped from a script. It is
+configured the same way too: a chat that names no harness is spawned as
+[`Role::Main`](decisions.md#jod-chat-is-the-console-without-a-screen-so-it-takes-the-consoles-settings),
+so the harness, model, thinking level and permission ceiling in the `main` role
+reach it. Naming `--harness` drops the tag, because a person who typed a harness
+has chosen one.
 
 ---
 
