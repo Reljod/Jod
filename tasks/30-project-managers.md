@@ -625,7 +625,26 @@ Neither is a live fault. Both are the shape that hid six real ones, which is
 the reason to close them rather than the severity.
 
 ### M3. `additionalProperties` is absent from every tool schema
-Status: **open** · Severity: medium · Owner: m3-additionalprops
+Status: **verified fixed — merged as #248, check run against main, passes** ·
+Severity was: medium
+
+`obj()` now emits `additionalProperties: false`, and `Server::undeclared` turns
+away a call carrying an argument its tool never declared, naming both the
+argument it did not understand and the ones the tool does take. The check reads
+the schema rather than a hard-coded rule, so a tool that one day needs
+open-ended arguments opts out where its own schema is written; the test holding
+that has a named list, currently empty, rather than a blanket exception.
+
+The blast-radius survey found no preamble, skill, agent definition, document or
+client passing an argument a tool does not declare. Three of our own tests did,
+all deliberately, to prove an agent cannot forge its own identity: two of them
+now assert the forging attempt is refused by name and that nothing is written or
+delivered, which is more than they proved before. The one consequence worth
+knowing is that the D3 guard inside `request_secret` is no longer the first
+thing to refuse a smuggled value, because the dispatcher answers first; it was
+kept where the property belongs and the ordering is noted in its doc comment.
+
+What it said before the fix:
 
 `obj()` (`core/src/mcp.rs`) emits `{type, properties, required}` and never
 `additionalProperties: false`, so an argument a tool does not know is accepted,
