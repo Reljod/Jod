@@ -478,7 +478,21 @@ Observed: `jod ls`, `jod work ls`, `jod schedule ls`, `jod goal ls` and
 Fix: accept `ls` on `team`, keeping `list` as an alias so nothing breaks.
 
 ## L10. `cargo test` migrates the developer's real `~/.jod/jod.db`
-Status: **open** · Owner: l10-jod-home · Severity: high
+Status: **fixed — merged as #246** · Severity was: high
+
+Fixed by threading the store rather than by fencing the tests, so the defect is
+gone for real users too. `Harness::args` takes the caller's store,
+`runner::launch` passes the one it already holds, and `write_settings` reads
+grants only from what it was handed — no store means no grants, never a licence
+to open one. Nothing under `core/src/harness/` reaches
+`crate::paths::db_path()` any more.
+
+The check is
+`harness::claude::tests::building_arguments_opens_no_database_of_its_own`. It
+points `JOD_HOME` at an empty scratch directory, builds args for a
+`claude_code` run with `PermissionPolicy::Ask` and a run id, and fails if any
+`jod.db` appears there. On the code as it stood it failed with
+`opened a database nobody asked for: ["jod.db"]`.
 
 Every file in this directory says its checks were run against an isolated
 `JOD_HOME`, never `~/.jod`. The test suite does not keep that promise.

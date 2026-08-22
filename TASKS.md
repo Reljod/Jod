@@ -14,7 +14,7 @@ area file over this table and correct the table when you notice it drifting.
 
 | Area | File | Findings | Done | Open | Owner |
 |---|---|---|---|---|---|
-| Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L10 | 5 | 4 + 1 blocked | — |
+| Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L10 | 6 | 3 + 1 blocked | — |
 | Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7, R3b, R3c | 4 | 4 | — |
 | The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1–T8 | 2 + 37 shipped | 6 | — |
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
