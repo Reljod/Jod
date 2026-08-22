@@ -236,12 +236,12 @@ verbs say why they do not apply rather than doing nothing. The chat's own runs,
 one per instruction, are collapsed into that row instead of filling the list
 with copies of itself. The cursor still starts on the first *agent*: managing
 the work is what opening this list means, and the chat is one `k` away. From an
-agent row: `⏎` puts a run on screen, `s` stops one, `r` points the next turn at
-its conversation — bringing its harness with it, since a session id belongs to
-the harness that issued it — and `a` gives the `tmux attach` line. The same
-reaches the keyboard as
-`/watch`, `/stop`, `/attach`, where an id prefix is enough and an ambiguous one
-is refused rather than guessed: stopping the wrong agent is not undoable.
+agent row: `⏎` puts a run on screen, `s` stops one, and `r` points the next turn
+at its conversation — bringing its harness with it, since a session id belongs
+to the harness that issued it. The `tmux attach` line is not here any more; `jod
+agents` at a shell prints it. `/stop <id>` and `/heartbeat <id>` are the two
+verbs still reachable by typing, where an id prefix is enough and an ambiguous
+one is refused rather than guessed: stopping the wrong agent is not undoable.
 
 **Never being made to wait.** A prompt typed mid-turn is queued and sent when the
 turn ends, rather than refused — the old behaviour left it in a blocked box,
@@ -272,18 +272,25 @@ than expecting them to be remembered.
 | `/model <name>` | set the model; no argument restores the default |
 | `/thinking` · `/details` | show or hide reasoning, and what tools returned |
 | `/new` · `/resume <id>` | move between conversations — and `/new` is how you leave the main chat |
-| `/main` · `/main <instruction>` | go into the main chat · send it one instruction and stay where you are |
-| `/delegate <prompt>` | run it in the background, same as `Ctrl-B` |
-| `/watch <id>` · `/stop <id>` · `/attach <id>` | act on one agent, by id prefix |
-| `/todo <title>` · `/done <id>` | write to the team's board |
-| `/agents` · `/team` | the panels, same as `Ctrl-A` and `Ctrl-G` |
+| `/main` | go into the main chat; once you are there, typing is what instructs it |
+| `/stop <id>` · `/heartbeat <id> [off]` | act on one agent, by id prefix |
+| `/fleet` · `/tasks` · `/schedules` · `/goals` · `/hooks` | the screens, same as `Ctrl-G` |
 | `/clear` | start over where you are standing — the screen empties and the next message carries no context; `Ctrl-G l` empties the screen only |
 | `/help` · `/exit` | |
 
 Two rules keep the set honest. **A command exists only if Jod can do it**: there
-is no `/compact` or `/undo`, because a command that silently does nothing is
-worse than one that is absent — an unknown `/word` is named back rather than
-sent to the agent as a prompt. And **switching harness starts a fresh
+is no `/undo`, because a command that silently does nothing is worse than one
+that is absent — an unknown `/word` is named back rather than sent to the agent
+as a prompt. **And a command exists only if it is the best way to do the thing**:
+the palette lost `/delegate`, `/watch`, `/todo`, `/done`, `/run`, `/pause`,
+`/unpause`, `/memory`, `/activity`, `/team`, `/hook`, `/root`, `/add-dir`,
+`/project` and `/agents`, because each of them was a second, worse route to
+something a key on the row or a screen already did. `/attach` went for the
+opposite reason: the fleet's `a` went at the same time, so the verb had no route
+left to be a second copy of, and it leaves the console entirely — `jod agents`
+at a shell prints each run's tmux command. Adding a root outside the launch tree
+and cataloguing a repository are shell commands now too, `jod root add <path>`
+and `jod project add`, and the empty states say so. And **switching harness starts a fresh
 conversation**, because a session id belongs to the harness that issued it;
 carrying it across would try to resume a conversation the new harness has never
 heard of.

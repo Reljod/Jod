@@ -135,18 +135,10 @@ jod root add <path>          # from a shell
 jod root ls
 ```
 
-In the TUI the same thing is `/add-dir`, which opens the fuzzy directory picker
-(`Ctrl-G d` is the key for it). The picker walks the directory `jod` was launched
-in — so to reach a tree outside it, name where to start:
-
-```
-/add-dir                     # browse from where you launched
-/add-dir ~/Developer         # browse from there instead
-```
-
-`.` is always the first row, so `/add-dir ~/notes` then `⏎` adds exactly that
-folder. There is no other way to add a directory the launch directory does not
-contain without typing its full path.
+In the TUI the same thing is `Ctrl-G d`, which opens the fuzzy directory picker.
+The picker walks the directory `jod` was launched in, and `.` is always the first
+row, so `Ctrl-G d` then `⏎` adds exactly the folder you are standing in. To add a
+directory outside that tree, use `jod root add <path>` at a shell.
 
 In the chat box, `@` opens a picker under the cursor: type scattered letters,
 matches rank live with the matched characters highlighted, arrows move, enter
@@ -247,7 +239,7 @@ rate-limited so ten messages become one turn carrying ten rather than ten turns.
 |---|---|
 | `Esc` | interrupt the turn, keep the session — the conversation survives |
 | `@` | mention a file across every root |
-| `Ctrl-G d` | pick a directory to add as a root (`/add-dir`, or `/add-dir <where>` to browse elsewhere) |
+| `Ctrl-G d` | pick a directory to add as a root |
 | `Ctrl-P` | the projects catalog in the side panel — press again to put it away |
 | `Ctrl-N` | the decision rail — press again to put it away |
 | `Ctrl-G /` | search every transcript, including compacted turns |

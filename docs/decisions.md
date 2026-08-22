@@ -3935,3 +3935,50 @@ The catalog above them takes the freed rows. It used to stop at a third of the
 panel to keep the runs list on screen; now it stops where the settings box
 begins, so a long catalog is cut by the boxes that are still there rather than
 by a rule protecting one that is not.
+
+## A second way to do a thing is a thing to learn, not a shortcut
+
+The slash palette had grown to forty-odd commands, and a good half of them were
+a second, worse route to something already on the screen. `/watch <id>` put an
+agent's output up, which is what `⏎` on its fleet row does with the cursor
+already on the answer. `/pause <name>`
+and `/run <name>` were `p` and `r` on a schedule's row, except they took a name
+you had to read off the screen and retype, and they had to guess whether that
+name meant a schedule or a goal — a guess they got wrong often enough to need a
+refusal for the ambiguous case. `/todo` and `/done` were `n` and `⏎` on the
+board. `/memory`, `/activity` and `/team` opened three of the nine screens the
+`Ctrl-G` menu opens.
+
+Each of them looked free. None of them was: every one is a word to remember, a
+row in a popup somebody has to read past, a completion arm to keep matching the
+live data, and a second code path that can disagree with the first. The cost
+that finally showed was `/main`, which was listed twice with opposite meanings —
+go into the chat, and send it one sentence from somewhere else — and needed a
+whole change to the completion type so the two rows could be told apart.
+
+So the palette keeps what it is uniquely good at. A command earns its place when
+it is the *only* way to the thing (`/harness`, `/model`, `/compact`, `/clear`),
+when it takes an argument no cursor can supply (`/remember`, `/resume`,
+`/heartbeat`), or when it names a screen the keyboard reaches slowly. Everything
+that was a synonym for a keystroke is gone, and the keystroke is now the answer
+rather than one of two.
+
+`/attach <id>` is the one that is not a synonym for anything, and it goes for a
+different reason. The entry above this one takes `a` off the fleet's rows, so
+there is no keystroke left for `/attach` to be a second way to reach — the
+command and the key are the only two doors and both are closing. Rather than
+keep one of them alive to be the last door, the whole verb leaves the console:
+`Action::Attach` goes with it, and `jod agents` at a shell prints each run's
+tmux command, which is what the command was reading out anyway. A console verb
+whose entire body is "print a string you then paste into another terminal" was
+never really a console verb.
+
+Three things follow that are worth stating plainly, because they are losses and
+not simplifications. Attaching to a run's tmux session is a shell command now,
+per the paragraph above. Adding a directory outside the launch tree is one too —
+`jod root add <path>` — since `/add-dir <where>` was the only thing that could
+point the picker somewhere else, and the picker still walks only the launch
+tree. Cataloguing a repository is likewise `jod project add`. Every one of those
+empty states names the shell command rather than pretending the console has one.
+The alternative was keeping a command alive purely to avoid admitting what the
+console cannot yet do, which is the console lying about its own shape.
