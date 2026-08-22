@@ -4167,3 +4167,28 @@ A name used twice is two different sets of statements recorded under one row in
 `migrations`, so whichever branch merges second silently does nothing on every
 machine that already ran the first. The gap must not be closed up, and a comment
 above the entry says so.
+
+## A migration is applied one statement at a time, skipping what is already there
+
+Taking the gap above kept two branches from colliding, and left the machine the
+branch was written on stranded. That machine had run the migration under its
+first number, `0029`, when it held two statements; by the time it merged as
+`0031` it held four. The merged binary found a name it had no record of,
+replayed the batch from the top, and died on `duplicate column name: paths`
+before it reached the two columns that genuinely were missing. Every command
+that opens the database failed, `tui` included.
+
+The ledger keys on the name, and a name is only settled once the migration has
+merged. Renumbering at merge is normal here, and so is editing a migration while
+its pull request is open, so any database that ran a branch build carries an
+earlier name and an earlier shape of something main now spells differently.
+
+So the runner cuts a migration into its statements — using SQLite's own
+`sqlite3_complete`, because these migrations are more comment than SQL and a
+trigger body has semicolons in it — and passes over the ones SQLite says are
+already satisfied. The rest of the migration then applies, and the schema
+converges on what the merged version describes rather than stopping at the first
+object it happens to share with the older one. Only `CREATE` and `ADD COLUMN`
+are ever skipped, since they are the only statements that fail this way; a
+backfilling `INSERT` or `UPDATE` still takes the whole migration down, which is
+what it should do.
