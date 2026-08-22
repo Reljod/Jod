@@ -79,6 +79,19 @@ impl Harness for ClaudeCode {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
         }
+        // How hard to think, when somebody has said. `claude --help` on 2.1.220
+        // spells it `--effort <level>` and takes all five of Jod's levels, so
+        // `flag_value` never refuses one here — it is asked anyway, because the
+        // rule it enforces is per harness and a reader of this file should not
+        // have to know which of the three this is.
+        //
+        // Nothing at all when `effort` is `None`, which is every spawn until a
+        // role says otherwise. That is the property the whole feature rests on:
+        // an unconfigured machine gets the argv it got yesterday.
+        if let Some(level) = req.effort.and_then(|e| e.flag_value(HarnessKind::ClaudeCode)) {
+            args.push(ArgPart::lit("--effort"));
+            args.push(ArgPart::lit(level));
+        }
         match &req.resume {
             Resume::Fresh => {}
             Resume::Last => args.push(ArgPart::lit("--continue")),
@@ -696,6 +709,7 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::{Effort, Role};
     use std::path::PathBuf;
 
     fn req(permission: PermissionPolicy, model: Option<&str>) -> SpawnRequest {
@@ -754,6 +768,52 @@ mod tests {
     fn no_roots_means_no_directory_flag() {
         let args = flat(&req(PermissionPolicy::Bypass, None));
         assert!(!args.iter().any(|a| a == "--add-dir"));
+    }
+
+    /// SPEC check 29. `claude --help` on 2.1.220 spells reasoning effort
+    /// `--effort <level>`, so a role that asks for `high` says so on the
+    /// command line and nowhere else — no environment variable is involved.
+    #[test]
+    fn an_effort_level_reaches_claude_code_as_its_own_flag() {
+        let mut r = req(PermissionPolicy::Bypass, None);
+        r.effort = Some(Effort::High);
+        let args = flat(&r);
+        let at = args
+            .iter()
+            .position(|a| a == "--effort")
+            .expect("a level that was asked for must reach the command line");
+        assert_eq!(args[at + 1], "high");
+    }
+
+    /// The two levels this harness alone has. They are passed as asked rather
+    /// than folded into `high`, because Claude Code is the one harness that
+    /// knows the words.
+    #[test]
+    fn the_top_two_levels_are_passed_through_here() {
+        for level in [Effort::XHigh, Effort::Max] {
+            let mut r = req(PermissionPolicy::Bypass, None);
+            r.effort = Some(level);
+            let args = flat(&r);
+            let at = args.iter().position(|a| a == "--effort").unwrap();
+            assert_eq!(args[at + 1], level.as_str());
+        }
+    }
+
+    /// The other half of check 29, and the one that keeps an empty `roles`
+    /// table honest: with no level asked for, the flag is absent entirely and
+    /// the argv is the argv this adapter produced before roles existed.
+    #[test]
+    fn no_effort_level_means_no_effort_flag_and_no_other_change() {
+        let plain = req(PermissionPolicy::Bypass, Some("sonnet"));
+        assert!(plain.effort.is_none(), "the default asks for nothing");
+        let args = flat(&plain);
+        assert!(!args.iter().any(|a| a == "--effort"));
+
+        // And a request that merely carries a role tag is the same request:
+        // the tag is spent at the spawn seam and never reaches a harness.
+        let mut tagged = plain.clone();
+        tagged.role = Some(Role::Scratch);
+        assert_eq!(flat(&tagged), args);
     }
 
     /// `--add-dir` is variadic — `claude --help` spells it

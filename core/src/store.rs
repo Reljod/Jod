@@ -1709,6 +1709,78 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
        AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
     "#,
     ),
+    (
+    "0029_a_scratch_conversation_tidies_itself_away",
+    r#"
+    -- Three columns that let a throwaway conversation clean up after itself.
+    --
+    -- A delegation opens a conversation per errand — a lookup, a fetch, a
+    -- calculation — and every one of them stayed in the fleet for ever. The
+    -- pane a person watches to see what their agents are doing fills up with
+    -- finished errands, and a pane nobody can read is the same as not having
+    -- one.
+    --
+    -- `ephemeral` says this conversation is scratch. Nothing that exists today
+    -- is: the default is 0 and no existing row is migrated onto it, so a
+    -- database that has been running for months keeps exactly the fleet it had.
+    --
+    -- `held` is the override, and it wins over everything below it. A held row
+    -- is never archived and never swept whatever else is true of it, because
+    -- the reason somebody keeps a row is usually that the automatic rule would
+    -- have been wrong about that one.
+    --
+    -- `archived_at_ms` is when the row left the fleet, and null means it has
+    -- not. Archiving is neither deletion nor a final state: continuing an
+    -- archived scratch session sets this back to null and the row comes back to
+    -- the pane for as long as it is working again.
+    ALTER TABLE conversations ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE conversations ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE conversations ADD COLUMN archived_at_ms INTEGER;
+
+    -- Partial, because scratch rows are a small minority of a table that holds
+    -- every conversation there has ever been, and each of the three readers of
+    -- these columns opens by asking for exactly that minority: the archive
+    -- sweep, the retention sweep, and the fleet's loose pane.
+    --
+    -- `archived_at_ms` leads because it is what all three then ask about — "not
+    -- archived yet" for the sweep that archives and for the pane, "archived
+    -- before this instant" for the sweep that deletes, and the second of those
+    -- is a range scan that wants the column in order. `held` follows so the
+    -- held rows are dropped from the index rather than by going back to the
+    -- table for a column the query already knows it needs.
+    CREATE INDEX ix_conversations_scratch
+      ON conversations(archived_at_ms, held) WHERE ephemeral = 1;
+    "#,
+    ),
+    (
+    "0030_a_role_says_what_to_spawn_it_on",
+    r#"
+    -- What each layer of the chain of command runs on.
+    --
+    -- Every spawn today takes the harness and the model that the calling tool
+    -- happened to pass, so routing — the cheapest decision Jod makes — is made
+    -- by whichever model the caller was already paying for. A role is the place
+    -- to say that the assistant thinks with a small model and the engineer with
+    -- a large one, and to say it once instead of at every call site.
+    --
+    -- Every column is nullable and null means inherit. An empty table must
+    -- behave exactly as the code did before the table existed, which is why
+    -- nothing is seeded here: a machine whose owner never opens the roles panel
+    -- sees no change at all.
+    --
+    -- The role name is the primary key and is not constrained to a list. Which
+    -- six roles exist is a fact about the chain of command, and that lives in
+    -- the code that reads this table; writing them into a CHECK would buy a
+    -- migration every time a layer is added or renamed.
+    CREATE TABLE roles (
+      role       TEXT PRIMARY KEY,
+      harness    TEXT,
+      model      TEXT,
+      thinking   TEXT,
+      permission TEXT
+    );
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
@@ -1722,6 +1794,65 @@ pub struct RunContext {
     pub project: Option<String>,
     /// The title of the work its conversation belongs to.
     pub work: Option<String>,
+}
+
+/// What one layer of the chain of command is spawned on.
+///
+/// Every field is optional and `None` means inherit — take whatever the caller
+/// passed, or the harness's own default. A row of nothing but `None` is the
+/// same thing as no row at all, which is what keeps an untouched `roles` table
+/// invisible to everything below it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleRow {
+    /// `main`, `assistant`, `manager`, `engineer`, `scratch`, `housekeeping`.
+    /// Not checked here: which roles exist is a fact about the chain of
+    /// command, and it belongs with the code that draws it.
+    pub role: String,
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    /// `none | low | medium | high`, mapped to whatever the chosen harness can
+    /// express. Kept as text because two of the three harnesses express nothing
+    /// at all and the mapping is theirs to make.
+    pub thinking: Option<String>,
+    pub permission: Option<String>,
+}
+
+/// One editable field of a role, so a screen can change a single cell.
+///
+/// An enum rather than a column name, because the store is the only place that
+/// should know what the table's columns are called and a caller passing a
+/// string would be one typo away from writing a column that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleField {
+    Harness,
+    Model,
+    Thinking,
+    Permission,
+}
+
+impl RoleField {
+    /// The name a person types and the column it writes, which are deliberately
+    /// the same word: a roles row has nothing in it that is not one of these.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RoleField::Harness => "harness",
+            RoleField::Model => "model",
+            RoleField::Thinking => "thinking",
+            RoleField::Permission => "permission",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<RoleField> {
+        [
+            RoleField::Harness,
+            RoleField::Model,
+            RoleField::Thinking,
+            RoleField::Permission,
+        ]
+        .into_iter()
+        .find(|f| f.as_str() == s)
+    }
 }
 
 /// Who asserted a fact. Kept out of the fact's text so that content Jod
@@ -2344,6 +2475,323 @@ impl Store {
             .optional()?)
     }
 
+    // ---- the scratch lane -----------------------------------------------
+    //
+    // A scratch conversation is one that a delegation opened for a single
+    // errand. It shows in the fleet while it works, gets out of the way when it
+    // has finished and its answer has landed, and is deleted once it has been
+    // out of the way long enough to be sure nobody wanted it. These queries are
+    // that lifecycle, and the two sweeps in `Ticker` are their only scheduled
+    // caller.
+    //
+    // Every one of them starts at `ephemeral = 1`. Nothing that was created
+    // before this existed is scratch, so none of this can touch a conversation
+    // a person opened.
+
+    /// Mark a conversation as scratch, so the lifecycle above applies to it.
+    ///
+    /// Set once, at creation, by whatever opened the conversation — the
+    /// assistant hand-over and `delegate`. There is deliberately no way to
+    /// unmark one: a conversation that was opened as an errand does not become
+    /// something worth keeping later, and the answer to wanting to keep one is
+    /// [`Store::set_held`], which says so in a way the sweeps read.
+    pub fn mark_ephemeral(&self, conversation_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET ephemeral = 1 WHERE id = ?1",
+                params![conversation_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Keep this conversation, or stop keeping it.
+    ///
+    /// A held conversation is never archived and never swept. It is the one
+    /// override in the lane and it is unconditional on purpose: the reason to
+    /// keep a row is nearly always that the automatic rule would have been
+    /// wrong about that one, so a rule that could still overrule it would be no
+    /// override at all.
+    ///
+    /// Releasing a hold does not archive anything by itself. The next pass of
+    /// the archive sweep picks the row up if it qualifies, and a caller that
+    /// wants it gone immediately archives it itself.
+    pub fn set_held(&self, conversation_id: &str, held: bool) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET held = ?2 WHERE id = ?1",
+                params![conversation_id, i64::from(held)],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Whether this conversation is being kept.
+    ///
+    /// A conversation that does not exist is not held, rather than an error:
+    /// every caller is deciding whether to leave a row alone, and a row that is
+    /// not there needs leaving alone just as much.
+    pub fn is_held(&self, conversation_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let held: Option<i64> = conn
+            .query_row(
+                "SELECT held FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(held.unwrap_or(0) != 0)
+    }
+
+    /// Whether this conversation is scratch.
+    ///
+    /// For the caller holding one id and deciding one thing about it. Anything
+    /// looking at a page of runs wants [`Store::scratch_runs`] instead, which
+    /// answers the same question for the whole fleet in one query.
+    ///
+    /// A conversation that does not exist is not scratch, for the same reason
+    /// [`Store::is_held`] gives.
+    pub fn is_ephemeral(&self, conversation_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let ephemeral: Option<i64> = conn
+            .query_row(
+                "SELECT ephemeral FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(ephemeral.unwrap_or(0) != 0)
+    }
+
+    /// Take a finished scratch conversation out of the fleet.
+    ///
+    /// `updated_at_ms` is deliberately left alone. It is what says when the
+    /// conversation was last *active*, and the reuse window is measured from
+    /// it; bumping it here would make every archived row look freshly busy and
+    /// keep it offerable for another hour for no reason but the bookkeeping.
+    pub fn archive_conversation(&self, conversation_id: &str, now_ms: i64) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET archived_at_ms = ?2 WHERE id = ?1",
+                params![conversation_id, now_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Bring an archived conversation back to the fleet.
+    ///
+    /// Called when a run starts on one, which is what continuing an archived
+    /// scratch session does. Archived means "finished and out of the way", not
+    /// "closed", so a row that is working again belongs back on the screen; it
+    /// archives itself once more when that run finishes.
+    pub fn unarchive_conversation(&self, conversation_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET archived_at_ms = NULL WHERE id = ?1",
+                params![conversation_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The scratch conversations that have finished and may leave the fleet.
+    ///
+    /// All of:
+    ///
+    /// - **Its latest run completed.** Not failed, not killed, and not still
+    ///   running. A scratch session that went wrong is the one case where
+    ///   somebody wants to see the row, so a wedged errand stays on the screen.
+    /// - **Nothing is queued in `pending_deliveries` for it.** The report has
+    ///   actually reached the conversation that asked for it. Archiving first
+    ///   would hide the row and strand the reply.
+    /// - **That same latest run is not marked stalled.** A stalled run is
+    ///   marked rather than killed, so it is still `running` and the status
+    ///   check already covers it; the mark is read as well because a run that
+    ///   stalls and then reports completion inside one tick is the case the
+    ///   status alone gets wrong, and one tick of delay is cheaper than hiding
+    ///   a session somebody is trying to understand.
+    ///
+    ///   Scoped to the latest run and not to every run the conversation has
+    ///   ever held. Reuse means a scratch conversation is no longer one-shot —
+    ///   `continue_agent` adds a run to one that already has some — so asking
+    ///   whether *any* of them ever stalled would bar a conversation that
+    ///   stalled once and has since been continued and finished cleanly. It
+    ///   could never satisfy this query again, so it would never be archived,
+    ///   and the retention sweep only ever looks at archived rows: the row
+    ///   would sit in the loose pane for ever with nothing able to remove it.
+    /// - **It is not held, and not already archived.**
+    ///
+    /// Oldest activity first, so a sweep that is interrupted has dealt with the
+    /// rows that have been sitting there longest.
+    pub fn scratch_ready_to_archive(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let sql = format!(
+            "SELECT c.id FROM conversations c
+               JOIN runs r ON r.id = ({LATEST_RUN_OF_C})
+              WHERE c.ephemeral = 1
+                AND c.held = 0
+                AND c.archived_at_ms IS NULL
+                AND r.status = 'completed'
+                AND NOT EXISTS (SELECT 1 FROM pending_deliveries p
+                                 WHERE p.conversation_id = c.id
+                                   AND p.state = 'queued')
+                AND NOT EXISTS (SELECT 1 FROM heartbeats h
+                                 WHERE h.run_id = r.id
+                                   AND h.stalled_since_ms IS NOT NULL)
+              ORDER BY c.updated_at_ms"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The archived scratch conversations that have been out of the way for
+    /// long enough to delete.
+    ///
+    /// `before_ms` is the instant the retention window opens onto: a row
+    /// archived strictly before it is past the window. The caller works the
+    /// instant out from `scratch_retention_days`, so that "never delete" is one
+    /// decision made in one place rather than a magic argument here.
+    ///
+    /// Held rows are never returned, whatever their age. That is the whole
+    /// promise of holding one.
+    pub fn scratch_ready_to_delete(&self, before_ms: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id FROM conversations
+              WHERE ephemeral = 1
+                AND held = 0
+                AND archived_at_ms IS NOT NULL
+                AND archived_at_ms < ?1
+              ORDER BY archived_at_ms",
+        )?;
+        let rows = stmt.query_map(params![before_ms], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Remove a conversation, everything hanging off it, and the runs that
+    /// wrote into it.
+    ///
+    /// Wider than [`Store::delete_conversation`], which leaves the runs alone
+    /// because a person's transcript outlives the process that produced it.
+    /// Here the whole point is that nothing is worth keeping: the retention
+    /// sweep has already given the row days to be wanted. Messages, cards,
+    /// roots, delegations and queued deliveries cascade from the conversation
+    /// row; `events` has no foreign key and its runs are reached through
+    /// `messages.run_id`, so both are taken by hand, first, while the messages
+    /// that name them still exist.
+    ///
+    /// Two refusals, and both are about damage that cannot be undone:
+    ///
+    /// - **The pinned main chat.** Every other conversation was opened from it.
+    /// - **A run that is still running.** Deleting its row does not stop the
+    ///   process group, and the pgid on that row is the only thing left that
+    ///   knows how to reach it. This is the same refusal
+    ///   [`Store::delete_run`] makes, for the same reason.
+    ///
+    /// Whether a conversation *should* be deleted is the caller's judgement.
+    /// The sweep only ever passes rows that [`Store::scratch_ready_to_delete`]
+    /// named, and those are scratch by construction.
+    pub fn delete_conversation_cascade(&self, conversation_id: &str) -> Result<()> {
+        self.write(|tx| {
+            let pinned: Option<i64> = tx
+                .query_row(
+                    "SELECT pinned FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(pinned) = pinned else {
+                return Err(JodError::Invalid(format!(
+                    "no conversation `{conversation_id}`"
+                )));
+            };
+            if pinned == 1 {
+                return Err(JodError::Invalid(
+                    "the main chat cannot be deleted: it is the one conversation that is \
+                     always there, and every other one was opened from it"
+                        .into(),
+                ));
+            }
+            let runs: Vec<(String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT m.run_id, r.status FROM messages m
+                       JOIN runs r ON r.id = m.run_id
+                      WHERE m.conversation_id = ?1",
+                )?;
+                let rows = stmt.query_map(params![conversation_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (run_id, status) in &runs {
+                if status == crate::AgentStatus::Running.as_str() {
+                    return Err(JodError::Invalid(format!(
+                        "conversation `{conversation_id}` still has run `{run_id}` working: \
+                         stop it before deleting the conversation, or the process group \
+                         outlives the only row that knows its pgid"
+                    )));
+                }
+            }
+            for (run_id, _) in &runs {
+                tx.execute("DELETE FROM events WHERE run_id = ?1", params![run_id])?;
+                tx.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+            }
+            tx.execute(
+                "DELETE FROM conversations WHERE id = ?1",
+                params![conversation_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The scratch sessions the assistant is allowed to pick up again.
+    ///
+    /// A candidate is all four of:
+    ///
+    /// 1. **Scratch, and descended from main.** An engineer's session is not a
+    ///    candidate: it is worth reusing for its warm checkout, which is a
+    ///    different rule read by different code.
+    /// 2. **Free**, in the sense `list_agents` already means — its latest run
+    ///    completed and reported a `session_id`. A session with no id cannot be
+    ///    resumed, so offering it would be offering something that fails.
+    /// 3. **Recently active**, which is what `since_ms` is. The caller works
+    ///    that instant out from `scratch_reuse_window_minutes`.
+    /// 4. **Still here.** A row the retention sweep has deleted is not in the
+    ///    table to be returned. Being archived is fine — continuing an archived
+    ///    session brings it back to the fleet.
+    ///
+    /// A **running** session is never a candidate, and that is the load-bearing
+    /// half of this query. Waiting for a busy session to free up is the block
+    /// this whole lane exists to remove, rebuilt one layer down; if the only
+    /// session on the subject is busy, the caller opens another beside it.
+    ///
+    /// Most recently active first, because the caller reads the list to find
+    /// the one that was talking about what it is about to ask.
+    pub fn scratch_reuse_candidates(&self, since_ms: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let sql = format!(
+            "WITH RECURSIVE below(id) AS (
+               SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+               UNION
+               SELECT c.id FROM conversations c
+                 JOIN below b ON c.parent_conversation_id = b.id
+             )
+             SELECT c.id FROM conversations c
+               JOIN below ON below.id = c.id
+               JOIN runs r ON r.id = ({LATEST_RUN_OF_C})
+              WHERE c.ephemeral = 1
+                AND c.updated_at_ms >= ?1
+                AND r.status = 'completed'
+                AND r.session_id IS NOT NULL
+              ORDER BY c.updated_at_ms DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![since_ms], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     // ---- heartbeats -----------------------------------------------------
 
     /// Start watching a run, or replace the watch it already had.
@@ -2436,6 +2884,40 @@ impl Store {
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?)
+    }
+
+    /// Every run that wrote into a scratch conversation, and which one.
+    ///
+    /// One read for the whole fleet, joined the way [`Store::router_run_ids`]
+    /// and [`Store::run_contexts`] beside it join, and for the same reason: no
+    /// column says which conversation a run wrote into, and `messages.run_id`
+    /// is the only path between the two.
+    ///
+    /// Keyed by run and valued by conversation, because both questions
+    /// `list_agents` asks are asked per run — *is this row scratch*, which
+    /// keeps it out of the engineer answer, and *is this row's conversation one
+    /// the reuse window let through*, since the candidates are named by
+    /// conversation. `AgentSummary` carries no conversation id, so a caller
+    /// given only the flag would have to look each row's conversation up one at
+    /// a time, which is a query per agent on a page of twenty.
+    ///
+    /// Every run of a scratch conversation is here, whatever its status and
+    /// however old. That is the difference from
+    /// [`Store::scratch_reuse_candidates`], which answers the narrower question
+    /// of what may be picked up again — a running scratch session is not
+    /// reusable but it is still scratch, and a fleet that forgot that would
+    /// advertise it to a manager as a warm checkout.
+    pub fn scratch_runs(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT m.run_id, c.id
+               FROM messages m
+               JOIN conversations c ON c.id = m.conversation_id
+              WHERE m.run_id IS NOT NULL
+                AND c.ephemeral = 1",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
     }
 
     pub fn run_contexts(&self) -> Result<HashMap<String, RunContext>> {
@@ -4159,7 +4641,154 @@ impl Store {
             Ok(tx.execute("DELETE FROM settings WHERE key = ?1", params![key])? > 0)
         })
     }
+
+    /// A whole-number preference, or the default when nothing sensible is set.
+    ///
+    /// The two exceptions to the untyped rule above are the scratch lane's own
+    /// windows, and they are typed here because the queries they bound are in
+    /// this file: a sweep that parsed its own window at the call site would be
+    /// a second opinion about what "seven days" means.
+    ///
+    /// A value that is not a number falls back to the default rather than
+    /// failing. Somebody who typed `seven` should get the behaviour they had
+    /// before they typed it, not a sweep that stops running.
+    ///
+    /// A negative value is read as zero, which both keys spell "off". Fail
+    /// closed: a negative retention would put the deletion cut-off in the
+    /// future and sweep away everything the lane holds.
+    fn setting_i64(&self, key: &str, default: i64) -> Result<i64> {
+        Ok(self
+            .setting(key)?
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(|n| n.max(0))
+            .unwrap_or(default))
+    }
+
+    /// How long an archived scratch conversation is kept before it is deleted.
+    ///
+    /// Seven days by default, and `0` means never delete — the escape hatch for
+    /// anyone who wants what Jod did before the lane existed.
+    pub fn scratch_retention_days(&self) -> Result<i64> {
+        self.setting_i64(SCRATCH_RETENTION_DAYS_KEY, 7)
+    }
+
+    /// How recently a scratch session must have been active to be offered for
+    /// reuse.
+    ///
+    /// An hour by default, and `0` disables reuse, which makes every
+    /// instruction open a fresh session.
+    ///
+    /// This window is minutes and the retention one is days, and they have to
+    /// stay in that order: the sweep must never delete a session the assistant
+    /// was about to continue. Set the wrong way round the worst case is a
+    /// follow-up naming a session that has just been deleted, which fails with
+    /// a plain error rather than doing any damage.
+    pub fn scratch_reuse_window_minutes(&self) -> Result<i64> {
+        self.setting_i64(SCRATCH_REUSE_WINDOW_MINUTES_KEY, 60)
+    }
+
+    // ---- roles ----------------------------------------------------------
+    //
+    // What each layer of the chain of command is spawned on. Four small
+    // queries over a table that is empty on most machines, and empty has to
+    // mean "behave exactly as before" — so every one of these treats a missing
+    // row and a row of nulls as the same answer.
+
+    /// What is configured for one role, or `None` when nothing is.
+    pub fn role_get(&self, role: &str) -> Result<Option<RoleRow>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT role, harness, model, thinking, permission
+                   FROM roles WHERE role = ?1",
+                params![role],
+                role_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Every role that has something set, in name order.
+    ///
+    /// Alphabetical rather than in the order of the chain of command, because
+    /// the chain is a shape the panel draws and this table does not know it.
+    /// The panel walks its own tree and asks this for the values.
+    pub fn role_list(&self) -> Result<Vec<RoleRow>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT role, harness, model, thinking, permission
+               FROM roles ORDER BY role",
+        )?;
+        let rows = stmt.query_map([], role_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Set one field of a role, creating the row if this is the first thing
+    /// said about it. `None` clears that field back to inherit and leaves the
+    /// rest of the row alone.
+    ///
+    /// The column name is interpolated because SQLite cannot bind one. It is
+    /// safe to do so here and only here: [`RoleField`] is a closed enum and
+    /// every string it can produce is a literal in this file.
+    pub fn role_set(&self, role: &str, field: RoleField, value: Option<&str>) -> Result<()> {
+        let column = field.as_str();
+        self.write(|tx| {
+            tx.execute(
+                &format!(
+                    "INSERT INTO roles (role, {column}) VALUES (?1, ?2)
+                       ON CONFLICT(role) DO UPDATE SET {column} = ?2"
+                ),
+                params![role, value],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Clear a role back to inheriting everything.
+    ///
+    /// The row is deleted rather than blanked, because a row of nothing but
+    /// nulls means the same thing and keeping one would leave the panel showing
+    /// a role as configured when the whole point was to stop configuring it.
+    pub fn role_reset(&self, role: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute("DELETE FROM roles WHERE role = ?1", params![role])?;
+            Ok(())
+        })
+    }
 }
+
+/// Where the scratch lane's two windows are stored.
+///
+/// Named here so the screen that edits them and the sweeps that obey them are
+/// spelling the same key, which is the failure a bare string literal invites.
+pub const SCRATCH_RETENTION_DAYS_KEY: &str = "scratch_retention_days";
+pub const SCRATCH_REUSE_WINDOW_MINUTES_KEY: &str = "scratch_reuse_window_minutes";
+
+fn role_from_row(r: &rusqlite::Row) -> rusqlite::Result<RoleRow> {
+    Ok(RoleRow {
+        role: r.get(0)?,
+        harness: r.get(1)?,
+        model: r.get(2)?,
+        thinking: r.get(3)?,
+        permission: r.get(4)?,
+    })
+}
+
+/// The run that last wrote into the conversation an enclosing query calls `c`.
+///
+/// A run is tied to a conversation through `messages.run_id` and through
+/// nothing else — there is no column on `runs` naming a conversation — so "the
+/// latest run" means the newest run that left a message here. Ordered by the
+/// run's own creation rather than by message id, because a slow older run that
+/// is still writing would otherwise overtake the newer run that replaced it,
+/// and every reader of this asks the question to find out what happened last.
+///
+/// A fragment rather than a query: it is spliced into a `format!` by the two
+/// scratch queries that need it, both of which name their conversation `c`.
+const LATEST_RUN_OF_C: &str = "SELECT m.run_id FROM messages m
+                 JOIN runs lr ON lr.id = m.run_id
+                WHERE m.conversation_id = c.id
+                ORDER BY lr.created_at_ms DESC, m.id DESC
+                LIMIT 1";
 
 /// How far a traversal may go.
 ///
@@ -7506,5 +8135,426 @@ mod tests {
         assert_eq!(iso_to_ms("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(iso_to_ms("1970-01-02"), Some(86_400_000));
         assert_eq!(iso_to_ms("not a date"), None);
+    }
+
+    // ---- the scratch lane and roles -------------------------------------
+
+    /// A scratch conversation, a run that ended in `status`, and the message
+    /// that ties the two together — which is the only thing that ties a run to
+    /// a conversation anywhere in this schema.
+    fn scratch_with_run(s: &Store, run_id: &str, status: &str) -> String {
+        use crate::conversation::{NewMessage, Role};
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.mark_ephemeral(&c.id).unwrap();
+        let mut r = run(run_id, "claude_code", now_ms());
+        r.status = status.into();
+        s.save_run(&r).unwrap();
+        s.append_message(
+            &c.id,
+            NewMessage::new(Role::Assistant, "done").from_run(run_id),
+        )
+        .unwrap();
+        c.id
+    }
+
+    /// Say when a conversation was last active. Appending a message stamps
+    /// that with the wall clock, and the reuse window is measured from it, so a
+    /// test about the window has to be able to put a row in the past.
+    fn last_active(s: &Store, conversation_id: &str, at_ms: i64) {
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET updated_at_ms = ?2 WHERE id = ?1",
+                params![conversation_id, at_ms],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// An answer this conversation is still owed.
+    fn queue_a_delivery(s: &Store, conversation_id: &str) {
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO pending_deliveries (conversation_id, kind, body, queued_at_ms)
+                   VALUES (?1, 'human', 'anything?', ?2)",
+                params![conversation_id, now_ms()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// The pinned main chat, and a conversation hung underneath it. The reuse
+    /// query walks down from the pin, so a scratch row parented anywhere else
+    /// is somebody else's and must not be offered.
+    fn pin_as_main(s: &Store) -> String {
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET pinned = 1 WHERE id = ?1",
+                params![c.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        c.id
+    }
+
+    fn hang_under(s: &Store, child: &str, parent: &str) {
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET parent_conversation_id = ?2 WHERE id = ?1",
+                params![child, parent],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// The ordinary ending: the errand finished and its report has landed, so
+    /// the row can leave the fleet.
+    #[test]
+    fn a_finished_scratch_conversation_whose_answer_has_landed_can_be_archived() {
+        let s = store();
+        let c = scratch_with_run(&s, "errand", "completed");
+        assert_eq!(s.scratch_ready_to_archive().unwrap(), vec![c]);
+    }
+
+    /// Archiving before the report reaches whoever asked would hide the row and
+    /// strand the reply, which is a bug Jod has already had once by another
+    /// route.
+    #[test]
+    fn a_scratch_conversation_still_owing_an_answer_is_not_archived() {
+        let s = store();
+        let c = scratch_with_run(&s, "errand", "completed");
+        queue_a_delivery(&s, &c);
+        assert!(s.scratch_ready_to_archive().unwrap().is_empty());
+    }
+
+    /// A wedged errand is the one case where somebody wants to see the row, so
+    /// nothing that ended badly tidies itself away.
+    #[test]
+    fn a_scratch_conversation_that_went_wrong_stays_in_the_fleet() {
+        let s = store();
+        for status in ["failed", "killed", "running"] {
+            let c = scratch_with_run(&s, &format!("errand-{status}"), status);
+            assert!(
+                s.scratch_ready_to_archive().unwrap().is_empty(),
+                "a {status} run archived conversation {c}"
+            );
+            s.delete_conversation_cascade(&c).ok();
+        }
+    }
+
+    /// A stalled run is marked rather than killed, so it is still `running` and
+    /// the status check covers it. The mark is read as well, because a run that
+    /// stalls and then reports completion inside one tick is exactly the case
+    /// the status alone gets wrong.
+    #[test]
+    fn a_scratch_conversation_marked_stalled_stays_in_the_fleet() {
+        let s = store();
+        let c = scratch_with_run(&s, "quiet", "completed");
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO heartbeats
+                   (run_id, started_at_ms, stall_ms, last_progress_ms, last_beat_ms,
+                    stalled_since_ms)
+                 VALUES ('quiet', 0, 1, 0, 0, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            s.scratch_ready_to_archive().unwrap().is_empty(),
+            "conversation {c} was archived while its run was marked stalled"
+        );
+    }
+
+    /// The stall rule is about the run the conversation is on now, not about
+    /// every run it has ever held.
+    ///
+    /// Reuse is what makes this bite. A scratch conversation is no longer
+    /// one-shot: `continue_agent` adds a run to one that already has some, so a
+    /// session that went quiet once, was continued, and then finished cleanly
+    /// is an ordinary thing to find. Asked the wrong way, that conversation can
+    /// never satisfy the query again — it is never archived, the retention
+    /// sweep only looks at archived rows, and the row sits in the loose pane
+    /// for ever with nothing able to remove it.
+    #[test]
+    fn a_scratch_conversation_that_stalled_and_was_then_continued_can_still_archive() {
+        use crate::conversation::{NewMessage, Role};
+        let s = store();
+        let c = scratch_with_run(&s, "first-try", "failed");
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO heartbeats
+                   (run_id, started_at_ms, stall_ms, last_progress_ms, last_beat_ms,
+                    stalled_since_ms)
+                 VALUES ('first-try', 0, 1, 0, 0, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            s.scratch_ready_to_archive().unwrap().is_empty(),
+            "the stalled run is still the latest one"
+        );
+
+        // Continued, and this time it finished. The stalled run is still on
+        // record and its heartbeat has not been retired yet.
+        let mut second = run("second-try", "claude_code", now_ms() + 1);
+        second.status = "completed".into();
+        s.save_run(&second).unwrap();
+        s.append_message(
+            &c,
+            NewMessage::new(Role::Assistant, "found it").from_run("second-try"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.scratch_ready_to_archive().unwrap(),
+            vec![c],
+            "a conversation that stalled once can never be archived again"
+        );
+    }
+
+    /// Holding a row is the one override in the lane, and it has to beat both
+    /// sweeps. A hold that only stopped the archiving would still lose the
+    /// conversation to the retention sweep a week later.
+    #[test]
+    fn a_held_scratch_conversation_is_neither_archived_nor_deleted() {
+        let s = store();
+        let c = scratch_with_run(&s, "keeper", "completed");
+        s.set_held(&c, true).unwrap();
+        assert!(s.is_held(&c).unwrap());
+        assert!(s.scratch_ready_to_archive().unwrap().is_empty());
+
+        // Archived first, and then held: the retention sweep must still leave
+        // it alone however long ago that was.
+        s.archive_conversation(&c, 1_000).unwrap();
+        assert!(s.scratch_ready_to_delete(i64::MAX).unwrap().is_empty());
+
+        s.set_held(&c, false).unwrap();
+        assert!(!s.is_held(&c).unwrap());
+        assert_eq!(s.scratch_ready_to_delete(i64::MAX).unwrap(), vec![c]);
+    }
+
+    /// The cut-off is the instant the window opens onto, and a row archived
+    /// exactly at it has not yet been out of the way for long enough.
+    #[test]
+    fn the_retention_window_is_read_the_same_way_from_both_sides() {
+        let s = store();
+        let c = scratch_with_run(&s, "errand", "completed");
+        s.archive_conversation(&c, 1_000).unwrap();
+
+        assert!(
+            s.scratch_ready_to_delete(1_000).unwrap().is_empty(),
+            "archived exactly at the cut-off is not past it"
+        );
+        assert_eq!(s.scratch_ready_to_delete(1_001).unwrap(), vec![c.clone()]);
+
+        // And a row that has not been archived at all is not a candidate,
+        // whatever the cut-off says.
+        s.unarchive_conversation(&c).unwrap();
+        assert!(s.scratch_ready_to_delete(i64::MAX).unwrap().is_empty());
+    }
+
+    /// The retention sweep's delete is wider than the ordinary one: the row has
+    /// already been given days to be wanted, so the runs behind it and their
+    /// event streams go too.
+    #[test]
+    fn deleting_a_swept_scratch_conversation_takes_its_runs_and_events() {
+        let s = store();
+        let c = scratch_with_run(&s, "errand", "completed");
+        s.append_event(&envelope("errand", 0, "looked it up")).unwrap();
+
+        s.delete_conversation_cascade(&c).unwrap();
+
+        assert!(s.conversation(&c).unwrap().is_none());
+        assert!(s.run("errand").unwrap().is_none(), "the run row survived");
+        assert!(s.events("errand").unwrap().is_empty(), "events survived");
+    }
+
+    /// Two deletes that cannot be undone, refused. The main chat is the desk
+    /// everything else was opened from, and deleting a live run's row loses the
+    /// pgid that is the only way left to stop the process group.
+    #[test]
+    fn the_wide_delete_refuses_the_main_chat_and_a_run_still_working() {
+        let s = store();
+        let main = pin_as_main(&s);
+        assert!(s.delete_conversation_cascade(&main).is_err());
+        assert!(s.conversation(&main).unwrap().is_some());
+
+        let busy = scratch_with_run(&s, "still-going", "running");
+        assert!(s.delete_conversation_cascade(&busy).is_err());
+        assert!(s.conversation(&busy).unwrap().is_some());
+    }
+
+    /// Reuse is for a session that has finished. Waiting for a busy one to free
+    /// up is the block this whole lane exists to remove, rebuilt one layer
+    /// down.
+    #[test]
+    fn a_running_scratch_session_is_never_offered_for_reuse() {
+        let s = store();
+        let main = pin_as_main(&s);
+        let busy = scratch_with_run(&s, "working", "running");
+        hang_under(&s, &busy, &main);
+        last_active(&s, &busy, 1_000);
+
+        assert!(s.scratch_reuse_candidates(0).unwrap().is_empty());
+    }
+
+    /// Only recent sessions count, and the window is read inclusively at its
+    /// own edge.
+    #[test]
+    fn a_scratch_session_is_offered_until_it_falls_out_of_the_window() {
+        let s = store();
+        let main = pin_as_main(&s);
+        let done = scratch_with_run(&s, "errand", "completed");
+        hang_under(&s, &done, &main);
+        last_active(&s, &done, 1_000);
+
+        assert_eq!(s.scratch_reuse_candidates(1_000).unwrap(), vec![done.clone()]);
+        assert!(
+            s.scratch_reuse_candidates(1_001).unwrap().is_empty(),
+            "a session last active before the window was still offered"
+        );
+
+        // Archived is not closed: a row inside the window comes back when it is
+        // continued, so the sweep having hidden it changes nothing here.
+        s.archive_conversation(&done, 1_000).unwrap();
+        assert_eq!(s.scratch_reuse_candidates(1_000).unwrap(), vec![done]);
+    }
+
+    /// A session that belongs to somebody else's tree is not scratch under
+    /// main, whatever else is true of it.
+    #[test]
+    fn a_scratch_session_outside_mains_tree_is_not_offered() {
+        let s = store();
+        pin_as_main(&s);
+        let orphan = scratch_with_run(&s, "elsewhere", "completed");
+        last_active(&s, &orphan, 1_000);
+
+        assert!(s.scratch_reuse_candidates(0).unwrap().is_empty());
+    }
+
+    /// Both windows have a built-in answer, so a machine that has never been
+    /// configured behaves the way the spec describes.
+    #[test]
+    fn the_scratch_windows_have_defaults_and_a_nonsense_value_falls_back_to_them() {
+        let s = store();
+        assert_eq!(s.scratch_retention_days().unwrap(), 7);
+        assert_eq!(s.scratch_reuse_window_minutes().unwrap(), 60);
+
+        s.set_setting(SCRATCH_RETENTION_DAYS_KEY, "0").unwrap();
+        assert_eq!(s.scratch_retention_days().unwrap(), 0, "never delete");
+
+        s.set_setting(SCRATCH_REUSE_WINDOW_MINUTES_KEY, "seven").unwrap();
+        assert_eq!(s.scratch_reuse_window_minutes().unwrap(), 60);
+
+        // A negative window is read as off rather than as its default: a
+        // negative retention would put the cut-off in the future and sweep away
+        // everything the lane is holding.
+        s.set_setting(SCRATCH_RETENTION_DAYS_KEY, "-1").unwrap();
+        assert_eq!(s.scratch_retention_days().unwrap(), 0);
+    }
+
+    /// The fleet has to know a scratch row from an engineer's whatever state it
+    /// is in. A row that is running, or too old to reuse, is still scratch, and
+    /// one that is not flagged gets advertised to a manager as a warm checkout.
+    #[test]
+    fn every_run_of_a_scratch_conversation_is_flagged_whatever_its_state() {
+        let s = store();
+        let busy = scratch_with_run(&s, "working", "running");
+        let done = scratch_with_run(&s, "errand", "completed");
+        last_active(&s, &done, 1_000);
+        let ordinary = {
+            use crate::conversation::{NewMessage, Role};
+            let c = s
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            s.save_run(&run("engineer", "claude_code", now_ms())).unwrap();
+            s.append_message(
+                &c.id,
+                NewMessage::new(Role::Assistant, "on it").from_run("engineer"),
+            )
+            .unwrap();
+            c.id
+        };
+
+        let scratch = s.scratch_runs().unwrap();
+        assert_eq!(
+            scratch.get("working").map(String::as_str),
+            Some(busy.as_str()),
+            "a running scratch run is still scratch, and names its conversation"
+        );
+        assert_eq!(scratch.get("errand").map(String::as_str), Some(done.as_str()));
+        assert!(
+            !scratch.contains_key("engineer"),
+            "an engineer was flagged scratch"
+        );
+
+        assert!(s.is_ephemeral(&busy).unwrap());
+        assert!(s.is_ephemeral(&done).unwrap());
+        assert!(!s.is_ephemeral(&ordinary).unwrap());
+        assert!(!s.is_ephemeral("no such conversation").unwrap());
+    }
+
+    /// The promise the roles table is built on: a machine whose owner never
+    /// opens the panel sees nothing at all.
+    #[test]
+    fn an_empty_roles_table_says_nothing_about_any_role() {
+        let s = store();
+        for role in [
+            "main",
+            "assistant",
+            "manager",
+            "engineer",
+            "scratch",
+            "housekeeping",
+        ] {
+            assert!(s.role_get(role).unwrap().is_none(), "{role} came back set");
+        }
+        assert!(s.role_list().unwrap().is_empty());
+    }
+
+    /// One field at a time, because that is how the panel edits them: setting a
+    /// model must not blank the harness somebody chose a minute earlier.
+    #[test]
+    fn a_role_is_set_one_field_at_a_time_and_reset_all_at_once() {
+        let s = store();
+        s.role_set("scratch", RoleField::Harness, Some("opencode"))
+            .unwrap();
+        s.role_set("scratch", RoleField::Model, Some("haiku")).unwrap();
+
+        let row = s.role_get("scratch").unwrap().unwrap();
+        assert_eq!(row.role, "scratch");
+        assert_eq!(row.harness.as_deref(), Some("opencode"));
+        assert_eq!(row.model.as_deref(), Some("haiku"));
+        assert_eq!(row.thinking, None, "an unset field stays inherited");
+        assert_eq!(row.permission, None);
+
+        // Clearing one field leaves the others alone.
+        s.role_set("scratch", RoleField::Model, None).unwrap();
+        let row = s.role_get("scratch").unwrap().unwrap();
+        assert_eq!(row.model, None);
+        assert_eq!(row.harness.as_deref(), Some("opencode"));
+
+        s.role_set("engineer", RoleField::Thinking, Some("high"))
+            .unwrap();
+        let names: Vec<String> = s.role_list().unwrap().into_iter().map(|r| r.role).collect();
+        assert_eq!(names, vec!["engineer", "scratch"]);
+
+        // Reset takes the row away, because a row of nothing but nulls means
+        // the same thing as no row and would show as configured.
+        s.role_reset("scratch").unwrap();
+        assert!(s.role_get("scratch").unwrap().is_none());
+        assert_eq!(s.role_list().unwrap().len(), 1);
     }
 }

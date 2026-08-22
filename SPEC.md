@@ -339,6 +339,16 @@ Held conversations are never swept, whatever their age.
 Scratch rows appear in the **loose pane** — the pane below the tree that already
 holds runs belonging to no work. No new drawing.
 
+**Correction, found while building this.** An earlier draft of this section said
+to hang `held` and `archived_at_ms` off `tree::Node`. That does not work.
+`Store::forest_of` reads only conversations with `work_id IS NOT NULL`
+(`core/src/tree.rs:595`), so a scratch conversation never becomes a `Node` at
+all, and the loose pane is not built from the forest — it is `App::loose_rows`
+(`cli/src/tui/app.rs:2637`), which filters the flat agent list by run id against
+`Condensed::runs`. **A loose row is a run, not a tree node.** So the scratch
+facts are exposed as `Store::scratch_lane()`, keyed by run id, which is the key
+the rows actually hold. The fleet and anything else join against it.
+
 - `k` toggles hold on the selected scratch row. A held row shows a marker and
   the key bar reads `k keep`. Releasing hold on a row that already satisfies B2
   archives it there and then.
@@ -396,29 +406,58 @@ exactly like today, so that a machine that never opens the panel sees no change.
 with an explicit `model`) → the conversation's own `/harness` or `/model` →
 the role's row → the harness's own default.
 
-## C3. Thinking, honestly
+## C3. Thinking, honestly — **the spike ran, and this section was wrong**
 
-The three harnesses express thinking in three different ways and the spec should
-not pretend they are one field.
+The spike this section demanded has now happened, and it overturned the
+premises. What follows replaces them.
 
-- **Claude Code** has no flag. It reads `MAX_THINKING_TOKENS` from the
-  environment, and `SpawnRequest.env` already exists to carry it. `thinking` maps
-  to a token budget.
-- **OpenCode** passes `--thinking` unconditionally today
-  (`core/src/harness/opencode.rs:46`), and that flag asks for reasoning *parts*
-  rather than setting a level. The field is inert here, and the row should show
-  it as inert rather than showing a value that does nothing.
-- **AGY** is unknown and needs a look before anything is claimed.
+**There is no environment variable and no token budget.** Two of the three
+harnesses take a plain `--effort` flag, and the third takes a flag in the same
+slot. `MAX_THINKING_TOKENS` appears nowhere in the codebase — the only hits in
+the repo were inside this spec.
 
-Levels are `none | low | medium | high`, mapped per harness in
-`core/src/harness/`. A harness that cannot express a level ignores it and says so
-on the row.
+| Harness | Flag | Accepts |
+|---|---|---|
+| Claude Code | `--effort <level>` | `low, medium, high, xhigh, max` (v2.1.220) |
+| AGY | `--effort <level>` | `low, medium, high` |
+| OpenCode | `--variant <string>` | provider-specific — the help names `high, max, minimal` |
 
-**This is the one part of the spec that needs a spike before it is built.**
-Confirm `MAX_THINKING_TOKENS` is read by the installed Claude Code version and
-find out what AGY does. If either turns out to be false, ship the panel with
-harness, model and permission, and leave the thinking column out rather than
-shipping a control that does nothing.
+Three corrections to what this section used to say:
+
+- *"Claude Code has no flag"* was true once and is false against the installed
+  version, which is 2.1.220.
+- *"AGY is unknown"* was never true. The repo already documented it at
+  `docs/harness-config.md:202-205`, including that AGY models can also encode
+  effort in the name (`gemini-3.6-flash-high`), so AGY has **two channels for one
+  setting** and a role that sets both has two sources of truth.
+- Only the OpenCode paragraph survives. `--thinking` really is a boolean that
+  asks for reasoning *parts* to be emitted, it is passed unconditionally at
+  `core/src/harness/opencode.rs:46`, and it is **not** the effort control.
+  `--variant` is. Leave `--thinking` exactly as it is.
+
+**Levels are `low | medium | high`.** `none` is dropped: no harness has a
+spelling for it, and the honest way to say "don't set this" is to leave the
+column null, which passes no flag and gets the harness's own default. That also
+keeps the promise in C2 that an empty table behaves exactly like today.
+
+`xhigh` and `max` are reachable on Claude Code only. The panel may offer them
+when the row's harness is Claude Code and must not offer them otherwise.
+
+**The one honest caveat, and it belongs to OpenCode.** `--variant` values are
+chosen by whichever provider the model comes from, not by OpenCode, so
+`low`/`medium` are not knowable to be valid from Jod's side. Therefore: the flag
+is passed **only when a value is explicitly set**, and it is passed verbatim. A
+null row sends no flag and cannot break a spawn. The panel says on the row that
+the value goes straight through to the provider.
+
+Every construction site of `SpawnRequest` currently passes an empty `env`, and
+this epic leaves it that way. `SpawnRequest.env` does reach the child process
+(`core/src/runner.rs:158` → `supervisor/src/main.rs:193`) — it is simply not the
+mechanism any more.
+
+Also stale and worth fixing while nearby: `docs/jod-system.md:330` lists
+reasoning-effort cycling as blocked because *"each harness spells it
+differently"*. Two of the three now spell it identically.
 
 ## C4. The panel
 
@@ -426,12 +465,12 @@ shipping a control that does nothing.
 
 ```
 ┌ roles ───────────────────────────────────┐
-│ ● main            claude · haiku  · none │
+│ ● main            claude · haiku  ·  —   │
 │ └ ● assistant     claude · haiku  · low  │
 │   ├ ○ scratch     opencode · gpt  ·  —   │
 │   └ ○ manager     claude · sonnet · med  │
 │     └ ○ engineer  claude · opus   · high │
-│ ○ housekeeping    claude · haiku  · none │
+│ ○ housekeeping    claude · haiku  ·  —   │
 └──────────────────────────────────────────┘
   ↑↓ move  ⏎ edit  h harness  m model  t think  p perm  r reset
 ```
@@ -474,8 +513,9 @@ absent key means the default.
 | `core/src/orchestrator.rs` | main's preamble shrinks, `assistant_preamble`, `hand_to_assistant` |
 | `core/src/mcp.rs` | `ask_assistant`, `ask_manager`/`delegate`/`open_work` refused from main, the `list_agents` second-call refusal, `AgentView.scratch` and the scratch reuse hint |
 | `core/src/service.rs` | `SpawnRequest.role`, resolving a role to harness/model/env at the one spawn seam |
-| `core/src/ticker.rs` | the retention sweep |
-| `core/src/tree.rs` | archived and held scratch rows in the loose pane |
+| `core/src/ticker.rs` | the archive and retention sweep |
+| `core/src/daemon.rs` | wiring that sweep into `Tick::tick`, where every sweep is actually driven from |
+| `core/src/tree.rs` | `scratch_lane()` — held and archived facts keyed by run id |
 | `core/src/harness/*.rs` | the thinking mapping, per harness |
 | `cli/src/tui/workspace.rs` | `Workspace::Roles` |
 | `cli/src/tui/app.rs` | its list state, the roles rows |
@@ -528,7 +568,19 @@ absent key means the default.
     delivered is archived by the sweep.
 16. The same conversation with one `queued` delivery is **not** archived.
 17. A scratch conversation whose run `failed` is not archived.
-18. A scratch conversation marked stalled is not archived.
+18. A scratch conversation whose run is still **wedged** is not archived.
+    **Corrected while building.** This check used to say "marked stalled is not
+    archived", and that is false through the daemon and true only of the sweep
+    in isolation. `tick_heartbeats` runs first and *retires* the mark: it sees a
+    run that has ended, calls `unwatch_run`, and deletes the `heartbeats` row
+    and `stalled_since_ms` with it, so by the time the scratch sweep looks there
+    is no mark left. The promise therefore rests on the run's **status**, not on
+    the mark surviving — a genuinely wedged run is `running` or gets reaped to
+    `failed`, and neither is `completed`, so the archive query refuses it either
+    way. A session that stalled and then delivered its answer **is** archived,
+    which is correct: B2 keeps a row visible because it is *stuck*, present
+    tense, and one that recovered is not stuck. Archiving only hides it, and `z`
+    brings it back for the whole retention window.
 19. `held = 1` survives every one of the above.
 20. The sweep deletes an archived scratch conversation past the window and
     leaves one inside it.
@@ -547,9 +599,12 @@ absent key means the default.
     `SpawnRequest` that `delegate` builds.
 27. An explicit `model` argument on `delegate` beats the role's row.
 28. The conversation's own `/model` beats the role's row.
-29. `thinking = 'high'` for a Claude Code role puts `MAX_THINKING_TOKENS` in
-    `SpawnRequest.env`; for OpenCode it puts nothing and the row reports the
-    field inert.
+29. `thinking = 'high'` on a Claude Code role puts `--effort high` in the argv,
+    and on an AGY role too. On OpenCode it puts `--variant high`. A null
+    `thinking` puts **no flag at all** on any of the three — that is the check
+    that keeps an empty `roles` table behaving exactly like today.
+29b. `SpawnRequest.env` is still empty at every construction site. The effort
+    level must not have been routed through the environment.
 30. The roles panel lists all six roles with `main` at the root and `engineer`
     at depth three.
 

@@ -49,6 +49,23 @@ impl Harness for OpenCode {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
         }
+        // Reasoning effort, which OpenCode calls `--variant` and hands to the
+        // provider the model comes from. Not `--thinking` above: that one is a
+        // boolean asking for reasoning *parts* to be emitted, it is passed on
+        // every spawn, and it has no opinion about how hard anything thinks.
+        //
+        // The value goes through verbatim because the words that count are the
+        // provider's rather than OpenCode's — its own help names `high`, `max`
+        // and `minimal`, and a different provider will name others. So there is
+        // nothing here for Jod to validate against, and a level it cannot check
+        // is one it must not silently drop. What it can promise is the other
+        // half: with `effort` unset no flag is emitted at all, so a spawn that
+        // nobody has configured cannot be broken by a value the provider does
+        // not know.
+        if let Some(level) = req.effort.and_then(|e| e.flag_value(HarnessKind::OpenCode)) {
+            args.push(ArgPart::lit("--variant"));
+            args.push(ArgPart::lit(level));
+        }
         match &req.resume {
             Resume::Fresh => {}
             Resume::Last => args.push(ArgPart::lit("--continue")),
@@ -294,6 +311,7 @@ fn usage_from(part: &Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::{Effort, Role};
     use std::path::PathBuf;
 
     fn req(permission: PermissionPolicy, model: Option<&str>) -> SpawnRequest {
@@ -309,6 +327,65 @@ mod tests {
             tools: None,
             ..SpawnRequest::default()
         }
+    }
+
+    /// SPEC check 29. OpenCode's effort control is `--variant`, and the value
+    /// goes through exactly as it was written: the words belong to whichever
+    /// provider the model comes from, so Jod has nothing to translate it into.
+    #[test]
+    fn an_effort_level_reaches_opencode_as_a_variant() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.effort = Some(Effort::High);
+        let args = lits(&OpenCode::default().args(&r));
+        let at = args
+            .iter()
+            .position(|a| a == "--variant")
+            .expect("a level that was asked for must reach the command line");
+        assert_eq!(args[at + 1], "high");
+    }
+
+    /// `--thinking` is a boolean asking for reasoning parts to be emitted, and
+    /// it is passed on every spawn. It is not the effort control and setting a
+    /// level must not disturb it — the two were confused once and the whole of
+    /// C3 was written on the mistake.
+    #[test]
+    fn the_variant_flag_leaves_the_thinking_boolean_alone() {
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.effort = Some(Effort::Low);
+        let args = lits(&OpenCode::default().args(&r));
+        assert_eq!(
+            args.iter().filter(|a| *a == "--thinking").count(),
+            1,
+            "the reasoning-parts flag is unconditional and stays that way"
+        );
+        let thinking = args.iter().position(|a| a == "--thinking").unwrap();
+        assert_ne!(
+            args[thinking + 1], "low",
+            "`--thinking` takes no value; a level after it would be read as the prompt"
+        );
+    }
+
+    /// The other half of check 29. Nothing set means no flag, which is what
+    /// makes a value Jod cannot validate safe to support at all: an unasked-for
+    /// spawn cannot be broken by a word the provider does not know.
+    #[test]
+    fn no_effort_level_means_no_variant_flag_and_no_other_change() {
+        let plain = req(PermissionPolicy::Ask, Some("gpt-5"));
+        let args = lits(&OpenCode::default().args(&plain));
+        assert!(!args.iter().any(|a| a == "--variant"));
+
+        let mut tagged = plain.clone();
+        tagged.role = Some(Role::Scratch);
+        assert_eq!(lits(&OpenCode::default().args(&tagged)), args);
+    }
+
+    fn lits(args: &[ArgPart]) -> Vec<String> {
+        args.iter()
+            .map(|a| match a {
+                ArgPart::Literal(s) => s.clone(),
+                ArgPart::Prompt => "<PROMPT>".into(),
+            })
+            .collect()
     }
 
     #[test]

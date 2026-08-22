@@ -199,10 +199,18 @@ its own config rather than from Jod.
 - `agy plugin list` manages plugins; `agy agents` lists the agents `--agent`
   accepts.
 
-AGY has `--effort low|medium|high` for reasoning effort, which Jod does not
-currently pass. Its models encode the effort in the name instead
-(`gemini-3.6-flash-high`), so `/model gemini-3.6-flash-high` reaches the same
-place.
+AGY has `--effort low|medium|high` for reasoning effort, which Jod passes when
+the spawn's role sets a thinking level. Its models encode the effort in the name
+as well (`gemini-3.6-flash-high`), so `/model gemini-3.6-flash-high` reaches the
+same place — which also means a role that sets both the model and the level has
+two sources of truth for one setting. Jod passes the flag as asked and does not
+try to reconcile them.
+
+The other two harnesses take the same setting in the same slot: Claude Code
+`--effort low|medium|high|xhigh|max` (read off 2.1.220), and OpenCode
+`--variant <string>`, whose values belong to the provider the model comes from
+rather than to OpenCode. Jod emits none of the three unless a level was asked
+for, so a spawn nobody has configured is the spawn it always was.
 
 ## Reasoning output
 

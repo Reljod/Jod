@@ -276,6 +276,13 @@ fn due_to_poll(store: &Store, now_ms: i64) -> bool {
     }
 }
 
+/// One day, for turning `scratch_retention_days` into a cutoff.
+///
+/// Named rather than written out at the one call site, because the number that
+/// decides how long a transcript survives should be readable as a duration
+/// rather than counted in zeroes.
+const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+
 /// How long a claim is believed before another process may take it.
 ///
 /// Comfortably longer than a tick, so an ordinary slow tick never loses its own
@@ -1814,6 +1821,94 @@ impl Ticker {
                     }
                 }
                 works::State::Closed => {}
+            }
+        }
+        Ok(report)
+    }
+
+    /// Put finished scratch sessions out of the way, and delete the ones that
+    /// have been out of the way long enough.
+    ///
+    /// **B2 and B3 of the scratch lane, in one pass.** A scratch conversation is
+    /// something the assistant started for a one-shot job — a lookup, a fetch, a
+    /// calculation — and the promise the spec makes about it is that it tidies
+    /// itself away when it is done. Nothing else in the system would ever do
+    /// that: the run ends, the row stays in the fleet, and a week of one-line
+    /// questions leaves a loose pane nobody can read.
+    ///
+    /// The two halves are deliberately different in what they cost you if they
+    /// are wrong. Archiving hides a row and nothing more — the transcript is
+    /// still there, `z` still reveals it, and a run started on the conversation
+    /// puts it back. Deleting is final. So archiving happens the moment a
+    /// session is finished and delivered, and deleting waits days.
+    ///
+    /// **A stuck session is never archived**, which is the half of B2 that is
+    /// easy to lose: the whole reason to look at the fleet is that something
+    /// went wrong, so a run that failed, was killed, or has been marked stalled
+    /// by [`Ticker::tick_heartbeats`] keeps its row. That rule is not repeated
+    /// here — [`Store::scratch_ready_to_archive`] holds every clause of it,
+    /// including the join against `heartbeats.stalled_since_ms` — and it is
+    /// worth saying why the temptation to repeat it should be resisted. Two
+    /// copies of one rule is two places to change it and one of them will be
+    /// forgotten, and the copy in this file would be the one nobody reads,
+    /// because the query is where a person goes to find out what "ready" means.
+    /// The tests below still assert the whole rule through this sweep, which is
+    /// the level a person actually cares about it at.
+    ///
+    /// **Retention of zero deletes nothing at all.** That is the escape hatch
+    /// for anyone who wants a scratch session kept for ever, and it is one
+    /// subtraction away from being the opposite: `now_ms - 0` is `now_ms`, and a
+    /// cutoff of now matches every archived row there is. The guard below is
+    /// what stands between "never delete" and "delete everything, immediately",
+    /// and `a_retention_of_zero_deletes_nothing` fails if it is removed.
+    ///
+    /// The counters read as: `claimed` is conversations this sweep had reason
+    /// to act on, `started` is conversations archived or deleted, and `failed`
+    /// is ones that would not budge. Nothing is ever counted `held` here, which
+    /// is the one way this sweep reads differently from its siblings: a
+    /// conversation that has to stay visible is never returned by the queries
+    /// at all, so the rows it decides to leave alone are rows it never sees.
+    pub fn tick_scratch(&self, now_ms: i64) -> Result<TickReport> {
+        let Some(store) = self.jod.store().cloned() else {
+            return Ok(TickReport::default());
+        };
+        let ready = store.scratch_ready_to_archive()?;
+        let mut report = TickReport {
+            claimed: ready.len(),
+            ..Default::default()
+        };
+
+        for conversation_id in ready {
+            match store.archive_conversation(&conversation_id, now_ms) {
+                Ok(()) => report.started += 1,
+                Err(e) => {
+                    report.failed += 1;
+                    eprintln!("[jod/tick] could not archive `{conversation_id}`: {e}");
+                }
+            }
+        }
+
+        let days = store.scratch_retention_days()?;
+        // Zero means never, and so does anything below it: a negative setting
+        // would put the cutoff in the future and match every archived row. The
+        // reading that keeps a transcript is the safe one either way.
+        if days <= 0 {
+            return Ok(report);
+        }
+        // Saturating, so a machine whose clock has not been set — `now_ms` near
+        // zero — produces a cutoff in the distant past that matches nothing,
+        // rather than wrapping into one that matches everything.
+        let before_ms = now_ms.saturating_sub(days.saturating_mul(DAY_MS));
+
+        let old = store.scratch_ready_to_delete(before_ms)?;
+        report.claimed += old.len();
+        for conversation_id in old {
+            match store.delete_conversation_cascade(&conversation_id) {
+                Ok(()) => report.started += 1,
+                Err(e) => {
+                    report.failed += 1;
+                    eprintln!("[jod/tick] could not delete `{conversation_id}`: {e}");
+                }
             }
         }
         Ok(report)
@@ -5188,6 +5283,333 @@ mod tests {
                 store.work(&work).unwrap().unwrap().state,
                 State::Closed,
                 "the composite tick never asked whether the board had emptied"
+            );
+        }
+    }
+
+    mod scratch {
+        use super::*;
+        use crate::cards::NewCard;
+        use crate::conversation::{NewMessage, Role};
+        use crate::daemon::Tick;
+        use crate::harness::HarnessKind;
+        use crate::store::{Store, SCRATCH_RETENTION_DAYS_KEY};
+
+        fn ticker_over(store: &Arc<Store>) -> Ticker {
+            Ticker::new(Jod::with_store(store.clone())).as_owner("t")
+        }
+
+        /// A run, and the message that ties it to a conversation.
+        ///
+        /// The message is not decoration: nothing on `runs` names a
+        /// conversation, so `messages.run_id` is the only join there is, and a
+        /// run saved without one belongs to nobody.
+        fn run_in(store: &Store, conversation: &str, id: &str, status: &str) {
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: id.into(),
+                    name: "errand".into(),
+                    harness: "claude_code".into(),
+                    status: status.into(),
+                    cwd: "/tmp".into(),
+                    session_id: Some("ses-1".into()),
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 1,
+                    summary: serde_json::Value::Null,
+                })
+                .unwrap();
+            store
+                .append_message(
+                    conversation,
+                    NewMessage::new(Role::Assistant, "looked it up").from_run(id),
+                )
+                .unwrap();
+        }
+
+        /// A scratch conversation with one run in the state given, opened the
+        /// way a delegation opens one.
+        fn scratch(store: &Store, run_id: &str, status: &str) -> String {
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            store.mark_ephemeral(&c.id).unwrap();
+            run_in(store, &c.id, run_id, status);
+            c.id
+        }
+
+        /// Whether the sweep has taken this run's conversation out of the
+        /// fleet.
+        ///
+        /// Asked of [`Store::scratch_lane`] because nothing else exposes
+        /// `archived_at_ms` — `Conversation` does not carry the column — and
+        /// because it is the answer the fleet screen itself gets, so these
+        /// tests assert what a person would see rather than what a column
+        /// says. `Filter::All` is the reading that includes held rows.
+        fn archived(store: &Store, run_id: &str) -> bool {
+            store
+                .scratch_lane(crate::works::Filter::All)
+                .unwrap()
+                .archived
+                .contains(run_id)
+        }
+
+        /// An answer waiting to be spoken into a conversation, which is what a
+        /// `queued` row in `pending_deliveries` is.
+        fn answer_waiting_for(store: &Store, conversation: &str) {
+            let card = store
+                .raise_card(NewCard {
+                    conversation_id: conversation.to_string(),
+                    title: "which spelling?".to_string(),
+                    ..NewCard::default()
+                })
+                .unwrap();
+            store.answer_card(card.id, None, Some("the second one")).unwrap();
+        }
+
+        /// Check 15. The ordinary ending: it finished, its answer landed, and
+        /// the row gets out of the way.
+        #[tokio::test]
+        async fn a_finished_scratch_session_whose_answer_has_landed_is_archived() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            scratch(&store, "r1", "completed");
+
+            let report = ticker_over(&store).tick_scratch(1_000_000).unwrap();
+
+            assert_eq!(report.claimed, 1);
+            assert_eq!(report.started, 1, "the sweep archived nothing");
+            assert!(archived(&store, "r1"));
+        }
+
+        /// Check 16. Archiving before the report has been spoken would hide the
+        /// row and strand the reply, which is R3b by another route.
+        #[tokio::test]
+        async fn a_scratch_session_with_an_answer_still_queued_stays_in_the_fleet() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = scratch(&store, "r1", "completed");
+            answer_waiting_for(&store, &c);
+
+            let report = ticker_over(&store).tick_scratch(1_000_000).unwrap();
+
+            assert_eq!(report.claimed, 0, "it was not even a candidate");
+            assert!(!archived(&store, "r1"));
+        }
+
+        /// Check 17. Half of "unless it gets stuck": a session that failed is
+        /// the one somebody wants to read.
+        #[tokio::test]
+        async fn a_scratch_session_whose_run_failed_stays_in_the_fleet() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            scratch(&store, "r1", "failed");
+
+            ticker_over(&store).tick_scratch(1_000_000).unwrap();
+
+            assert!(!archived(&store, "r1"));
+        }
+
+        /// Arm a run with a heartbeat that has already been marked stalled.
+        fn marked_stalled(store: &Store, run_id: &str) {
+            let mut hb = Heartbeat::starting(run_id, Watching::Run, 1);
+            hb.stalled_since_ms = Some(1);
+            store.watch_run(&hb).unwrap();
+        }
+
+        /// The stall clause of [`Store::scratch_ready_to_archive`], on its own.
+        ///
+        /// The run is `completed` on purpose. A stalled run is nearly always
+        /// still `running`, so a test that left the status alone would pass on
+        /// the status check and never reach the stall clause at all.
+        ///
+        /// **This is a test of the step, not a promise about the daemon**, and
+        /// the difference turned out to matter. Read
+        /// `a_session_that_stalled_and_then_finished_is_archived_once_the_mark_is_retired`
+        /// next: the composite tick sweeps heartbeats first, which retires the
+        /// mark this test relies on, so the end-to-end answer is the opposite
+        /// one. Check 18 of the spec is about neither of these — it is about a
+        /// session that is *still* wedged, which is
+        /// `the_daemons_tick_leaves_a_wedged_scratch_session_in_the_fleet`.
+        #[tokio::test]
+        async fn the_sweep_alone_leaves_a_run_carrying_a_stall_mark_in_the_fleet() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            scratch(&store, "r1", "completed");
+            marked_stalled(&store, "r1");
+
+            ticker_over(&store).tick_scratch(1_000_000).unwrap();
+
+            assert!(!archived(&store, "r1"));
+        }
+
+        /// Check 18, as a person means it: a session that is stuck stays where
+        /// you can see it, through the whole tick the daemon runs.
+        ///
+        /// A wedged run's status is `running`, and that is what carries the
+        /// promise rather than the stall mark. The heartbeat sweep goes first
+        /// and does one of two things to it — marks it and leaves it running
+        /// when its process group is alive, or reaps it to `failed` when the
+        /// group has gone, which is what happens here — and neither of those
+        /// is `completed`, so the row stays either way. That redundancy is the
+        /// point: the promise does not rest on the mark surviving the sweep,
+        /// because it does not survive it.
+        #[tokio::test]
+        async fn the_daemons_tick_leaves_a_wedged_scratch_session_in_the_fleet() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            scratch(&store, "r1", "running");
+            marked_stalled(&store, "r1");
+
+            Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert!(
+                !archived(&store, "r1"),
+                "a wedged scratch session tidied itself away, which is the one \
+                 thing B2 says it must never do"
+            );
+            assert_ne!(
+                store.run("r1").unwrap().unwrap().status,
+                "completed",
+                "the status is what keeps this row visible, so it must not read completed"
+            );
+        }
+
+        /// The other side of the same coin, written down because it surprised
+        /// me and will surprise the next person.
+        ///
+        /// A run that went quiet, got marked, and then finished **is** archived
+        /// by the daemon, even though `tick_scratch` on its own refuses to
+        /// archive it. The heartbeat sweep runs first in `Tick::tick`, sees a
+        /// run that has ended, and retires the row — taking `stalled_since_ms`
+        /// with it — so by the time the scratch sweep looks there is no mark
+        /// left to find.
+        ///
+        /// That is the right answer, which is why this pins the behaviour
+        /// rather than reporting a bug. B2 keeps a session visible because it
+        /// is *stuck*, and one that delivered its answer is not stuck any more.
+        /// Nothing is lost either: archiving only hides the row, and `z` brings
+        /// it back for as long as the retention window lasts.
+        #[tokio::test]
+        async fn a_session_that_stalled_and_then_finished_is_archived_once_the_mark_is_retired() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            scratch(&store, "r1", "completed");
+            marked_stalled(&store, "r1");
+
+            Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert!(
+                store.heartbeat("r1").unwrap().is_none(),
+                "the heartbeat sweep is what retires the mark, and it runs first"
+            );
+            assert!(archived(&store, "r1"));
+        }
+
+        /// Check 19, over every case above. Holding a row is unconditional, so
+        /// it is worth asserting against the case that would otherwise archive
+        /// as well as the ones that would not.
+        #[tokio::test]
+        async fn a_held_scratch_session_survives_every_reason_to_archive_it() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let finished = scratch(&store, "r1", "completed");
+            let failed = scratch(&store, "r2", "failed");
+            let queued = scratch(&store, "r3", "completed");
+            answer_waiting_for(&store, &queued);
+            for c in [&finished, &failed, &queued] {
+                store.set_held(c, true).unwrap();
+            }
+
+            let report = ticker_over(&store).tick_scratch(1_000_000).unwrap();
+
+            assert_eq!(report.claimed, 0, "a held row is never a candidate");
+            for run in ["r1", "r2", "r3"] {
+                assert!(!archived(&store, run), "a held row was archived: {run}");
+            }
+        }
+
+        /// Check 20. Both halves in one store, because the bug worth catching
+        /// is a cutoff that is off by a window rather than one that is missing.
+        #[tokio::test]
+        async fn the_sweep_deletes_a_session_past_the_window_and_keeps_one_inside_it() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 100 * DAY_MS;
+            let old = scratch(&store, "r1", "completed");
+            let recent = scratch(&store, "r2", "completed");
+            // Eight days ago against a seven-day default, and one day ago.
+            store.archive_conversation(&old, now - 8 * DAY_MS).unwrap();
+            store.archive_conversation(&recent, now - DAY_MS).unwrap();
+
+            ticker_over(&store).tick_scratch(now).unwrap();
+
+            assert!(store.conversation(&old).unwrap().is_none(), "the old one is still here");
+            assert!(store.conversation(&recent).unwrap().is_some(), "the recent one was deleted");
+        }
+
+        /// Check 21, and the guard on the most dangerous line in the sweep.
+        ///
+        /// Zero means never delete. Take the guard out and `now_ms - 0` is
+        /// `now_ms`, a cutoff every archived row is older than, and the setting
+        /// that was supposed to keep everything for ever deletes the lot on the
+        /// next tick. This test fails the moment that guard goes.
+        #[tokio::test]
+        async fn a_retention_of_zero_deletes_nothing() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 100 * DAY_MS;
+            let ancient = scratch(&store, "r1", "completed");
+            store.archive_conversation(&ancient, now - 400 * DAY_MS).unwrap();
+            store.set_setting(SCRATCH_RETENTION_DAYS_KEY, "0").unwrap();
+
+            ticker_over(&store).tick_scratch(now).unwrap();
+
+            assert!(
+                store.conversation(&ancient).unwrap().is_some(),
+                "a retention of zero means never delete, and it deleted"
+            );
+        }
+
+        /// Check 19's other half. Holding a row has to outlast the retention
+        /// window as well as the archive rule, or "keep this" means "keep this
+        /// for a week".
+        #[tokio::test]
+        async fn a_held_session_is_never_deleted_however_old_it_is() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let now = 100 * DAY_MS;
+            let kept = scratch(&store, "r1", "completed");
+            store.archive_conversation(&kept, now - 90 * DAY_MS).unwrap();
+            store.set_held(&kept, true).unwrap();
+
+            ticker_over(&store).tick_scratch(now).unwrap();
+
+            assert!(store.conversation(&kept).unwrap().is_some(), "a held row was swept");
+        }
+
+        /// Nothing that existed before the lane did is scratch, so a sweep on
+        /// an ordinary database must be a no-op. This is the assertion that a
+        /// person upgrading cares about most.
+        #[tokio::test]
+        async fn an_ordinary_conversation_is_never_touched() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            run_in(&store, &c.id, "r1", "completed");
+
+            let report = ticker_over(&store).tick_scratch(1_000_000).unwrap();
+
+            assert_eq!(report, TickReport::default(), "the sweep touched a real conversation");
+        }
+
+
+        /// The guard, and the reason it is written the way the other steps'
+        /// guards are. A unit test on a function nothing calls stays green for
+        /// ever, so this one goes through the tick the daemon actually runs:
+        /// delete the `tick_scratch` line from `impl Tick for Ticker` and this
+        /// fails, where every test above it carries on passing.
+        #[tokio::test]
+        async fn the_daemons_tick_archives_a_finished_scratch_session() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            scratch(&store, "r1", "completed");
+
+            Tick::tick(&ticker_over(&store), 1_000_000).await.unwrap();
+
+            assert!(
+                archived(&store, "r1"),
+                "the composite tick never swept the scratch lane"
             );
         }
     }

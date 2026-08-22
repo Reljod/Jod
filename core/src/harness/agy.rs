@@ -82,6 +82,24 @@ impl Harness for Agy {
             args.push(ArgPart::lit("--model"));
             args.push(ArgPart::lit(model));
         }
+        // AGY spells reasoning effort the same way Claude Code does —
+        // `--effort <level>` — but takes only `low`, `medium` and `high`, which
+        // is why the value comes from `flag_value` rather than from `as_str`. A
+        // level AGY has no word for produces no flag: passing `high` in place of
+        // the `max` somebody asked for would be a setting that did something
+        // other than what it says. `service::apply_role` refuses that
+        // combination before it ever reaches here, and says so; this is the
+        // backstop that keeps the wrong word out of the argv either way.
+        //
+        // AGY has a second channel for the same setting — a model name can
+        // carry it, as in `gemini-3.6-flash-high` (`docs/harness-config.md`) —
+        // so a role that sets both the model and the level has two sources of
+        // truth and the model name is the one AGY reads last. Nothing here
+        // tries to reconcile them; the flag is passed as asked.
+        if let Some(level) = req.effort.and_then(|e| e.flag_value(HarnessKind::Agy)) {
+            args.push(ArgPart::lit("--effort"));
+            args.push(ArgPart::lit(level));
+        }
         match &req.resume {
             Resume::Fresh => {}
             Resume::Last => args.push(ArgPart::lit("--continue")),
@@ -324,6 +342,7 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::{Effort, Role};
 
     /// Regression, seen in a real run: AGY sends prose in fragments, one per
     /// `step_update`, so emitting each on sight split words across transcript
@@ -469,6 +488,50 @@ mod tests {
             tools: None,
             ..SpawnRequest::default()
         }
+    }
+
+    /// SPEC check 29. AGY spells effort the same way Claude Code does, which
+    /// is the finding that made a single `thinking` column workable at all.
+    #[test]
+    fn an_effort_level_reaches_agy_as_its_own_flag() {
+        let mut r = req();
+        r.effort = Some(Effort::High);
+        let args = lits(&Agy::default().args(&r));
+        let at = args
+            .iter()
+            .position(|a| a == "--effort")
+            .expect("a level that was asked for must reach the command line");
+        assert_eq!(args[at + 1], "high");
+    }
+
+    /// AGY's `--effort` takes three words. Asked for one of the two it has
+    /// never heard of, it is given no flag rather than the nearest level it
+    /// does know — a run silently thinking at `high` when the role says `max`
+    /// is a setting nobody could check.
+    #[test]
+    fn a_level_agy_has_no_word_for_produces_no_flag() {
+        for level in [Effort::XHigh, Effort::Max] {
+            let mut r = req();
+            r.effort = Some(level);
+            let args = lits(&Agy::default().args(&r));
+            assert!(
+                !args.iter().any(|a| a == "--effort"),
+                "{level:?} reached AGY, which cannot spell it: {args:?}"
+            );
+        }
+    }
+
+    /// The other half of check 29: nothing asked for, nothing emitted, and the
+    /// argv is the one this adapter produced before roles existed.
+    #[test]
+    fn no_effort_level_means_no_effort_flag_and_no_other_change() {
+        let plain = req();
+        let args = lits(&Agy::default().args(&plain));
+        assert!(!args.iter().any(|a| a == "--effort"));
+
+        let mut tagged = plain.clone();
+        tagged.role = Some(Role::Engineer);
+        assert_eq!(lits(&Agy::default().args(&tagged)), args);
     }
 
     fn lits(args: &[ArgPart]) -> Vec<String> {

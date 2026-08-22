@@ -202,6 +202,152 @@ impl PermissionPolicy {
     }
 }
 
+/// One layer of the chain of command, and the key of its row in `roles`.
+///
+/// Six, because six is what the chain has: main hands over to an assistant, the
+/// assistant hands to a manager or to a scratch session, a manager opens
+/// engineers, and housekeeping hangs off the side because nothing delegates to
+/// it. The spellings here are the primary keys in the `roles` table
+/// ([`crate::store::RoleRow`]), so they are written down once and read back
+/// with [`Role::parse`].
+///
+/// This is a *tag on a spawn*, not a property of it. It says which row to
+/// consult for the harness, model, effort and permission the caller did not
+/// name itself; [`crate::service::apply_role`] is the only thing that reads it,
+/// and by the time the request reaches a harness the tag has already been spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Main,
+    Assistant,
+    Manager,
+    Engineer,
+    Scratch,
+    Housekeeping,
+}
+
+impl Role {
+    /// Every layer, in the order the chain of command lists them. Not a tree —
+    /// which role sits under which is a shape the roles panel draws, and this
+    /// array deliberately does not encode it.
+    pub const ALL: [Role; 6] = [
+        Role::Main,
+        Role::Assistant,
+        Role::Manager,
+        Role::Engineer,
+        Role::Scratch,
+        Role::Housekeeping,
+    ];
+
+    /// The stored spelling — the `roles.role` primary key.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Main => "main",
+            Role::Assistant => "assistant",
+            Role::Manager => "manager",
+            Role::Engineer => "engineer",
+            Role::Scratch => "scratch",
+            Role::Housekeeping => "housekeeping",
+        }
+    }
+
+    /// The inverse of [`Role::as_str`], for reading a role back out of the
+    /// table. Unknown text yields `None` rather than a guess: a row naming a
+    /// layer this build does not have is a row to leave alone, not one to map
+    /// onto whichever role looks closest.
+    pub fn parse(s: &str) -> Option<Role> {
+        Role::ALL.into_iter().find(|r| r.as_str() == s)
+    }
+}
+
+/// How hard the model should think, when somebody has said.
+///
+/// A level rather than a token budget, because a level is what the harnesses
+/// actually take. Claude Code and AGY both spell it `--effort <level>` and both
+/// accept the same first three words; OpenCode's `--variant <string>` sits in
+/// the same slot. All three were read off the installed binaries — Claude Code
+/// 2.1.220 and AGY 1.1.18 — rather than assumed, and no environment variable is
+/// involved anywhere.
+///
+/// There is no `None` variant, on purpose. "Do not set this" is `Option::None`
+/// on [`SpawnRequest::effort`], which passes no flag at all and leaves the
+/// harness on its own default. That is what keeps an empty `roles` table
+/// producing exactly the argv it produced before any of this existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    /// Claude Code only — see [`Effort::flag_value`].
+    #[serde(rename = "xhigh")]
+    XHigh,
+    /// Claude Code only — see [`Effort::flag_value`].
+    Max,
+}
+
+impl Effort {
+    /// Every level, lowest first.
+    pub const ALL: [Effort; 5] = [
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::XHigh,
+        Effort::Max,
+    ];
+
+    /// The stored spelling, which is also the word the flag takes.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+
+    /// The inverse of [`Effort::as_str`], for reading `roles.thinking` back.
+    pub fn parse(s: &str) -> Option<Effort> {
+        Effort::ALL.into_iter().find(|e| e.as_str() == s)
+    }
+
+    /// What to pass to this harness's effort flag, or `None` when the harness
+    /// has no spelling for the level asked for.
+    ///
+    /// Per harness, because the three do not agree on the range:
+    ///
+    /// - **Claude Code** takes all five. `claude --help` on 2.1.220 spells it
+    ///   `--effort <level>` and names `low, medium, high, xhigh, max`.
+    /// - **AGY** takes the first three, `low|medium|high`, which
+    ///   `docs/harness-config.md` already documented. `xhigh` and `max` have no
+    ///   spelling there and come back `None`, so the adapter passes nothing
+    ///   rather than the nearest level AGY does accept. Rounding `max` down to
+    ///   `high` would be a setting that quietly did something other than what
+    ///   it says, and the person who set it would have no way to find out. The
+    ///   refusal is *reported* instead, at the one place that knows which role
+    ///   asked for it — [`crate::service::apply_role`].
+    /// - **OpenCode** has nothing to check against. `--variant` is handed
+    ///   through to whichever provider the model comes from, so the valid words
+    ///   are that provider's rather than OpenCode's — its own help names
+    ///   `high, max, minimal`. Every level therefore goes through verbatim, and
+    ///   Jod does not pretend to know which ones the provider will take.
+    pub fn flag_value(&self, harness: HarnessKind) -> Option<&'static str> {
+        match harness {
+            HarnessKind::ClaudeCode | HarnessKind::OpenCode => Some(self.as_str()),
+            HarnessKind::Agy => {
+                matches!(self, Effort::Low | Effort::Medium | Effort::High).then_some(self.as_str())
+            }
+        }
+    }
+
+    /// Whether this level reaches that harness at all. The question a caller
+    /// asks *before* setting it, so it can say why it did not.
+    pub fn accepted_by(&self, harness: HarnessKind) -> bool {
+        self.flag_value(harness).is_some()
+    }
+}
+
 /// What the caller asked for. Harness-neutral on purpose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnRequest {
@@ -226,8 +372,34 @@ pub struct SpawnRequest {
     pub cwd: PathBuf,
     #[serde(default)]
     pub model: Option<String>,
+    /// How hard to think, when a caller or a role has said.
+    ///
+    /// `None` is not "think as little as possible" — it means nobody said, so
+    /// no flag is emitted and the harness uses its own default. Every adapter
+    /// treats it that way, which is what lets this field exist without changing
+    /// a single spawn on a machine that never configures a role.
+    #[serde(default)]
+    pub effort: Option<Effort>,
     #[serde(default)]
     pub permission: PermissionPolicy,
+    /// Which layer of the chain of command this spawn is, if the caller knows.
+    ///
+    /// Set it and the role's row in `roles` fills in the harness, model, effort
+    /// and permission that the caller and the conversation both left unsaid.
+    /// Leave it `None` — the default, and what every existing call site does —
+    /// and no row is read and nothing changes.
+    ///
+    /// **A caller that names its own harness should leave this unset.**
+    /// [`harness`](Self::harness) is a `HarnessKind` rather than an `Option`,
+    /// so "the caller asked for Claude Code" and "the caller asked for nothing
+    /// and got the fallback" arrive here as the same value, and the roles table
+    /// sits exactly between those two cases: below a harness somebody named,
+    /// above the fallback. Since the request cannot tell them apart, the caller
+    /// does — `role: args.harness.is_none().then_some(Role::Scratch)` is the
+    /// shape, and it keeps an explicit argument winning without adding a second
+    /// field that every future call site would have to remember to set.
+    #[serde(default)]
+    pub role: Option<Role>,
     /// Whether to continue an existing conversation instead of starting one.
     #[serde(default)]
     pub resume: Resume,
@@ -349,7 +521,9 @@ impl Default for SpawnRequest {
             system: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             model: None,
+            effort: None,
             permission: PermissionPolicy::default(),
+            role: None,
             resume: Resume::default(),
             tools: None,
             roots: Vec::new(),
@@ -766,6 +940,137 @@ mod tests {
         match acc.finish(Some(1)) {
             AgentEvent::Finished { is_error, .. } => assert!(is_error),
             other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// A role is written into `roles.role` and read back out of it, so the
+    /// spelling has to survive the trip. A round trip that failed would leave a
+    /// configured layer silently inheriting.
+    #[test]
+    fn every_role_round_trips_through_its_stored_spelling() {
+        for role in Role::ALL {
+            assert_eq!(Role::parse(role.as_str()), Some(role), "{role:?}");
+        }
+        assert_eq!(Role::ALL.len(), 6, "the chain of command has six layers");
+        assert_eq!(Role::parse("ceo"), None, "an unknown layer is not guessed at");
+    }
+
+    /// The same for effort, and with the JSON spelling checked beside the
+    /// stored one: the launcher writes a `SpawnRequest` into `spawn.json` and
+    /// the supervisor reads it back, so a level whose serde name disagreed with
+    /// `as_str` would mean one thing in the database and another on the wire.
+    #[test]
+    fn every_effort_level_round_trips_through_its_stored_spelling() {
+        for level in Effort::ALL {
+            assert_eq!(Effort::parse(level.as_str()), Some(level), "{level:?}");
+            assert_eq!(
+                serde_json::to_string(&level).unwrap(),
+                format!("\"{}\"", level.as_str()),
+                "{level:?} is spelled differently in JSON"
+            );
+        }
+        assert_eq!(Effort::parse("none"), None, "there is no `none` level");
+        assert_eq!(Effort::parse("xhigh"), Some(Effort::XHigh));
+    }
+
+    /// The two levels only Claude Code has. AGY's `--effort` takes three words
+    /// and nothing else, so asking it for `max` must produce no flag rather
+    /// than the nearest one it does know — a role that quietly ran at `high`
+    /// when it was set to `max` would be a setting nobody could check.
+    #[test]
+    fn a_level_a_harness_has_no_word_for_is_never_passed_to_it() {
+        for level in [Effort::Low, Effort::Medium, Effort::High] {
+            assert_eq!(level.flag_value(HarnessKind::Agy), Some(level.as_str()));
+        }
+        for level in [Effort::XHigh, Effort::Max] {
+            assert_eq!(level.flag_value(HarnessKind::Agy), None, "{level:?}");
+            assert!(!level.accepted_by(HarnessKind::Agy));
+            assert!(level.accepted_by(HarnessKind::ClaudeCode), "{level:?}");
+        }
+    }
+
+    /// OpenCode's `--variant` reaches the provider, not OpenCode, so there is
+    /// no list here to check a value against. Everything goes through verbatim.
+    #[test]
+    fn opencode_takes_every_level_verbatim_because_the_provider_decides() {
+        for level in Effort::ALL {
+            assert_eq!(
+                level.flag_value(HarnessKind::OpenCode),
+                Some(level.as_str()),
+                "{level:?}"
+            );
+        }
+    }
+
+    /// The promise the roles table is built on: a request nobody has configured
+    /// carries no role, no effort and nothing in its environment, so it is the
+    /// request this code produced before any of that existed.
+    #[test]
+    fn a_request_nobody_has_configured_is_the_request_it_always_was() {
+        let req = SpawnRequest::default();
+        assert_eq!(req.role, None);
+        assert_eq!(req.effort, None);
+        assert!(req.env.is_empty());
+    }
+
+    /// SPEC check 29b. The effort level is a flag on the command line and must
+    /// never have been routed through the environment instead — so no spawn
+    /// anywhere in the workspace may put anything in `SpawnRequest::env`.
+    ///
+    /// Asserted against the source because the field is public and the next
+    /// person to want a per-role setting will look for the easiest place to put
+    /// it. `env` reaches the child process for real (`runner.rs` →
+    /// `supervisor`), so it would work, and it would be invisible.
+    #[test]
+    fn no_spawn_in_the_workspace_puts_anything_in_the_environment() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crate sits inside the workspace")
+            .to_path_buf();
+        let mut files = Vec::new();
+        for crate_dir in ["core", "cli", "api", "supervisor"] {
+            rs_files(&root.join(crate_dir).join("src"), &mut files);
+        }
+        assert!(files.len() > 10, "found almost no source to read");
+
+        // The field's name is assembled a character at a time so this test does
+        // not find itself, the way `rank.rs` does with the picker binaries.
+        let field: String = ['e', 'n', 'v'].iter().collect();
+        // The three shapes that put something in it: a struct literal with a
+        // non-empty list, an assignment, and a push. An empty `Vec::new()` is
+        // the state being defended, so it is not one of them.
+        let literal = format!("{field}: vec![");
+        let assigned = format!(".{field} = ");
+        let pushed = format!(".{field}.push(");
+
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let line = line.trim();
+                let fills = (line.starts_with(&literal) && !line.starts_with(&format!("{literal}]")))
+                    || line.contains(&assigned)
+                    || line.contains(&pushed);
+                assert!(
+                    !fills,
+                    "{}:{} fills a spawn's environment: {line}",
+                    file.display(),
+                    n + 1
+                );
+            }
         }
     }
 
