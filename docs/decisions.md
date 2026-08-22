@@ -4280,3 +4280,44 @@ already protects, for the same reason and in the same words — the flag has no
 default and the default lives at the point of use — and `SpawnRequest::role`
 asks every caller to drop its role tag when a harness was named, so that an
 explicit flag stays the top rung of the precedence.
+
+## A failed summariser is not a summary that came back empty
+
+Switching the main chat's harness summarises the conversation on the harness
+being left and hands that summary to the new one. When there is no summary the
+switch is abandoned, which is right and stays right: a half-completed switch —
+new harness, no context — is worse than one that did not happen, because the
+conversation is still there and the user no longer has a way back to it.
+
+What was wrong is what the user was told. `finish_summary` saw only the text, so
+every way of ending up with no text produced the same line: *"the summary came
+back empty, so nothing was handed over — still on OpenCode."* Reproduced live on
+`~/.jod`, twice in a row, what had actually happened was an upstream failure:
+`UnknownError: Unexpected server error. Check server logs for details.`, printed
+two lines above in the same transcript and nowhere in the explanation. "Came
+back empty" reads as *the model had nothing to say*, which invites you to reword
+your prompt. A provider returning an error is worth retrying or escaping. They
+are different faults with different remedies and the message pointed at neither.
+
+So the run's outcome now travels as three cases rather than a string — the text,
+the failure with its reason, or a genuine silence — and the reason is read out
+of the run's own events, which the loop was already fetching. Prose still wins
+where there is any: a run that wrote a usable summary and then fell over on the
+way out hands over what it wrote, exactly as before.
+
+**And there has to be a way out.** Without one the conversation is pinned to its
+current harness for as long as the summariser keeps failing, which is backwards:
+the current harness misbehaving is one of the main reasons anyone types
+`/harness` at all. `/harness <name> bare` crosses with nothing carried. It is a
+word on the existing command rather than a command of its own, for the reason
+`/update check` is: the two are the same question asked with different
+consequences, and somebody who typed the wrong one is one word away from the
+right one. The notice that reports the failure names it, the completion offers
+it once the harness is named, and both say what it costs before the crossing —
+the new harness starts knowing nothing, and the thread stays where it is.
+
+A confirmation keyed to a repeated `/harness` was the alternative, matching the
+"press again to leave them running" idiom on quit. It was rejected because
+retyping `/harness agy` is also the obvious way to *retry* the summariser, and a
+key that means "give up on the context" and "try again" depending on history
+would throw a conversation away for somebody who meant the second one.

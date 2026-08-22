@@ -25,7 +25,17 @@ use super::workspace::Workspace;
 pub enum Slash {
     Help,
     /// Use a different harness for the next turn.
-    Harness(HarnessKind),
+    ///
+    /// `bare` is the escape hatch: cross without the context at all. It exists
+    /// because the ordinary crossing has to summarise the thread first, on the
+    /// harness being left, and a harness that is failing cannot write that
+    /// summary — which pins the conversation to the harness that is misbehaving,
+    /// exactly when leaving it is the point. The word is typed rather than
+    /// assumed, and the notice that names it says what it costs first.
+    Harness {
+        to: HarnessKind,
+        bare: bool,
+    },
     /// Sign in to a harness, through the harness's own flow.
     ///
     /// `None` means the harness this conversation is on, which is the one that
@@ -166,11 +176,21 @@ pub fn parse(line: &str) -> Option<Slash> {
 
     Some(match name.as_str() {
         "help" | "?" => Slash::Help,
-        "harness" | "agent" => match harness_named(arg) {
-            Some(kind) => Slash::Harness(kind),
-            None if arg.is_empty() => Slash::NeedsArgument("/harness <claude|opencode|agy>"),
-            None => Slash::Unknown(format!("/harness {arg}")),
-        },
+        "harness" | "agent" => {
+            // One optional trailing word, and only the one. `bare` is split off
+            // before the name is read so `/harness agy bare` still names AGY;
+            // anything else after the name is left attached, so it is reported
+            // as unknown rather than quietly ignored.
+            let (named, bare) = match arg.rsplit_once(' ') {
+                Some((named, "bare")) => (named.trim(), true),
+                _ => (arg, false),
+            };
+            match harness_named(named) {
+                Some(to) => Slash::Harness { to, bare },
+                None if arg.is_empty() => Slash::NeedsArgument("/harness <claude|opencode|agy>"),
+                None => Slash::Unknown(format!("/harness {arg}")),
+            }
+        }
         // `auth` as well as `login`, because a harness that has just refused
         // to authenticate has put that word in front of you, not this one.
         "login" | "auth" | "signin" => match harness_named(arg) {
@@ -466,8 +486,8 @@ pub(super) fn harness_named(name: &str) -> Option<HarnessKind> {
 pub const HELP: &[(&str, &str)] = &[
     ("/help", "this list"),
     (
-        "/harness <name>",
-        "claude, opencode or agy — takes effect next turn",
+        "/harness <name> [bare]",
+        "claude, opencode or agy — takes effect next turn; bare carries no context",
     ),
     (
         "/login [name]",
@@ -728,11 +748,28 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
         .to_ascii_lowercase();
 
     match name.as_str() {
-        "harness" | "agent" => HarnessKind::ALL
-            .into_iter()
-            .filter(|k| k.id().replace('_', "").starts_with(&typed) || k.id().starts_with(&typed))
-            .map(|k| Completion::new(format!("/{name} {}", short_name(k)), k.label()))
-            .collect(),
+        "harness" | "agent" => {
+            // Past the harness name there is exactly one more word to offer.
+            // `bare` is the way out of a summariser that will not finish, and a
+            // way out nobody can find is not one — so the completion offers it
+            // as well as the notice that names it.
+            if let Some((named, after)) = typed.split_once(char::is_whitespace) {
+                return match harness_named(named) {
+                    Some(k) if "bare".starts_with(after.trim_start()) => vec![Completion::new(
+                        format!("/{name} {} bare", short_name(k)),
+                        "cross with no context at all",
+                    )],
+                    _ => Vec::new(),
+                };
+            }
+            HarnessKind::ALL
+                .into_iter()
+                .filter(|k| {
+                    k.id().replace('_', "").starts_with(&typed) || k.id().starts_with(&typed)
+                })
+                .map(|k| Completion::new(format!("/{name} {}", short_name(k)), k.label()))
+                .collect()
+        }
         // Whichever agents are still worth naming. Both of these only offer the
         // ones they could actually act on — a finished run is one that cannot
         // be stopped and has no heartbeat left to keep — so the list answers
@@ -869,7 +906,11 @@ fn named<'a>(
 }
 
 /// The spelling offered for a harness — the shortest one `parse` accepts.
-fn short_name(kind: HarnessKind) -> &'static str {
+///
+/// `pub(super)` because a notice that tells somebody to type `/harness agy bare`
+/// has to name the harness the way the parser reads it. A second copy of the
+/// spelling in the transcript is a second thing to keep in step.
+pub(super) fn short_name(kind: HarnessKind) -> &'static str {
     match kind {
         HarnessKind::ClaudeCode => "claude",
         HarnessKind::OpenCode => "opencode",
@@ -1086,7 +1127,7 @@ mod tests {
     fn every_suggested_harness_parses() {
         for c in completions("/harness ", &fleet(&[])) {
             assert!(
-                matches!(parse(&c.line), Some(Slash::Harness(_))),
+                matches!(parse(&c.line), Some(Slash::Harness { .. })),
                 "{} was suggested but does not parse",
                 c.line
             );
@@ -1151,8 +1192,73 @@ mod tests {
             ("/harness agy", HarnessKind::Agy),
             ("/harness antigravity", HarnessKind::Agy),
         ] {
-            assert_eq!(parse(text), Some(Slash::Harness(expected)), "{text}");
+            assert_eq!(
+                parse(text),
+                Some(Slash::Harness {
+                    to: expected,
+                    bare: false
+                }),
+                "{text}"
+            );
         }
+    }
+
+    /// The escape hatch out of a summariser that will not finish. It is a word
+    /// on the command rather than a command of its own, for the same reason
+    /// `/update check` is: it is the same question asked with different
+    /// consequences, and somebody who typed the wrong one is one word away from
+    /// the right one.
+    #[test]
+    fn a_harness_can_be_crossed_to_bare() {
+        assert_eq!(
+            parse("/harness agy bare"),
+            Some(Slash::Harness {
+                to: HarnessKind::Agy,
+                bare: true
+            })
+        );
+        assert_eq!(
+            parse("/harness claude-code bare"),
+            Some(Slash::Harness {
+                to: HarnessKind::ClaudeCode,
+                bare: true
+            })
+        );
+        // Without the word it is the ordinary crossing, which carries the
+        // context and is the one anybody should get by default.
+        assert_eq!(
+            parse("/harness agy"),
+            Some(Slash::Harness {
+                to: HarnessKind::Agy,
+                bare: false
+            })
+        );
+    }
+
+    /// Anything else after the name is reported rather than quietly dropped. A
+    /// misspelt `bare` that silently carried the context across would be the
+    /// same class of bug as the one the word exists to fix.
+    #[test]
+    fn a_word_that_is_not_bare_is_refused_rather_than_ignored() {
+        for line in ["/harness agy bear", "/harness agy bare bare", "/harness bare"] {
+            assert!(
+                matches!(parse(line), Some(Slash::Unknown(_))),
+                "{line} should not have parsed"
+            );
+        }
+    }
+
+    /// A way out nobody can find is not a way out. The completion offers it
+    /// once the harness is named, so it is reachable without having read the
+    /// notice that names it.
+    #[test]
+    fn bare_is_offered_once_the_harness_is_named() {
+        assert_eq!(
+            lines("/harness agy "),
+            vec!["/harness agy bare".to_string()]
+        );
+        assert_eq!(lines("/harness agy b"), vec!["/harness agy bare".to_string()]);
+        assert!(lines("/harness agy zzz").is_empty());
     }
 
     /// Every harness the build knows must be reachable by name, or a new one
@@ -1163,7 +1269,8 @@ mod tests {
             let by_id = parse(&format!("/harness {}", kind.id()));
             let by_label = parse(&format!("/harness {}", kind.label().replace(' ', "-")));
             assert!(
-                by_id == Some(Slash::Harness(kind)) || by_label == Some(Slash::Harness(kind)),
+                by_id == Some(Slash::Harness { to: kind, bare: false })
+                    || by_label == Some(Slash::Harness { to: kind, bare: false }),
                 "{kind:?} cannot be selected: {by_id:?} / {by_label:?}"
             );
         }
@@ -1328,7 +1435,10 @@ mod tests {
         assert_eq!(parse("/Thinking"), Some(Slash::Thinking));
         assert_eq!(
             parse("/harness    OpenCode"),
-            Some(Slash::Harness(HarnessKind::OpenCode))
+            Some(Slash::Harness {
+                to: HarnessKind::OpenCode,
+                bare: false
+            })
         );
     }
 

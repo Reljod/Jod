@@ -85,7 +85,11 @@ pub enum Action {
     /// Not something `apply_slash` can do: it needs a summary, a summary needs a
     /// model, and Jod has no model client — so the first half is a *run* on the
     /// harness being left. See [`begin_crossing`].
-    SwitchHarness(HarnessKind),
+    ///
+    /// `bare` is the same move with the context deliberately left behind. It is
+    /// how somebody gets off a harness whose summariser keeps failing, and it
+    /// costs no run at all.
+    SwitchHarness { to: HarnessKind, bare: bool },
     /// Summarise this conversation and carry on from the summary, on the same
     /// harness.
     ///
@@ -527,6 +531,25 @@ impl Summarising {
     }
 }
 
+/// What a finished summariser left behind.
+///
+/// Three cases rather than a string, because two of them used to be one and
+/// that was the bug. A run that fails and a run that finishes with nothing to
+/// say both arrive as no text, and reporting both as "the summary came back
+/// empty" points the reader at their own prompt when the fault was upstream —
+/// a provider that returned an error, a model id it rejected, a process that
+/// died. The reason is in the run's own events, so this carries it the rest of
+/// the way rather than throwing it away one function short of the notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Summarised {
+    /// Prose to carry. Trimmed, and never empty.
+    Text(String),
+    /// The run failed, in the harness's own words.
+    Failed(String),
+    /// The run ended without failing and without writing anything.
+    Empty,
+}
+
 /// What `/harness <kind>` turns out to mean, decided before anything is spawned.
 ///
 /// Separated from carrying it out so the decision is testable without a harness
@@ -538,6 +561,15 @@ enum Crossing {
     /// Nothing has been said yet, so there is nothing to summarise and no model
     /// call to pay for. The app simply moves.
     Bare,
+    /// There is a thread, and the user asked to cross without it — `/harness
+    /// <name> bare`.
+    ///
+    /// Its own case rather than [`Crossing::Bare`], because the two are the
+    /// same move for opposite reasons and the line the user reads has to say
+    /// which one happened. Nothing to carry is a fact about the conversation;
+    /// leaving it behind is a decision, and one worth naming the thread that
+    /// was left so it can be found again.
+    LeaveBehind { conversation: String },
     /// A thread has to be summarised first, by a run on the harness being left.
     Summarise {
         conversation: String,
@@ -934,19 +966,22 @@ async fn event_loop(
                         // the user's side this was never an agent they started —
                         // it is the thing they asked for, arriving.
                         let pending = thread.summarising.take().expect("just checked");
-                        let summary = match jod.events_since(&pending.run, None).await {
-                            Ok(events) => said(&events),
-                            Err(e) => {
-                                app.push(Entry::Notice(format!(
-                                    "could not read the summary back, so nothing was \
-                                     changed: {e}"
-                                )));
-                                String::new()
-                            }
+                        // The same events the transcript drew, read once. The
+                        // reason a failed run failed is already in them — it is
+                        // two lines above the notice on screen — so nothing has
+                        // to be plumbed from further away than this.
+                        let outcome = match jod.events_since(&pending.run, None).await {
+                            Ok(events) => summarised(&events),
+                            // A failure to read the run back is itself a
+                            // failure, not an empty summary, and it goes to the
+                            // same place so it is worded the same way.
+                            Err(e) => Summarised::Failed(format!(
+                                "the run finished, but its events could not be read back: {e}"
+                            )),
                         };
                         match jod.store() {
                             Some(store) => {
-                                finish_summary(store, &mut app, &mut thread, &pending, &summary)
+                                finish_summary(store, &mut app, &mut thread, &pending, &outcome)
                             }
                             None => app.push(Entry::Notice(
                                 "the database went away mid-summary, so nothing was changed"
@@ -1697,7 +1732,9 @@ async fn perform(
                 ))),
             }
         }
-        Action::SwitchHarness(to) => begin_crossing(jod, app, opts, thread, to).await,
+        Action::SwitchHarness { to, bare } => {
+            begin_crossing(jod, app, opts, thread, to, bare).await
+        }
         Action::Compact => begin_compaction(jod, app, opts, thread, true).await,
         Action::NewThread => {
             thread.conversation = None;
@@ -2249,9 +2286,25 @@ fn current_conversation(store: &Store, app: &App, thread: &Thread) -> Option<Str
 /// Pure, and separate from carrying it out, because the cases that matter are
 /// decided here: whether a model call is owed at all, and whether the harness
 /// being left can be asked to summarise what it is already holding.
-fn crossing(store: Option<&Store>, app: &App, thread: &Thread, to: HarnessKind) -> Crossing {
+fn crossing(
+    store: Option<&Store>,
+    app: &App,
+    thread: &Thread,
+    to: HarnessKind,
+    bare: bool,
+) -> Crossing {
     if app.harness == to {
         return Crossing::Stay;
+    }
+    // Asked for in so many words, so there is nothing left to decide: no
+    // summary, no model call, no run to wait for. The only thing still worth
+    // looking up is which thread is being left, so the line the user reads can
+    // name it.
+    if bare {
+        return match store.and_then(|s| current_conversation(s, app, thread)) {
+            Some(conversation) => Crossing::LeaveBehind { conversation },
+            None => Crossing::Bare,
+        };
     }
     // No database means no conversation to hand over — the app can still move,
     // it just moves empty-handed. That is the old behaviour, and it is the
@@ -2333,12 +2386,13 @@ async fn begin_crossing(
     opts: &Options,
     thread: &mut Thread,
     to: HarnessKind,
+    bare: bool,
 ) {
     if already_summarising(app, thread) {
         return;
     }
     let store = jod.store();
-    match crossing(store.map(Arc::as_ref), app, thread, to) {
+    match crossing(store.map(Arc::as_ref), app, thread, to, bare) {
         // Said rather than silently done. `/harness claude` on Claude Code used
         // to reset the session cursor and the model — a no-op that quietly threw
         // away the conversation you were in the middle of.
@@ -2353,6 +2407,7 @@ async fn begin_crossing(
                 to.label()
             )));
         }
+        Crossing::LeaveBehind { conversation } => leave_behind(app, thread, to, &conversation),
         Crossing::Summarise {
             conversation,
             material,
@@ -2384,6 +2439,34 @@ async fn begin_crossing(
             }
         }
     }
+}
+
+/// Cross to another harness with the context deliberately left behind.
+///
+/// The escape hatch out of a summariser that will not finish. It touches
+/// neither the store nor a run — the thread stays exactly as it is on the
+/// harness it was on, and the app simply starts a new one somewhere else — so
+/// the only thing this owes the user is an honest sentence about what just
+/// happened and where the conversation went.
+///
+/// Naming the thread that was left is the load-bearing part of that sentence. A
+/// crossing with nothing carried is only reversible if you can find your way
+/// back, and `/resume` needs an id to find.
+fn leave_behind(app: &mut App, thread: &mut Thread, to: HarnessKind, conversation: &str) {
+    // Read before the move, while `app.harness` is still the harness being
+    // left: the sentence is about where the thread stays, so it has to name
+    // that one rather than the one being crossed to.
+    let left = app.harness;
+    point_at(app, thread, to, None, None);
+    app.push(Entry::Notice(format!(
+        "{} from the next turn, carrying nothing — it starts knowing nothing about what was \
+         said here. The conversation you left is still on {}, whole and unchanged, and \
+         /resume {} goes back to it.",
+        to.label(),
+        left.label(),
+        short(conversation)
+    )));
+    app.scroll_to_bottom();
 }
 
 /// Whether a summariser is already running, saying so if it is.
@@ -2610,9 +2693,11 @@ fn compaction_is_due(app: &App, thread: &Thread) -> bool {
 
 /// Complete whatever a finished summariser was writing for.
 ///
-/// Takes the summary as text rather than reading it out of a run, so the part
-/// with the decisions in it is testable without a harness: what happens when the
-/// model says nothing, and what happens when the store refuses.
+/// Takes what the run produced rather than reading it out of a run itself, so
+/// the part with the decisions in it is testable without a harness: what
+/// happens when the model says nothing, what happens when the run fails, and
+/// what happens when the store refuses. [`summarised`] is the half that reads
+/// the events; this is the half that decides.
 ///
 /// Every failure path leaves the app exactly where it was. A half-completed
 /// switch — new harness, no context — is strictly worse than one that did not
@@ -2624,28 +2709,66 @@ fn finish_summary(
     app: &mut App,
     thread: &mut Thread,
     pending: &PendingSummary,
-    said: &str,
+    outcome: &Summarised,
 ) {
-    let summary = said.trim();
     // Not fabricated, not defaulted, not "(no summary)". The store treats an
     // empty summary as an error precisely so a thread cannot be compacted into
     // nothing; inventing a placeholder here would walk straight through that
     // guard.
-    if summary.is_empty() {
-        app.push(Entry::Notice(match pending.intent {
-            Summarising::Handover(_) => format!(
-                "the summary came back empty, so nothing was handed over — still on {}",
-                app.harness.label()
-            ),
-            Summarising::Compaction { .. } => {
-                "the summary came back empty, so nothing was compacted — the conversation \
-                 carries on as it was"
-                    .to_string()
+    let summary = match outcome {
+        // Trimmed here as well as in [`summarised`]. Text that is nothing but
+        // whitespace is nothing, whoever built the value, and the store's own
+        // refusal to compact a thread into an empty summary is not a guard this
+        // function should be the one to walk through.
+        Summarised::Text(text) if !text.trim().is_empty() => text.trim(),
+        // Two endings that used to be one line. What the reader does next
+        // depends on which of them happened — a model that had nothing to say
+        // is worth asking differently, a provider that returned an error is
+        // worth retrying or escaping — so the notice has to say which.
+        nothing => {
+            let (what, why) = match nothing {
+                Summarised::Failed(why) => ("the summary run failed", Some(why)),
+                _ => ("the summary came back empty", None),
+            };
+            let mut said = match pending.intent {
+                Summarising::Handover(_) => format!(
+                    "{what}, so nothing was handed over and this is still {}",
+                    app.harness.label()
+                ),
+                Summarising::Compaction { .. } => format!(
+                    "{what}, so nothing was compacted — the conversation carries on as it was"
+                ),
+            };
+            // Verbatim, and labelled as the failure rather than paraphrased.
+            // The sentence a provider returns is the one worth reading — it is
+            // the difference between a model id nothing accepts and a server
+            // that is having a bad afternoon.
+            if let Some(why) = why {
+                push_sentence(&mut said, &format!("What went wrong: {why}"));
             }
-        }));
-        stop_compacting_on_its_own(app, pending.intent);
-        return;
-    }
+            // The way out, on the line that says you are stuck. Without it the
+            // conversation is pinned to this harness for as long as the
+            // summariser keeps failing — and a harness that is misbehaving is
+            // the commonest reason to be typing `/harness` at all. The command
+            // first because it is the concrete thing, then what it costs, so
+            // nobody crosses without knowing what stays behind.
+            if let Summarising::Handover(to) = pending.intent {
+                push_sentence(
+                    &mut said,
+                    &format!(
+                        "Type /harness {} bare to cross without it: {} would start knowing \
+                         nothing about what was said here, and this conversation stays where \
+                         it is.",
+                        command::short_name(to),
+                        to.label()
+                    ),
+                );
+            }
+            app.push(Entry::Notice(said));
+            stop_compacting_on_its_own(app, pending.intent);
+            return;
+        }
+    };
     match pending.intent {
         Summarising::Handover(to) => {
             finish_crossing(store, app, thread, &pending.conversation, to, summary)
@@ -2656,6 +2779,20 @@ fn finish_summary(
             }
         }
     }
+}
+
+/// Add one more sentence to a notice that is being built out of several.
+///
+/// The full stop is added only when the sentence before it did not bring its
+/// own. A provider's message usually ends in one — "Check server logs for
+/// details." — and quoting it into "details.. Type /harness" makes the quoted
+/// part look garbled, which is the opposite of what quoting it verbatim is for.
+fn push_sentence(said: &mut String, next: &str) {
+    if !said.ends_with(['.', '!', '?']) {
+        said.push('.');
+    }
+    said.push(' ');
+    said.push_str(next);
 }
 
 /// Give up on automatic compaction for the rest of the session.
@@ -2871,6 +3008,74 @@ fn said(events: &[jod_core::AgentEnvelope]) -> String {
         }
     }
     out
+}
+
+/// What a finished summariser produced, or why it produced nothing.
+///
+/// Prose wins when there is any, which keeps the behaviour that was already
+/// shipping: a run that said something useful and then fell over on the way out
+/// still hands over what it wrote. It is only when there is nothing to carry
+/// that the question "why" arises at all — and that is exactly the case that
+/// used to be reported as an empty summary regardless of the answer.
+fn summarised(events: &[jod_core::AgentEnvelope]) -> Summarised {
+    let text = said(events);
+    let text = text.trim();
+    if !text.is_empty() {
+        return Summarised::Text(text.to_string());
+    }
+    match failure(events) {
+        Some(why) => Summarised::Failed(why),
+        None => Summarised::Empty,
+    }
+}
+
+/// Why a run produced nothing, in the words of whatever failed.
+///
+/// The last account wins, because a run that reports an error and then goes on
+/// to report another has told you about the one that ended it second. A run
+/// that ends badly without ever saying why still counts as a failure — "it
+/// failed and did not say why" is a true sentence and a useful one, and it is
+/// not the same sentence as "it had nothing to say".
+fn failure(events: &[jod_core::AgentEnvelope]) -> Option<String> {
+    let mut said_why: Option<String> = None;
+    let mut ended_badly = false;
+    let mut code = None;
+    for envelope in events {
+        match &envelope.event {
+            AgentEvent::Error { message } if !message.trim().is_empty() => {
+                said_why = Some(message.trim().to_string());
+            }
+            // The one harness failure Jod can name precisely: the summariser
+            // was pointed at a session the harness has thrown away.
+            AgentEvent::SessionLost { session_id } => {
+                said_why = Some(format!(
+                    "the harness no longer holds the session it was asked to resume ({})",
+                    short(session_id)
+                ));
+            }
+            AgentEvent::Finished {
+                is_error: true,
+                text,
+                exit_code,
+                ..
+            } => {
+                ended_badly = true;
+                code = *exit_code;
+                if said_why.is_none() {
+                    if let Some(t) = text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        said_why = Some(t.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    match (said_why, ended_badly, code) {
+        (Some(why), _, _) => Some(why),
+        (None, true, Some(code)) => Some(format!("it exited {code} without saying why")),
+        (None, true, None) => Some("it failed without saying why".to_string()),
+        (None, false, _) => None,
+    }
 }
 
 /// Bring a schedule's next instant forward to now.
@@ -6143,7 +6348,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         // across needs a summary, a summary needs a model, and Jod has no model
         // client: so the first half of this is a run, and a run belongs to the
         // loop. `perform` decides whether one is owed at all.
-        Slash::Harness(kind) => return Some(Action::SwitchHarness(kind)),
+        Slash::Harness { to, bare } => return Some(Action::SwitchHarness { to, bare }),
         // No argument means the harness on screen: it is the one that just
         // refused to run, which is why anybody is typing this.
         Slash::Login(named) => return Some(Action::SignIn(named.unwrap_or(app.harness))),
@@ -7919,8 +8124,14 @@ mod tests {
         app.model = Some("opus".into());
         app.cost_usd = 0.11;
 
-        let action = apply_slash(&mut app, command::Slash::Harness(HarnessKind::OpenCode));
-        assert_eq!(action, Some(Action::SwitchHarness(HarnessKind::OpenCode)));
+        let action = apply_slash(&mut app, command::Slash::Harness {
+                to: HarnessKind::OpenCode,
+                bare: false,
+            });
+        assert_eq!(action, Some(Action::SwitchHarness {
+                to: HarnessKind::OpenCode,
+                bare: false
+            }));
         point_at(
             &mut app,
             &mut Thread::default(),
@@ -8269,10 +8480,16 @@ mod tests {
         app.resume = Resume::Session("claude-session-1".into());
         app.cost_usd = 0.11;
 
-        let action = apply_slash(&mut app, command::Slash::Harness(HarnessKind::ClaudeCode));
-        assert_eq!(action, Some(Action::SwitchHarness(HarnessKind::ClaudeCode)));
+        let action = apply_slash(&mut app, command::Slash::Harness {
+                to: HarnessKind::ClaudeCode,
+                bare: false,
+            });
+        assert_eq!(action, Some(Action::SwitchHarness {
+                to: HarnessKind::ClaudeCode,
+                bare: false
+            }));
         assert_eq!(
-            crossing(None, &app, &Thread::default(), HarnessKind::ClaudeCode),
+            crossing(None, &app, &Thread::default(), HarnessKind::ClaudeCode, false),
             Crossing::Stay,
             "nothing to summarise, nothing to hand over, nothing to reset"
         );
@@ -8332,7 +8549,7 @@ mod tests {
             &mut app,
             &mut thread,
             &switch,
-            "the parser is ported; tests are green",
+            &Summarised::Text("the parser is ported; tests are green".into()),
         );
 
         assert_eq!(app.harness, HarnessKind::OpenCode);
@@ -8371,7 +8588,7 @@ mod tests {
             &mut app,
             &mut thread,
             &switch,
-            "the parser is ported; tests are green",
+            &Summarised::Text("the parser is ported; tests are green".into()),
         );
 
         let carried = thread.carried.clone().expect("context for the first turn");
@@ -8423,7 +8640,13 @@ mod tests {
         let was = thread.conversation.clone().unwrap();
 
         let switch = pending(&thread, Summarising::Handover(HarnessKind::OpenCode));
-        finish_summary(&s, &mut app, &mut thread, &switch, "   \n  ");
+        finish_summary(
+            &s,
+            &mut app,
+            &mut thread,
+            &switch,
+            &Summarised::Text("   \n  ".into()),
+        );
 
         assert_eq!(app.harness, HarnessKind::ClaudeCode, "still where it was");
         assert_eq!(app.session.as_deref(), Some("session-1"), "still resumable");
@@ -8439,6 +8662,217 @@ mod tests {
             )),
             "and it says so: {:?}",
             app.transcript
+        );
+    }
+
+    /// One run that failed, in exactly the events OpenCode put on the wire when
+    /// this was reproduced live: an error part, then a run that ended badly
+    /// having written nothing.
+    fn a_run_that_failed(why: &str) -> Vec<jod_core::AgentEnvelope> {
+        vec![
+            envelope(0, AgentEvent::Error { message: why.into() }),
+            envelope(
+                1,
+                AgentEvent::Finished {
+                    text: None,
+                    exit_code: Some(1),
+                    is_error: true,
+                    usage: Default::default(),
+                },
+            ),
+        ]
+    }
+
+    fn envelope(seq: u64, event: AgentEvent) -> jod_core::AgentEnvelope {
+        jod_core::AgentEnvelope {
+            agent_id: "run-summariser".into(),
+            at_ms: seq as i64,
+            seq,
+            event,
+        }
+    }
+
+    /// Every notice on screen, oldest first, as one string to assert against.
+    fn notices(app: &App) -> String {
+        app.transcript
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Notice(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// X5. A summariser that failed used to be reported as one that came back
+    /// empty, and the two are different faults with different remedies: a model
+    /// with nothing to say is worth asking differently, a provider returning an
+    /// error is worth retrying or escaping. The reason was in the run's own
+    /// events all along — two lines above the notice in the transcript — and it
+    /// reached the notice nowhere at all.
+    ///
+    /// The refusal itself is not what changed. A half-completed switch is still
+    /// worse than one that did not happen, so the conversation stays exactly
+    /// where it was. What changed is that the person is told what failed, and
+    /// handed a way to cross deliberately instead of being pinned to a harness
+    /// that is misbehaving.
+    #[test]
+    fn a_failed_summariser_names_the_failure_and_offers_a_way_across() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::OpenCode);
+        let was = thread.conversation.clone().unwrap();
+        let switch = pending(&thread, Summarising::Handover(HarnessKind::Agy));
+
+        let why = "UnknownError: Unexpected server error. Check server logs for details.";
+        let outcome = summarised(&a_run_that_failed(why));
+        assert_eq!(
+            outcome,
+            Summarised::Failed(why.into()),
+            "a run that failed is not a run that said nothing"
+        );
+
+        finish_summary(&s, &mut app, &mut thread, &switch, &outcome);
+
+        // The refusal stands, unchanged.
+        assert_eq!(app.harness, HarnessKind::OpenCode, "still where it was");
+        assert_eq!(thread.conversation.as_deref(), Some(was.as_str()));
+        assert_eq!(thread.carried, None);
+        assert_eq!(s.conversations(10).unwrap().len(), 1, "nothing was minted");
+        assert_eq!(s.live_window(&was).unwrap().len(), 2, "nothing compacted");
+
+        let said = notices(&app);
+        assert!(said.contains(why), "the failure is quoted: {said}");
+        assert!(
+            !said.contains("came back empty"),
+            "and it is not called an empty summary: {said}"
+        );
+
+        // And the way out is a command that works, not a sentence about one.
+        assert!(said.contains("/harness agy bare"), "{said}");
+        assert_eq!(
+            apply_slash(
+                &mut app_on(HarnessKind::OpenCode),
+                command::parse("/harness agy bare").expect("the offered line parses")
+            ),
+            Some(Action::SwitchHarness {
+                to: HarnessKind::Agy,
+                bare: true
+            }),
+            "the offered line has to mean the crossing it describes"
+        );
+        assert_eq!(
+            crossing(Some(&s), &app, &thread, HarnessKind::Agy, true),
+            Crossing::LeaveBehind { conversation: was },
+            "and that crossing goes through without a summary"
+        );
+    }
+
+    /// The other half of telling the two apart: a run that really did finish
+    /// with nothing to say is still called empty. The way out is offered either
+    /// way, because either way the conversation is stuck where it is.
+    #[test]
+    fn a_summariser_that_said_nothing_is_still_reported_as_empty() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
+        let switch = pending(&thread, Summarising::Handover(HarnessKind::OpenCode));
+
+        let quiet = vec![envelope(
+            0,
+            AgentEvent::Finished {
+                text: None,
+                exit_code: Some(0),
+                is_error: false,
+                usage: Default::default(),
+            },
+        )];
+        assert_eq!(summarised(&quiet), Summarised::Empty);
+
+        finish_summary(&s, &mut app, &mut thread, &switch, &Summarised::Empty);
+
+        let said = notices(&app);
+        assert!(said.contains("came back empty"), "{said}");
+        assert!(said.contains("/harness opencode bare"), "{said}");
+    }
+
+    /// A run that dies without a word is still a run that failed. "It exited 1
+    /// without saying why" is a true sentence and a useful one, and it is not
+    /// the same sentence as "it had nothing to say".
+    #[test]
+    fn a_run_that_fails_silently_is_still_a_failure_and_not_an_empty_summary() {
+        let died = vec![envelope(
+            0,
+            AgentEvent::Finished {
+                text: None,
+                exit_code: Some(1),
+                is_error: true,
+                usage: Default::default(),
+            },
+        )];
+        assert_eq!(
+            summarised(&died),
+            Summarised::Failed("it exited 1 without saying why".into())
+        );
+    }
+
+    /// Prose still wins. A run that wrote a usable summary and then fell over on
+    /// the way out hands over what it wrote, exactly as it did before.
+    #[test]
+    fn a_run_that_wrote_a_summary_before_failing_still_hands_it_over() {
+        let mut events = vec![envelope(
+            0,
+            AgentEvent::Message {
+                text: "the parser is ported; tests are green".into(),
+            },
+        )];
+        events.extend(a_run_that_failed("APIError: too many requests"));
+        assert_eq!(
+            summarised(&events),
+            Summarised::Text("the parser is ported; tests are green".into())
+        );
+    }
+
+    /// The escape hatch itself. Nothing is summarised, nothing is spent, and
+    /// the thread that was left is named — a crossing carrying nothing is only
+    /// reversible if you can find your way back to what you left.
+    #[test]
+    fn crossing_bare_leaves_the_thread_where_it_is_and_says_how_to_get_back() {
+        let s = store();
+        let (mut app, mut thread) = talking_into(&s, HarnessKind::OpenCode);
+        let was = thread.conversation.clone().unwrap();
+
+        // Asking for it does not get you past the refusals that were already
+        // there: there is still nothing to switch to on the harness you are on.
+        assert_eq!(
+            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode, true),
+            Crossing::Stay
+        );
+        assert_eq!(
+            crossing(Some(&s), &app, &thread, HarnessKind::Agy, true),
+            Crossing::LeaveBehind {
+                conversation: was.clone()
+            }
+        );
+
+        leave_behind(&mut app, &mut thread, HarnessKind::Agy, &was);
+
+        assert_eq!(app.harness, HarnessKind::Agy, "it actually crossed");
+        assert_eq!(app.session, None, "and it starts holding nothing");
+        assert_eq!(thread.conversation, None);
+        assert_eq!(thread.carried, None);
+        // The thread it left is untouched, which is what makes this reversible.
+        assert_eq!(s.live_window(&was).unwrap().len(), 2);
+        assert_eq!(s.conversations(10).unwrap().len(), 1, "nothing was minted");
+        assert!(s.compactions(&was).unwrap().is_empty());
+
+        let said = notices(&app);
+        assert!(said.contains("carrying nothing"), "{said}");
+        assert!(
+            said.contains("OpenCode"),
+            "it says where the thread stayed: {said}"
+        );
+        assert!(
+            said.contains(&format!("/resume {}", short(&was))),
+            "and how to get back to it: {said}"
         );
     }
 
@@ -8458,18 +8892,18 @@ mod tests {
         };
 
         assert_eq!(
-            crossing(Some(&s), &app, &bound, HarnessKind::OpenCode),
+            crossing(Some(&s), &app, &bound, HarnessKind::OpenCode, false),
             Crossing::Bare
         );
         // Nothing said and nothing bound is the same answer, reached without
         // touching the database at all.
         assert_eq!(
-            crossing(Some(&s), &app, &Thread::default(), HarnessKind::OpenCode),
+            crossing(Some(&s), &app, &Thread::default(), HarnessKind::OpenCode, false),
             Crossing::Bare
         );
         // ...and so is having no database.
         assert_eq!(
-            crossing(None, &app, &bound, HarnessKind::OpenCode),
+            crossing(None, &app, &bound, HarnessKind::OpenCode, false),
             Crossing::Bare
         );
     }
@@ -8485,7 +8919,7 @@ mod tests {
         let id = thread.conversation.clone().unwrap();
 
         assert_eq!(
-            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode),
+            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode, false),
             Crossing::Summarise {
                 conversation: id.clone(),
                 material: None,
@@ -8495,7 +8929,7 @@ mod tests {
 
         app.resume = Resume::Fresh;
         let Crossing::Summarise { material, .. } =
-            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode)
+            crossing(Some(&s), &app, &thread, HarnessKind::OpenCode, false)
         else {
             panic!("a thread with turns in it owes a summary");
         };
@@ -8524,7 +8958,7 @@ mod tests {
             &mut app,
             &mut thread,
             &job,
-            "the parser is ported; tests are green",
+            &Summarised::Text("the parser is ported; tests are green".into()),
         );
 
         assert_eq!(
@@ -8581,7 +9015,13 @@ mod tests {
         let was = thread.conversation.clone().unwrap();
 
         let job = pending(&thread, Summarising::Compaction { asked: false });
-        finish_summary(&s, &mut app, &mut thread, &job, "  \n ");
+        finish_summary(
+            &s,
+            &mut app,
+            &mut thread,
+            &job,
+            &Summarised::Text("  \n ".into()),
+        );
 
         assert_eq!(app.resume, Resume::Session("session-1".into()));
         assert_eq!(thread.conversation.as_deref(), Some(was.as_str()));
@@ -8606,7 +9046,7 @@ mod tests {
         let (mut app, mut thread) = talking_into(&s, HarnessKind::ClaudeCode);
 
         let job = pending(&thread, Summarising::Compaction { asked: true });
-        finish_summary(&s, &mut app, &mut thread, &job, "");
+        finish_summary(&s, &mut app, &mut thread, &job, &Summarised::Empty);
 
         assert!(app.auto_compact);
     }
