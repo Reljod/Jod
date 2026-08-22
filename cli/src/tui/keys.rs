@@ -206,13 +206,13 @@ pub const GLOBAL: &[Key] = &[
     // written. See [`RAIL`].
     k("Ctrl-R", "the rail, then 1–9 to accept"),
     k("Ctrl-N", "the cards — and away again"),
-    // The side panel, which is where the projects, the sessions, the mode, the
-    // harness, the spend and the context left are drawn — a large fraction of
-    // what the program knows, behind one key.
+    // The side panel, which is where the projects, the mode, the harness, the
+    // spend and the context left are drawn — a large fraction of what the
+    // program knows, behind one key.
     //
     // It is written down here because until now it was written down *only* on
-    // the panel's own bottom border (`Shift-Tab closes`), which you can read
-    // only once you have already found the key. An overlay that calls itself
+    // the panel's own bottom border (`Esc or Shift-Tab closes`), which you can
+    // read only once you have already found the key. An overlay that calls itself
     // the whole keymap and omits the way into a sixth of the program sends the
     // reader to the source, which is where this key was in fact found.
     //

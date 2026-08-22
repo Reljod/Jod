@@ -1759,10 +1759,10 @@ impl App {
     /// Hand the keyboard back and put the catalog away — what the same key
     /// pressed twice means, and what `Esc` means once.
     ///
-    /// The panel itself is left alone. It holds the sessions and the context bar
-    /// as well, and a key that reached in to collapse one box has no business
-    /// taking the other two off screen; `Shift-Tab` is the one that owns the
-    /// whole panel.
+    /// The panel itself is left alone. It carries the settings and the context
+    /// bar as well, and a key that reached in to collapse one box has no
+    /// business taking the other two off screen. The `Esc` after this one is
+    /// the rung that does — see [`App::dismiss_panel`].
     ///
     /// "Back" is whatever was underneath rather than the chat by definition: a
     /// rail that was open before the catalog was is still open now, and it gets
@@ -1770,6 +1770,34 @@ impl App {
     pub fn close_catalog(&mut self) {
         self.projects_open = false;
         self.release_keyboard(Layer::Catalog);
+    }
+
+    /// Take the whole panel off screen, and say whether there was one to take.
+    ///
+    /// The rung `Esc` was missing. The catalog inside the panel had one and the
+    /// rail beside it had one, so `Esc` walked out of both — but the panel
+    /// itself could only be closed by the chord that opened it. Open it with
+    /// `Shift-Tab`, which does not give it the keyboard, and every `Esc` after
+    /// that went to the chat and the panel stayed exactly where it was. The key
+    /// looked broken, which is the same complaint the projects key was fixed
+    /// for twice already.
+    ///
+    /// Callers put this ahead of their own `Esc` and behind anything with the
+    /// keyboard, so the order it closes things in stays the reverse of the order
+    /// they were opened: a completion popup, then the rail or the catalog, then
+    /// the panel under them, then the screen's own way back.
+    ///
+    /// Returns `false` when the panel was already shut, which is how the caller
+    /// knows to fall through to what `Esc` used to do.
+    pub fn dismiss_panel(&mut self) -> bool {
+        if !self.panel {
+            return false;
+        }
+        self.panel = false;
+        // The catalog goes down inside it, so the keyboard has to come back out
+        // with it — the same repair `Shift-Tab` makes.
+        self.sync_focus();
+        true
     }
 
     // ---- which view has the keyboard -------------------------------------

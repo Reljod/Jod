@@ -4582,6 +4582,11 @@ fn on_workspace_key(
     let ids = app.row_ids(ws);
     let page = viewport.max(1) as isize;
     match key.code {
+        // `Esc` takes the panel down before it leaves the screen, because the
+        // panel is the newer of the two things on it. `q` does not: it is the
+        // workspace's own quit and it means leave this list, not close whatever
+        // is floating beside it.
+        KeyCode::Esc if app.dismiss_panel() => return None,
         KeyCode::Esc | KeyCode::Char('q') => {
             app.back();
             return None;
@@ -5578,6 +5583,9 @@ fn on_graph_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         .map(|n| graph::neighbours(n, app.graph.edge_kind.as_deref()))
         .unwrap_or_default();
     match key.code {
+        // The panel first, for the reason it goes first on every other screen:
+        // it is the newer thing on the screen and `Esc` closes the newest.
+        KeyCode::Esc if app.dismiss_panel() => None,
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('g') => {
             app.back();
             None
@@ -6105,6 +6113,12 @@ fn on_chat_key(
             // already half-written by the time you reach for Escape.
             return Some(Action::Interrupt(id));
         }
+        // The panel, if one is open. Behind the interrupt above, which is the
+        // one `Esc` on this screen that outranks it — a turn going the wrong way
+        // costs money and a panel costs thirty columns. Behind the completion
+        // and mention popups as well, which took this key further up: they are
+        // newer than the panel and each of them owns `Esc` while it is up.
+        KeyCode::Esc if app.dismiss_panel() => {}
         KeyCode::Esc => app.back(),
         // `?` on an *empty* input opens the keymap; with anything typed it is
         // the character it looks like. Backspacing down to a lone `?` therefore
@@ -16697,6 +16711,90 @@ mod tests {
         assert!(!app.panel, "Shift-Tab shut the panel");
         assert!(!app.panel_focused, "so the catalog cannot still hold the keys");
         assert!(app.rail.focused && app.rail.shown, "the rail underneath took them");
+    }
+
+    /// The rung that was missing. `Shift-Tab` opens the panel without giving it
+    /// the keyboard, so nothing on the focus stack owned the key and every
+    /// `Esc` after it went to the chat — the panel stayed on screen through all
+    /// of them and read as stuck.
+    #[test]
+    fn esc_closes_a_panel_that_was_opened_with_shift_tab() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert!(!app.panel, "a cold start has the panel shut");
+
+        press(&mut app, KeyCode::BackTab);
+        assert!(app.panel, "Shift-Tab opened it");
+        assert!(!app.panel_focused, "and did not hand it the keyboard");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.panel, "Esc put it away again");
+    }
+
+    /// Two rungs, in the order the boxes are nested: the catalog inside the
+    /// panel closes first and the panel it was drawn in closes second. One key
+    /// taking both at once would skip a level, which is the one thing `Esc` in
+    /// this program does not do.
+    #[test]
+    fn esc_closes_the_catalog_first_and_the_panel_it_sits_in_second() {
+        let mut app = with_projects();
+        ctrl(&mut app, KeyCode::Char('p'));
+        assert!(app.panel && app.projects_open && app.panel_focused);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.projects_open, "the catalog closed first");
+        assert!(app.panel, "and the panel around it stayed up");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.panel, "the second Esc took the panel");
+    }
+
+    /// Stopping a turn outranks putting a panel away. A turn going the wrong
+    /// way costs money and the panel costs thirty columns, so the key keeps
+    /// meaning "stop" while there is something to stop.
+    #[test]
+    fn esc_stops_a_running_turn_before_it_touches_the_panel() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        press(&mut app, KeyCode::BackTab);
+        app.busy = true;
+        app.watching = Some("run-1".into());
+
+        let action = press(&mut app, KeyCode::Esc);
+        assert!(
+            matches!(action, Some(Action::Interrupt(ref id)) if id == "run-1"),
+            "Esc stopped the turn"
+        );
+        assert!(app.panel, "and left the panel alone");
+    }
+
+    /// `q` is the workspace's own way out and means leave this list. It must not
+    /// pick up the panel's `Esc` on the way, or a reader who wanted to go back
+    /// to the chat loses the panel instead and stays where they were.
+    #[test]
+    fn q_leaves_a_workspace_without_taking_the_panel_with_it() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(Workspace::Fleet);
+        press(&mut app, KeyCode::BackTab);
+        assert!(app.panel);
+
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.workspace, Workspace::Chat, "q left the fleet");
+        assert!(app.panel, "and the panel is still open");
+    }
+
+    /// The same key on the same screen does close the panel, and only then goes
+    /// back — the panel is the newer of the two things on the screen.
+    #[test]
+    fn esc_on_a_workspace_closes_the_panel_before_leaving_the_screen() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.go(Workspace::Fleet);
+        press(&mut app, KeyCode::BackTab);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.panel, "the panel closed first");
+        assert_eq!(app.workspace, Workspace::Fleet, "and the screen stayed");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.workspace, Workspace::Chat, "the second Esc left it");
     }
 
     /// The keybar names where `Esc` actually lands, which is a different place

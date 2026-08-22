@@ -3888,3 +3888,50 @@ drawn as a dead one is precisely the picture the fleet exists to prevent, so
 `follow_live_run` attaches to the run if one is still going, and deliberately
 does nothing if none is: marking the chat busy for a process that has ended
 would take the input box away with nothing coming back to give it.
+
+## `Esc` had no rung for the panel itself
+
+`Esc` closes the newest thing on screen, and the entry above says so in the
+terms the code uses: `App::focus` is a stack of the views that have held the
+keyboard, and `Esc` takes them off it newest first. The side panel was never on
+that stack, because opening it does not give it the keyboard — `Shift-Tab` is
+meant to leave the letters you are typing where they are.
+
+The result was a panel with no `Esc`. Open it with `Shift-Tab` and every `Esc`
+after that went past it to the chat, where it scrolled the transcript. The
+catalog *inside* the panel had a rung, the rail beside it had a rung, and the
+box carrying a third of the screen had none. Nothing on screen said so, so the
+key read as broken rather than as inapplicable, which is the same complaint the
+projects key had already been fixed for twice.
+
+So `App::dismiss_panel` is a rung rather than a stack entry. It sits ahead of
+each screen's own `Esc` and behind everything that holds the keyboard, which
+keeps the order people already expect: a completion popup first, then the rail
+or the catalog, then the panel under them, then the screen's own way back. It
+returns whether there was a panel to close, so a caller with nothing to close
+falls through to what `Esc` always did there.
+
+Two exceptions, both of them about what the key means somewhere else. `Esc` in
+the chat still stops a running turn first: a turn going the wrong way costs
+money and a panel costs thirty columns. And `q` on a workspace does not pick
+this up, because `q` means *leave this list* — a reader who pressed it to get
+back to the chat and lost the panel instead would still be on the list.
+
+## The runs list leaves the panel to the fleet
+
+The panel is thirty-odd columns and the runs list spent two rows on each run to
+fit in them: an id shortened to eight characters, an age, and a name cut to
+whatever was left. Three facts about a run, and none of the ones anybody acts
+on. The fleet lists the same runs with the room to tell two of them apart, to
+group them under the project they belong to, and to be entered — so the panel
+was the second place the same question was answered, and the worse one.
+
+What stays is the three rows that were the list's header: the mode, the harness
+and the spend. They are not about other runs at all. Every one of them is about
+the turn you are about to send from this box, which is the question the panel is
+worth its columns for, and only the mode also reaches the status bar.
+
+The catalog above them takes the freed rows. It used to stop at a third of the
+panel to keep the runs list on screen; now it stops where the settings box
+begins, so a long catalog is cut by the boxes that are still there rather than
+by a rule protecting one that is not.
