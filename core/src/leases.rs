@@ -153,6 +153,117 @@ impl Claim {
     }
 }
 
+/// Where a manager decided one engineer is allowed to write.
+///
+/// The decision belongs to the manager rather than to the engineer, and it is
+/// made before the session starts. An engineer that discovers for itself that
+/// it needs somewhere to write spends a turn finding out, and sometimes skips
+/// the finding out entirely and writes in the checkout somebody is editing.
+///
+/// [`Placement::Explore`] is the default, because reading is the reversible
+/// one: a placement nobody stated must not be the one that cuts a branch.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// Read-only. No branch, no worktree, no pull request.
+    #[default]
+    Explore,
+    /// A branch and worktree of this engineer's own.
+    Worktree,
+    /// Join the worktree another work already holds on this repository.
+    Share { work_id: String },
+    /// Write in Reljod's real checkout. Gated — see [`direct_is_allowed`].
+    Direct,
+}
+
+/// Every placement id, in the order a manager should consider them.
+///
+/// Exported because the `open_work` tool offers these as a `one_of`, and a
+/// list of ids written out a second time in the schema is a list that goes
+/// stale the first time a placement is added.
+pub const PLACEMENT_IDS: [&str; 4] = ["explore", "worktree", "share", "direct"];
+
+impl Placement {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Placement::Explore => "explore",
+            Placement::Worktree => "worktree",
+            Placement::Share { .. } => "share",
+            Placement::Direct => "direct",
+        }
+    }
+
+    /// Read a placement out of the two arguments a tool call carries.
+    ///
+    /// Fallible, unlike [`State::parse`] beside it, and for a reason worth
+    /// keeping: that one reads a column Jod itself wrote and can safely fall
+    /// back to the common value, while this one reads what a model typed. A
+    /// misspelt placement quietly becoming `explore` would give an engineer
+    /// that was meant to write no writable root at all, and the first anybody
+    /// heard of it would be the engineer reporting that it could not do its
+    /// task.
+    ///
+    /// `share` is the one that needs a second argument, so it is the one that
+    /// can be asked for incorrectly: naming no lender is a refusal here rather
+    /// than an empty work id that fails later in [`Store::share_lease`],
+    /// where the message would be about a work that does not exist instead of
+    /// about the argument that was left out.
+    pub fn parse(id: &str, share_with: Option<&str>) -> Result<Placement> {
+        match id.trim() {
+            "explore" => Ok(Placement::Explore),
+            "worktree" => Ok(Placement::Worktree),
+            "share" => match share_with.map(str::trim).filter(|w| !w.is_empty()) {
+                Some(work_id) => Ok(Placement::Share {
+                    work_id: work_id.to_string(),
+                }),
+                None => Err(JodError::Invalid(
+                    "a placement of `share` means joining the worktree another work already \
+                     holds, so it needs `share_with` naming that work — or use `worktree` to \
+                     cut one of this engineer's own"
+                        .into(),
+                )),
+            },
+            "direct" => Ok(Placement::Direct),
+            other => Err(JodError::Invalid(format!(
+                "`{other}` is not a placement. It is one of: {}",
+                PLACEMENT_IDS.join(", ")
+            ))),
+        }
+    }
+
+    /// Whether this placement gives the session somewhere of its own to write.
+    pub fn writes(&self) -> bool {
+        !matches!(self, Placement::Explore)
+    }
+}
+
+/// A session borrowing a worktree that another work holds the lease on.
+///
+/// One worktree is one lease, so a borrower is a row here rather than a second
+/// row in `leases` — see [`Store::share_lease`] for why that distinction is
+/// load-bearing rather than tidy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseSharer {
+    pub lease_id: i64,
+    pub conversation_id: String,
+    /// Null for a session that is not part of any work.
+    pub work_id: Option<String>,
+    pub shared_at_ms: i64,
+}
+
+/// Whether an engineer may write straight into the real checkout.
+///
+/// Every failing condition is carried, not just the first. A manager told only
+/// that there is a remote fixes that, asks again, and is then told about the
+/// uncommitted changes — two turns spent learning two facts that were both
+/// true at the same moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectVerdict {
+    pub allowed: bool,
+    /// Every condition that failed, in the words the refusal prints.
+    pub because: Vec<String>,
+}
+
 /// What happened when a lease was given up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Release {
@@ -191,6 +302,21 @@ struct GitRun {
     ok: bool,
     stdout: String,
     stderr: String,
+}
+
+impl GitRun {
+    /// Whichever stream carries the message, for a run that failed.
+    ///
+    /// Git puts most of its complaints on stderr and a few of them on stdout,
+    /// and a refusal that quotes the empty one tells the reader nothing at the
+    /// moment they most need telling.
+    fn said(&self) -> String {
+        if self.stderr.is_empty() {
+            self.stdout.clone()
+        } else {
+            self.stderr.clone()
+        }
+    }
 }
 
 /// Run git, or say plainly that it is not installed.
@@ -498,6 +624,218 @@ impl Store {
         Ok(Claim::Cut(lease))
     }
 
+    /// Put a session into a worktree another work already holds.
+    ///
+    /// [`Store::claim_lease`] already shares within one work — a sibling on the
+    /// same job is offered the lease rather than cutting a second branch for
+    /// it. This is the same courtesy across works, which is the case a manager
+    /// needs when it wants a second engineer working alongside the first
+    /// instead of on a branch of its own. The two engineers own different files
+    /// by the plan that placed them; that plan is what keeps them out of each
+    /// other's way, and it only means anything if they really are in one
+    /// directory.
+    ///
+    /// **No second `leases` row.** One worktree is one lease. The partial
+    /// unique index is on `(work_id, repo_path)`, so a second row for the same
+    /// directory under a different work would not even be refused — it would be
+    /// accepted, and then [`Store::release_lease`] on either one would remove a
+    /// tree the other session is standing in. The borrower goes in
+    /// `lease_sharers` instead, which is also what the release refusal below
+    /// reads.
+    ///
+    /// A lender that holds no lease is a plain refusal. Cutting a fresh
+    /// worktree instead would be the worst possible fallback: the manager would
+    /// believe two engineers were sharing a directory and dividing the files
+    /// between them, while they were in fact on two branches, and the path
+    /// ownership it planned so carefully would be protecting nothing.
+    ///
+    /// ## Path ownership is checked here, because here is where it can break
+    ///
+    /// [`Store::plan_work`] refuses a plan whose tasks claim overlapping files,
+    /// but a plan belongs to one work and it is written before anybody decides
+    /// where its engineers will sit. Sharing is the one thing that puts two
+    /// *different* works in one directory, so it is the moment two plans that
+    /// were each internally consistent can collide — and nothing above this
+    /// function is in a position to notice.
+    ///
+    /// So every session already in the worktree is asked what its open task
+    /// owns, and the borrower's open task is compared against all of it with
+    /// [`crate::works::overlapping`]. A collision names both tasks and both
+    /// paths and the share does not happen.
+    ///
+    /// A borrower with no task on `conversations.task_id` claims nothing, so
+    /// there is nothing to compare and the share goes ahead. That is a real
+    /// hole rather than a safe default: it means an engineer nobody gave a task
+    /// to can be put anywhere. It is left open deliberately, because the
+    /// alternative is refusing every share until every caller writes that
+    /// column, and the column is written by `open_work` — which is where the
+    /// fix belongs.
+    pub fn share_lease(
+        &self,
+        work_id: &str,
+        conversation_id: &str,
+        lender_work_id: &str,
+        repo_path: &Path,
+    ) -> Result<Claim> {
+        let asked = roots::normalise(repo_path);
+        // A path that is not in a repository at all falls through to the same
+        // refusal, which is the true answer either way: there is no held lease
+        // there to join.
+        let repo = toplevel(&asked)?.unwrap_or(asked);
+        let Some(lease) = self.held_lease(lender_work_id, &repo)? else {
+            let lender = self
+                .work(lender_work_id)?
+                .map(|w| format!("`{}` ({lender_work_id})", w.title))
+                .unwrap_or_else(|| format!("`{lender_work_id}`"));
+            return Err(JodError::Invalid(format!(
+                "work {lender} holds no worktree on `{}`, so there is nothing to share. Place \
+                 this engineer with `worktree` to cut one of its own, or share with the work \
+                 that actually holds the one you meant.",
+                repo.display()
+            )));
+        };
+
+        // A borrower whose own work already holds a worktree here would come
+        // out of this with two writable roots while the manager believed it had
+        // put it in one. Nothing reaches that state today, which is the reason
+        // to close it now rather than after something does.
+        if let Some(own) = self.held_lease(work_id, &repo)? {
+            if own.id != lease.id {
+                return Err(JodError::Invalid(format!(
+                    "this work already holds its own worktree on `{}` — `{}`, on branch `{}`. \
+                     Sharing as well would leave this engineer with two places it may write \
+                     and no way to say which one it meant, so release that one first or drop \
+                     the share.",
+                    repo.display(),
+                    own.worktree_path.display(),
+                    own.branch
+                )));
+            }
+        }
+
+        self.refuse_a_collision_in(&lease, conversation_id)?;
+
+        let at = now_ms();
+        self.write(|tx| {
+            // `OR IGNORE`, because a session asking to share a worktree it is
+            // already in has said something true. Keeping the first
+            // `shared_at_ms` is the point: it is when this session actually
+            // arrived, and a retry must not rewrite that.
+            tx.execute(
+                "INSERT OR IGNORE INTO lease_sharers
+                   (lease_id, conversation_id, work_id, shared_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![lease.id, conversation_id, work_id, at],
+            )?;
+            Ok(())
+        })?;
+        self.bind_lease_roots(conversation_id, &lease)?;
+        Ok(Claim::Reused(lease))
+    }
+
+    /// Refuse a borrower whose task owns a file somebody already in this
+    /// worktree owns.
+    ///
+    /// Everybody in the directory is asked, not only the lender: a third
+    /// engineer joining a worktree two are already sharing has to clear both of
+    /// them, and checking only the lease holder would wave through exactly the
+    /// collision that gets more likely as more engineers arrive.
+    ///
+    /// The borrower's own row is skipped, so a session asking to join a
+    /// worktree it is already in does not collide with itself.
+    fn refuse_a_collision_in(&self, lease: &Lease, borrower: &str) -> Result<()> {
+        let Some((mine_title, mine)) = self.open_task_of(borrower)? else {
+            return Ok(());
+        };
+        let mut occupants: Vec<String> = lease.conversation_id.clone().into_iter().collect();
+        occupants.extend(
+            self.lease_sharers(lease.id)?
+                .into_iter()
+                .map(|s| s.conversation_id),
+        );
+        for occupant in occupants {
+            if occupant == borrower {
+                continue;
+            }
+            let Some((theirs_title, theirs)) = self.open_task_of(&occupant)? else {
+                continue;
+            };
+            if let Some((a, b)) = crate::works::overlapping(&mine, &theirs) {
+                return Err(JodError::Invalid(format!(
+                    "`{mine_title}` claims `{a}` and `{theirs_title}`, already working in \
+                     `{}`, claims `{b}` — one is inside the other, and two engineers in one \
+                     worktree cannot both own the same file. Give this engineer a worktree of \
+                     its own, or plan the two tasks around different files.",
+                    lease.worktree_path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The title and owned paths of the unfinished task this session was
+    /// spawned onto, or `None` when it has none.
+    ///
+    /// `None` covers three different situations that all mean the same thing
+    /// here — no `conversations.task_id`, a task that has been deleted, and a
+    /// task already marked done — because none of them gives this session a
+    /// file it can be said to own.
+    fn open_task_of(&self, conversation_id: &str) -> Result<Option<(String, Vec<String>)>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT COALESCE(t.title, t.id), t.paths
+                   FROM conversations c JOIN tasks t ON t.id = c.task_id
+                  WHERE c.id = ?1 AND t.status != 'done'",
+                params![conversation_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        crate::works::paths_from_column(r.get(1)?),
+                    ))
+                },
+            )
+            .optional()?)
+    }
+
+    /// Every session borrowing this lease's worktree, in the order they joined.
+    pub fn lease_sharers(&self, lease_id: i64) -> Result<Vec<LeaseSharer>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT lease_id, conversation_id, work_id, shared_at_ms
+               FROM lease_sharers WHERE lease_id = ?1 ORDER BY shared_at_ms, conversation_id",
+        )?;
+        let rows = stmt.query_map(params![lease_id], |r| {
+            Ok(LeaseSharer {
+                lease_id: r.get(0)?,
+                conversation_id: r.get(1)?,
+                work_id: r.get(2)?,
+                shared_at_ms: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Step out of a worktree somebody else holds the lease on.
+    ///
+    /// The way out of the refusal in [`Store::release_lease`]. Without it a
+    /// shared worktree could never be given up at all: the holder would be
+    /// refused for as long as the borrower's row existed, and nothing would
+    /// ever remove that row while the borrower's conversation was still there.
+    ///
+    /// Removing a sharer that was never attached is not an error. The caller is
+    /// a session finishing up, and "you were not in this worktree" is not
+    /// something it can act on.
+    pub fn unshare_lease(&self, lease_id: i64, conversation_id: &str) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "DELETE FROM lease_sharers WHERE lease_id = ?1 AND conversation_id = ?2",
+                params![lease_id, conversation_id],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Point a session at its lease: the worktree writable, the checkout it
     /// came from still there and no longer writable.
     ///
@@ -647,7 +985,8 @@ impl Store {
     ///
     /// A dirty or unmerged tree is kept and the reason is returned. The lease
     /// still stops being held either way, so the work may cut a fresh one —
-    /// what is refused is destroying something, never making progress.
+    /// what is refused is destroying something, never making progress. The one
+    /// exception is a worktree somebody else is sharing: see below.
     pub fn release_lease(&self, lease_id: i64) -> Result<Release> {
         let Some(lease) = self.lease(lease_id)? else {
             return Err(JodError::Invalid(format!("no lease #{lease_id}")));
@@ -656,6 +995,20 @@ impl Store {
             return Err(JodError::Invalid(format!(
                 "lease #{lease_id} was already removed from disk"
             )));
+        }
+        if let Some(reason) = self.kept_for_a_sharer(&lease)? {
+            // Nothing is marked released here, unlike the dirty and unmerged
+            // refusals below. A lease that stopped being held while a borrower
+            // was still writing in the worktree would let the next work cut a
+            // second one on the same repository — the partial unique index only
+            // covers held leases — and the fleet would stop showing the
+            // directory an engineer is standing in.
+            let condition = self.lease_condition(&lease)?;
+            return Ok(Release::Kept {
+                lease,
+                condition,
+                reason,
+            });
         }
         let condition = self.lease_condition(&lease)?;
         if !condition.safe_to_remove() {
@@ -686,6 +1039,14 @@ impl Store {
         let Some(lease) = self.lease(lease_id)? else {
             return Err(JodError::Invalid(format!("no lease #{lease_id}")));
         };
+        if let Some(reason) = self.kept_for_a_sharer(&lease)? {
+            let condition = self.lease_condition(&lease)?;
+            return Ok(Release::Kept {
+                lease,
+                condition,
+                reason,
+            });
+        }
         let condition = self.lease_condition(&lease)?;
         if !condition.safe_to_remove() {
             let reason = format!(
@@ -702,6 +1063,40 @@ impl Store {
         self.remove_worktree_of(&lease, &condition)?;
         let lease = self.mark_lease(lease_id, State::Removed)?;
         Ok(Release::Removed { lease })
+    }
+
+    /// The refusal for a worktree somebody else is still standing in, or
+    /// `None` when nobody is.
+    ///
+    /// Only sharers *other than* the session holding the lease count. The
+    /// holder giving up its own lease is the ordinary case and it is not
+    /// somebody else, so a session that both holds and shares — which
+    /// [`Store::share_lease`] permits, because asking to join a worktree you
+    /// are already in is a true thing to say — must not block itself.
+    ///
+    /// The words match [`Condition::why_kept`] deliberately: this is one more
+    /// reason a worktree was kept, printed in the same sentence as the others,
+    /// and a reader should not have to notice which of them they got.
+    fn kept_for_a_sharer(&self, lease: &Lease) -> Result<Option<String>> {
+        let holder = lease.conversation_id.as_deref();
+        let others: Vec<String> = self
+            .lease_sharers(lease.id)?
+            .into_iter()
+            .filter(|s| Some(s.conversation_id.as_str()) != holder)
+            .map(|s| format!("`{}`", s.conversation_id))
+            .collect();
+        if others.is_empty() {
+            return Ok(None);
+        }
+        let who = if others.len() == 1 {
+            format!("session {} is still working in it", others[0])
+        } else {
+            format!("sessions {} are still working in it", others.join(", "))
+        };
+        Ok(Some(format!(
+            "kept `{}`: {who}",
+            lease.worktree_path.display()
+        )))
     }
 
     /// The disk half of removal, with the session's writable root taken back.
@@ -749,6 +1144,127 @@ impl Store {
         self.lease(lease_id)?
             .ok_or_else(|| JodError::Invalid(format!("no lease #{lease_id}")))
     }
+}
+
+/// Whether an engineer may be placed straight into the real checkout.
+///
+/// Writing into the directory Reljod is editing is the rarest placement, and it
+/// is decided on facts rather than on judgement. A model asking itself whether
+/// something feels like a fresh project is exactly how a session ends up
+/// committing on top of somebody's afternoon, so the three questions here are
+/// all ones a database row or a `git` invocation answers:
+///
+/// 1. **No git remote.** Reljod tied the remote to the pull request rule, so
+///    one fact decides both: a repository with a remote gets a branch and a
+///    pull request, always.
+/// 2. **No other work on this project.** "The first iteration", read out of the
+///    works table instead of guessed at. Called before the new work exists, so
+///    any row at all is somebody else.
+/// 3. **The checkout is clean.** Writing into a tree with uncommitted changes
+///    in it is the accident the whole lease system was built to prevent, and a
+///    fresh project is not an exemption from it.
+///
+/// All three are checked even once one has failed, because a manager told only
+/// the first reason fixes it, asks again, and is told the second — two turns
+/// spent on two facts that were both true at the same moment.
+pub fn direct_is_allowed(store: &Store, project_id: &str, repo: &Path) -> Result<DirectVerdict> {
+    let asked = roots::normalise(repo);
+    let mut because = Vec::new();
+
+    match toplevel(&asked)? {
+        None => {
+            // Neither the remote nor the cleanliness question has an answer
+            // here, and both would have been answered "no" by a failing `git`
+            // for a reason that has nothing to do with what was asked. One
+            // honest reason is worth more than two misleading ones.
+            because.push(format!(
+                "`{}` is not inside a git repository, so there is no way to tell what writing \
+                 in it would disturb",
+                asked.display()
+            ));
+        }
+        Some(checkout) => {
+            because.extend(remote_reason(&checkout, &git(&checkout, &["remote"])?));
+            because.extend(cleanliness_reason(
+                &checkout,
+                &git(&checkout, &["status", "--porcelain"])?,
+            ));
+        }
+    }
+
+    let others: i64 = {
+        let conn = store.conn.lock().expect("store lock poisoned");
+        conn.query_row(
+            "SELECT COUNT(*) FROM works WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get(0),
+        )?
+    };
+    if others > 0 {
+        because.push(format!(
+            "this project already has {others} work{} on it, so this is not its first \
+             iteration",
+            if others == 1 { "" } else { "s" }
+        ));
+    }
+
+    Ok(DirectVerdict {
+        allowed: because.is_empty(),
+        because,
+    })
+}
+
+/// What `git remote` said, read as a reason `direct` is not allowed.
+///
+/// A failure is its own reason rather than silence. `git remote` prints nothing
+/// when there is no remote and prints nothing when it could not run, and
+/// letting the second look like the first would quietly drop a condition from a
+/// list whose whole purpose is to be complete.
+///
+/// Split out from [`direct_is_allowed`] with [`cleanliness_reason`] because
+/// that failure is unreachable through a real checkout — a repository broken
+/// enough to fail `git remote` fails `git rev-parse` first, so the caller never
+/// gets this far — and a branch no test can reach is a branch that rots.
+fn remote_reason(checkout: &Path, run: &GitRun) -> Option<String> {
+    if !run.ok {
+        return Some(format!(
+            "the remotes of `{}` could not be read, so it cannot be called remoteless: {}",
+            checkout.display(),
+            run.said()
+        ));
+    }
+    if run.stdout.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "`{}` has a git remote ({}), and a repository with a remote gets a branch and a pull \
+         request",
+        checkout.display(),
+        run.stdout
+            .lines()
+            .map(|r| format!("`{}`", r.trim()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// What `git status --porcelain` said, read as a reason `direct` is not
+/// allowed. A status that could not be read is not a clean tree.
+fn cleanliness_reason(checkout: &Path, run: &GitRun) -> Option<String> {
+    if !run.ok {
+        return Some(format!(
+            "the state of `{}` could not be read, so it cannot be called clean: {}",
+            checkout.display(),
+            run.said()
+        ));
+    }
+    if run.stdout.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "`{}` has uncommitted changes in it, and they are somebody's work in progress",
+        checkout.display()
+    ))
 }
 
 fn now_ms() -> i64 {
@@ -1211,6 +1727,482 @@ mod tests {
         );
         assert!(lease.worktree_path.is_dir(), "deletion never removes a worktree");
         assert!(branches(&repo).lines().any(|b| b == lease.branch));
+    }
+
+    /// How many lease rows point at one directory. The number `share_lease`
+    /// exists to keep at one.
+    fn leases_on(store: &Store, worktree: &Path) -> i64 {
+        let conn = store.conn.lock().expect("store lock poisoned");
+        conn.query_row(
+            "SELECT COUNT(*) FROM leases WHERE worktree_path = ?1",
+            params![worktree.to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Plan one task onto a work's board and hand back the row it wrote.
+    ///
+    /// Found by title rather than taken from the front of the board, because a
+    /// work already has a task when it is created — the instruction itself —
+    /// and that one claims no files. Reading index zero here points every
+    /// session at the pathless task and quietly tests nothing, which is exactly
+    /// what the first draft of these tests did.
+    fn plan_one(
+        store: &Store,
+        work_id: &str,
+        title: &str,
+        paths: &[&str],
+    ) -> crate::team::TeamTask {
+        let plan = crate::works::Plan {
+            tasks: vec![crate::works::PlannedTask {
+                title: title.to_string(),
+                paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            }],
+        };
+        let board = store.plan_work(work_id, &plan).unwrap();
+        let task = board
+            .into_iter()
+            .find(|t| t.title == title)
+            .unwrap_or_else(|| panic!("`{title}` is on the board `plan_work` returned"));
+        assert_eq!(
+            task.paths,
+            paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            "and it owns the paths it was planned with"
+        );
+        task
+    }
+
+    /// Point a session at the task it was spawned onto.
+    ///
+    /// Raw SQL because `open_work` is the only writer of this column and it
+    /// lives in `core/src/mcp.rs`, which this test cannot reach into.
+    fn spawn_onto(store: &Store, conversation_id: &str, task_id: &str) {
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE conversations SET task_id = ?2 WHERE id = ?1",
+                    params![conversation_id, task_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The ids the `open_work` schema offers have to be ids this file accepts.
+    ///
+    /// The constant and the enum are two spellings of one list, and the way
+    /// they go wrong is silent: a placement added to the enum and forgotten in
+    /// the constant is one a manager is never offered, and one removed from the
+    /// enum but left in the constant is one the tool advertises and then
+    /// refuses.
+    #[test]
+    fn every_placement_id_the_schema_offers_is_one_that_parses_back() {
+        for id in PLACEMENT_IDS {
+            let placement = Placement::parse(id, Some("wk_lender"))
+                .unwrap_or_else(|e| panic!("`{id}` is offered by the schema but refused: {e}"));
+            assert_eq!(placement.as_str(), id, "and it round-trips to the same id");
+        }
+        assert_eq!(
+            Placement::default(),
+            Placement::Explore,
+            "a placement nobody stated is the reversible one"
+        );
+        let no_lender = Placement::parse("share", None).unwrap_err().to_string();
+        assert!(
+            no_lender.contains("share_with"),
+            "sharing with nobody names the argument that was left out: {no_lender}"
+        );
+        let unknown = Placement::parse("worktre", None).unwrap_err().to_string();
+        assert!(
+            unknown.contains("explore") && unknown.contains("worktree"),
+            "a misspelt placement is told what the real ones are: {unknown}"
+        );
+    }
+
+    /// One worktree is one lease, and a borrower is a row beside it.
+    ///
+    /// A second `leases` row for the same directory would not be refused by
+    /// the partial unique index — that is per work — and releasing either of
+    /// them would then remove a tree the other session is standing in.
+    #[test]
+    fn sharing_a_worktree_across_works_adds_a_sharer_rather_than_a_second_lease() {
+        let (_env, dir) = scratch("share");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (lender_work, lender) = session_on(&s, &repo);
+        let (borrower_work, borrower) = session_on(&s, &repo);
+
+        let lease = s
+            .claim_lease(&lender_work, &lender, &repo)
+            .unwrap()
+            .lease()
+            .cloned()
+            .unwrap();
+        let shared = s
+            .share_lease(&borrower_work, &borrower, &lender_work, &repo)
+            .unwrap();
+
+        assert_eq!(
+            shared.lease().map(|l| l.id),
+            Some(lease.id),
+            "the borrower is put in the lender's worktree, got {shared:?}"
+        );
+        assert_eq!(
+            leases_on(&s, &lease.worktree_path),
+            1,
+            "one directory, one lease"
+        );
+        assert!(
+            s.work_leases(&borrower_work).unwrap().is_empty(),
+            "the borrowing work cut nothing of its own"
+        );
+
+        let sharers = s.lease_sharers(lease.id).unwrap();
+        assert_eq!(sharers.len(), 1);
+        assert_eq!(sharers[0].conversation_id, borrower);
+        assert_eq!(sharers[0].work_id.as_deref(), Some(borrower_work.as_str()));
+
+        let roots = s.roots(&borrower).unwrap();
+        assert!(
+            roots
+                .iter()
+                .any(|r| r.writable && r.path == roots::normalise(&lease.worktree_path)),
+            "the borrower writes in the same directory the lender does"
+        );
+        let checkout = roots
+            .iter()
+            .find(|r| r.path == repo)
+            .expect("the real checkout is still readable, so it can diff against it");
+        assert!(!checkout.writable);
+    }
+
+    /// Falling back to cutting a worktree here would be the worst answer
+    /// available: the manager would believe two engineers were dividing the
+    /// files in one directory while they were in fact on two branches.
+    #[test]
+    fn sharing_with_a_work_that_holds_no_worktree_is_refused_rather_than_cutting_one() {
+        let (_env, dir) = scratch("share-nothing");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (idle_work, _idle) = session_on(&s, &repo);
+        let (borrower_work, borrower) = session_on(&s, &repo);
+
+        let refused = s
+            .share_lease(&borrower_work, &borrower, &idle_work, &repo)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains(&idle_work),
+            "the refusal names the work that was asked and holds nothing: {refused}"
+        );
+        assert!(
+            refused.contains("worktree"),
+            "and says what to do instead: {refused}"
+        );
+
+        assert!(s.work_leases(&idle_work).unwrap().is_empty());
+        assert!(s.work_leases(&borrower_work).unwrap().is_empty());
+        assert!(
+            !branches(&repo).lines().any(|b| b.starts_with("jod/")),
+            "no branch was cut behind the manager's back: {}",
+            branches(&repo)
+        );
+        assert!(
+            !s.roots(&borrower).unwrap().iter().any(|r| r.writable),
+            "and the borrower still has nowhere to write"
+        );
+    }
+
+    /// `plan_work` checks a plan against its own work's board, and sharing is
+    /// the one thing that puts two boards in one directory. If nothing checked
+    /// here, the file ownership a manager planned would stop meaning anything
+    /// at exactly the moment two engineers were put in the same worktree.
+    #[test]
+    fn a_borrower_whose_task_owns_a_file_somebody_in_the_worktree_owns_is_refused() {
+        let (_env, dir) = scratch("share-collision");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (lender_work, lender) = session_on(&s, &repo);
+        let (borrower_work, borrower) = session_on(&s, &repo);
+        let theirs = plan_one(&s, &lender_work, "rewrite the parser", &["core/src"]);
+        let mine = plan_one(&s, &borrower_work, "tidy the store", &["core/src/store.rs"]);
+        spawn_onto(&s, &lender, &theirs.id);
+        spawn_onto(&s, &borrower, &mine.id);
+        let lease = s
+            .claim_lease(&lender_work, &lender, &repo)
+            .unwrap()
+            .lease()
+            .cloned()
+            .unwrap();
+
+        let refused = s
+            .share_lease(&borrower_work, &borrower, &lender_work, &repo)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("tidy the store") && refused.contains("rewrite the parser"),
+            "both tasks are named, or the manager has to diff two boards to find the \
+             collision: {refused}"
+        );
+        assert!(
+            refused.contains("core/src/store.rs") && refused.contains("core/src`"),
+            "and both paths, so it can see which one is inside the other: {refused}"
+        );
+
+        assert!(
+            s.lease_sharers(lease.id).unwrap().is_empty(),
+            "a refused share attaches nobody"
+        );
+        assert!(
+            !s.roots(&borrower).unwrap().iter().any(|r| r.writable),
+            "and leaves the borrower with nowhere to write"
+        );
+    }
+
+    /// The other half of the refusal above: two tasks that own different files
+    /// are exactly what sharing a worktree is for.
+    #[test]
+    fn a_borrower_whose_task_owns_different_files_shares_the_worktree() {
+        let (_env, dir) = scratch("share-disjoint");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (lender_work, lender) = session_on(&s, &repo);
+        let (borrower_work, borrower) = session_on(&s, &repo);
+        let theirs = plan_one(&s, &lender_work, "rewrite the parser", &["core/src"]);
+        let mine = plan_one(&s, &borrower_work, "redraw the fleet", &["cli/src"]);
+        spawn_onto(&s, &lender, &theirs.id);
+        spawn_onto(&s, &borrower, &mine.id);
+        let lease = s
+            .claim_lease(&lender_work, &lender, &repo)
+            .unwrap()
+            .lease()
+            .cloned()
+            .unwrap();
+
+        let shared = s
+            .share_lease(&borrower_work, &borrower, &lender_work, &repo)
+            .unwrap();
+        assert_eq!(shared.lease().map(|l| l.id), Some(lease.id));
+        assert_eq!(s.lease_sharers(lease.id).unwrap().len(), 1);
+        assert!(s
+            .roots(&borrower)
+            .unwrap()
+            .iter()
+            .any(|r| r.writable && r.path == roots::normalise(&lease.worktree_path)));
+    }
+
+    /// Two writable roots is a session that cannot say where it works, and a
+    /// manager that believes it put it in one place.
+    #[test]
+    fn a_borrower_that_already_holds_its_own_worktree_here_is_refused() {
+        let (_env, dir) = scratch("share-two-roots");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (lender_work, lender) = session_on(&s, &repo);
+        let (borrower_work, borrower) = session_on(&s, &repo);
+        s.claim_lease(&lender_work, &lender, &repo).unwrap();
+        let own = s
+            .claim_lease(&borrower_work, &borrower, &repo)
+            .unwrap()
+            .lease()
+            .cloned()
+            .unwrap();
+
+        let refused = s
+            .share_lease(&borrower_work, &borrower, &lender_work, &repo)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains(&own.branch),
+            "the refusal names the worktree it is already holding: {refused}"
+        );
+        assert!(
+            s.lease_sharers(own.id).unwrap().is_empty(),
+            "and nothing was attached anywhere"
+        );
+    }
+
+    /// A `git` that could not run said nothing, and nothing is what "there is
+    /// no remote" looks like too.
+    ///
+    /// Unreachable through a real checkout — a repository broken enough to fail
+    /// `git remote` fails `git rev-parse` first, and `direct_is_allowed` stops
+    /// there — so the two reasons are read from a run this test builds itself.
+    /// The cost of getting it wrong is not a wrong verdict but a missing
+    /// reason, which is the one thing D3.3 exists to prevent.
+    #[test]
+    fn a_git_command_that_failed_is_its_own_reason_rather_than_a_silent_pass() {
+        let checkout = Path::new("/somewhere/broken");
+        let failed = |said: &str| GitRun {
+            ok: false,
+            stdout: String::new(),
+            stderr: said.to_string(),
+        };
+        let said = |out: &str| GitRun {
+            ok: true,
+            stdout: out.to_string(),
+            stderr: String::new(),
+        };
+
+        let unreadable =
+            remote_reason(checkout, &failed("fatal: bad config line 9")).expect("a reason");
+        assert!(
+            unreadable.contains("bad config line 9"),
+            "and it quotes what git said: {unreadable}"
+        );
+        assert!(
+            remote_reason(checkout, &said("")).is_none(),
+            "silence from a run that worked really is no remote"
+        );
+        let named = remote_reason(checkout, &said("origin\nupstream")).expect("a reason");
+        assert!(
+            named.contains("`origin`") && named.contains("`upstream`"),
+            "every remote is named: {named}"
+        );
+
+        assert!(
+            cleanliness_reason(checkout, &failed("fatal: index file corrupt")).is_some(),
+            "a tree whose state could not be read is not a clean tree"
+        );
+        assert!(cleanliness_reason(checkout, &said("")).is_none());
+        assert!(cleanliness_reason(checkout, &said(" M core/src/leases.rs")).is_some());
+    }
+
+    /// Releasing a worktree somebody else is standing in is the mistake the
+    /// sharers table exists to catch.
+    #[test]
+    fn a_lease_with_a_sharer_attached_is_kept_and_the_sharer_is_named() {
+        let (_env, dir) = scratch("release-shared");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (lender_work, lender) = session_on(&s, &repo);
+        let (borrower_work, borrower) = session_on(&s, &repo);
+        let lease = s
+            .claim_lease(&lender_work, &lender, &repo)
+            .unwrap()
+            .lease()
+            .cloned()
+            .unwrap();
+        s.share_lease(&borrower_work, &borrower, &lender_work, &repo)
+            .unwrap();
+
+        let kept = s.release_lease(lease.id).unwrap();
+        let Release::Kept { reason, .. } = &kept else {
+            panic!("a worktree with somebody in it is kept, got {kept:?}");
+        };
+        assert!(
+            reason.contains(&borrower),
+            "the refusal names who is still in there: {reason}"
+        );
+        assert!(lease.worktree_path.is_dir(), "and it is still on disk");
+        assert_eq!(
+            s.lease(lease.id).unwrap().unwrap().state,
+            State::Held,
+            "a lease that stopped being held would let the next work cut a second one on \
+             the same repository"
+        );
+
+        // The borrower steps out, and the refusal has nothing left to hold.
+        s.unshare_lease(lease.id, &borrower).unwrap();
+        let released = s.release_lease(lease.id).unwrap();
+        assert!(
+            released.removed(),
+            "nobody is left and nothing was on it, got {released:?}"
+        );
+        assert!(!lease.worktree_path.exists());
+    }
+
+    /// A manager told one reason fixes it, asks again, and is told the next
+    /// one. Three turns to learn three facts that were all true at once.
+    #[test]
+    fn a_direct_placement_is_refused_with_every_reason_it_failed_not_only_the_first() {
+        let (_env, dir) = scratch("direct-refused");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&repo))
+            .unwrap();
+        s.create_work_in("the iteration before this one", Some(&project.id))
+            .unwrap();
+        assert!(
+            git(
+                &repo,
+                &["remote", "add", "origin", "https://example.invalid/r.git"]
+            )
+            .unwrap()
+            .ok,
+            "the fixture takes a remote"
+        );
+        std::fs::write(repo.join("half-done.rs"), "fn main() {}\n").unwrap();
+
+        let verdict = direct_is_allowed(&s, &project.id, &repo).unwrap();
+        assert!(!verdict.allowed);
+        assert_eq!(
+            verdict.because.len(),
+            3,
+            "all three conditions failed and all three are reported: {:?}",
+            verdict.because
+        );
+        assert!(
+            verdict.because.iter().any(|b| b.contains("remote")),
+            "{:?}",
+            verdict.because
+        );
+        assert!(
+            verdict.because.iter().any(|b| b.contains("uncommitted")),
+            "{:?}",
+            verdict.because
+        );
+        assert!(
+            verdict
+                .because
+                .iter()
+                .any(|b| b.contains("first iteration")),
+            "{:?}",
+            verdict.because
+        );
+    }
+
+    /// The one shape that is allowed: a fresh checkout nobody else has touched.
+    #[test]
+    fn a_direct_placement_is_allowed_on_a_clean_first_iteration_with_no_remote() {
+        let (_env, dir) = scratch("direct-allowed");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&repo))
+            .unwrap();
+
+        let verdict = direct_is_allowed(&s, &project.id, &repo).unwrap();
+        assert!(
+            verdict.allowed,
+            "no remote, no other work, nothing uncommitted: {:?}",
+            verdict.because
+        );
+        assert!(verdict.because.is_empty());
+
+        // And each of the three, on its own, is enough to take it back.
+        std::fs::write(repo.join("scratch.txt"), "x").unwrap();
+        let dirty = direct_is_allowed(&s, &project.id, &repo).unwrap();
+        assert!(!dirty.allowed);
+        assert_eq!(dirty.because.len(), 1, "{:?}", dirty.because);
     }
 
     fn commit_all(dir: &Path, message: &str) {

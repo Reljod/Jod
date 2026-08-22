@@ -7454,6 +7454,7 @@ mod tests {
             owner: owner.map(str::to_string),
             status: status.into(),
             created_at_ms: 0,
+            paths: Vec::new(),
         }
     }
 
@@ -13726,6 +13727,7 @@ mod tests {
                 owner: None,
                 status: "open".into(),
                 created_at_ms: a.now_ms - 3_600_000,
+                paths: Vec::new(),
             },
             TeamTask {
                 id: "t-undated".into(),
@@ -13733,6 +13735,7 @@ mod tests {
                 owner: None,
                 status: "open".into(),
                 created_at_ms: 0,
+                paths: Vec::new(),
             },
         ];
         a.go(Workspace::Tasks);

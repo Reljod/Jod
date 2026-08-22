@@ -4054,3 +4054,116 @@ regex.
 
 OpenCode and AGY have no equivalent hook, so for them this stays preamble
 wording. Saying so is better than implying a guarantee that does not exist.
+Three things follow that are worth stating plainly, because they are losses and
+not simplifications. Attaching to a run's tmux session is a shell command now,
+per the paragraph above. Adding a directory outside the launch tree is one too —
+`jod root add <path>` — since `/add-dir <where>` was the only thing that could
+point the picker somewhere else, and the picker still walks only the launch
+tree. Cataloguing a repository is likewise `jod project add`. Every one of those
+empty states names the shell command rather than pretending the console has one.
+The alternative was keeping a command alive purely to avoid admitting what the
+console cannot yet do, which is the console lying about its own shape.
+## Green code that cannot run is this repo's most common fault
+
+Six subsystems shipped tested and inert, and every one was found by an engineer
+reading a colleague's file rather than by any test. The stack ordering and the
+sharing guard both joined through `conversations.task_id`, which nothing wrote,
+so the join matched nothing and both fell through to a default that looked
+right. `auto_pr_instruction` and `Store::enqueue_delivery` each had no
+production caller. `remember` sat at `ToolAccess::Orchestrate` while the
+managers told to use it are spawned at `Delegate`, so it was filtered out of
+their catalogue. `roots_lines` told a `ReadOnly` session to call
+`claim_worktree`, which needs `Delegate`.
+
+They share one shape. A test builds the state a production writer was supposed
+to produce, asserts on it, and passes — while the writer does not exist. The
+test is not wrong about its own subject; it is answering a question nobody
+needed answered. `prs.rs` already carried the warning in a section comment: *a
+subsystem that nothing calls is one whose tests are green for ever.*
+
+Two habits come out of it, and both are cheap. **Test through the production
+writer**, not around it: build the board by calling `plan_work`, not by
+inserting rows with hand-picked timestamps. And when a column, a function or a
+tool is added, **grep for its writer before believing its reader**.
+
+## A tiebreaker that is not deterministic is a bug with a green suite
+
+`plan_work` stamps one `now_ms()` outside its insert loop, so every task in a
+plan shares a millisecond. Two queries ordered by `created_at_ms, id` where
+`tasks.id` is a uuid — which made plan order a shuffle. The tests passed
+because they set distinct timestamps by hand, exercising a state production
+cannot produce.
+
+Both queries now order by `rowid` alone, which also removes an assumption
+neither stated: that the wall clock only moves forwards. `now_ms()` is
+`chrono::Utc::now()`, so an NTP correction or a laptop waking from sleep gives
+the second plan a smaller timestamp than the first and reorders the board under
+a stack that has already been based on it. Held by
+`a_backwards_clock_does_not_reorder_the_board`.
+
+## Unplaced is not the same as placed read-only
+
+`Opening::placement` is `Option<Placement>` and the `None` case is not a
+default-shaped `Explore`. `None` means nobody placed this session: the checkout
+arrives read-only, nothing is cut, and the session claims a worktree when it
+needs one. `Some(Explore)` means a manager decided this engineer must not
+write, and its brief states that as a prohibition and never names
+`claim_worktree`.
+
+Collapsing them looks like tidying and is not. `continue_agent`, `delegate` and
+every unplanned `open_work` are genuinely unplaced, so an `Explore` default
+would apply a prohibition to most of the fleet and break the byte-identical
+brief that lets placement land without touching existing tests. Held by
+`an_unplaced_session_is_told_to_claim_and_a_placed_one_is_not`.
+
+## A preamble may only name a tool the run can reach
+
+Naming a tool that does not exist and naming one filtered out by access level
+fail identically from where the model sits: it reaches for something that is
+not there. Only the first used to fail the build.
+
+`every_tool_the_preamble_tells_an_agent_to_call_is_one_that_exists` now checks
+each preamble against the access level its runs are actually spawned with, and
+sweeps every axis that changes what renders — harness, access, assignment and
+placement. Widening it from twelve renderings to a hundred and twenty caught a
+live case on the first run: a session with no Jod tools at all was being told to
+report with `complete_task` and escalate with `ask_question`.
+
+A paragraph that renders under only one value of a field is invisible to a check
+that always passes the other one.
+
+## `remember` belongs to Delegate, not Orchestrate
+
+`ToolAccess::Orchestrate`'s stated reason is money spent while nobody is
+watching — a schedule fires at 2am, a goal runs until something stops it.
+Writing a fact does neither. It was bundled with them and the bundle was the
+mistake, not any caller's level.
+
+The safety argument is `ToolAccess::capped_for`, which clamps anything of
+`Origin::Untrusted` to `ReadOnly`. `Delegate` is therefore already the line
+meaning "started by a person or by main", which is exactly who should be
+recording what a project has learned.
+
+## File ownership needs a carve-out for your own mechanical fallout
+
+One owner per path stops two engineers editing one file. Taken literally it also
+stops the engineer who added a field to a shared struct from fixing the literals
+that no longer compile, which can be in files nobody planned for — and leaving
+the tree uncompilable blocks everybody.
+
+So mechanical fallout from your own change is yours: adding the field, updating
+a signature's callers, fixing an import. It stops the moment a fix needs a
+decision about the right value or behaviour; that goes in the report instead.
+`plan_work` cannot anticipate this either, since it refuses on the paths a
+manager named and the fallout of a struct change is not knowable at plan time.
+
+## Take a migration number by reading every worktree, not just yours
+
+`origin/main` ended at `0028`, so `0029` looked free. A sibling session held
+`0029` and `0030` uncommitted in its own worktree, where neither `git log` nor
+`git fetch` shows them. This work took `0031` and the gap is deliberate.
+
+A name used twice is two different sets of statements recorded under one row in
+`migrations`, so whichever branch merges second silently does nothing on every
+machine that already ran the first. The gap must not be closed up, and a comment
+above the entry says so.

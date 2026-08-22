@@ -367,7 +367,32 @@ pub fn catalogue() -> Vec<Tool> {
             description:
                 "Write something durable into Jod's memory, as a subject–predicate–object triple. \
                  Recorded as an agent's conclusion, never as the owner's own word.",
-            needs: ToolAccess::Orchestrate,
+            // **Not `orchestrate`, and the bundle it used to be in is what was
+            // wrong rather than the level of any one caller.** It sat beside
+            // `schedule_create` and `goal_create` because all three write
+            // something that outlives the turn, but that is not the line
+            // [`ToolAccess::may_orchestrate`] draws. That line is about
+            // spending money unattended: a schedule spends it every night at
+            // 2am whether or not anyone is watching, and a goal spends it until
+            // something stops it. Writing a fact spends nothing, starts no
+            // process and wakes nobody.
+            //
+            // What it does cost is the truth of what Jod believes, so the
+            // question is who may write it, and `delegate` is already the
+            // answer to that question everywhere else. Material from outside
+            // never reaches this level at all — `Service::spawn_from_untrusted`
+            // caps a run built from a payload, a page or a stranger's pull
+            // request to `read_only`, which is the same reason `open_work` and
+            // `delegate` give for sitting here. So `delegate` *is* the "started
+            // by a person or by main" line, and a fact written by a run on that
+            // line is a fact an agent Reljod started concluded. Which is
+            // exactly what the description above says it is recorded as.
+            //
+            // The cost of having it a level too high was not theoretical: every
+            // project manager runs at `delegate` and is told in its own brief
+            // that memory is most of why a manager is worth having. It was
+            // being told that and handed no verb to write one.
+            needs: ToolAccess::Delegate,
             schema: obj(
                 json!({
                     "subject": text("What the fact is about, e.g. `reljod`."),
@@ -729,9 +754,191 @@ pub fn catalogue() -> Vec<Tool> {
                         "How much of Jod the first session may reach. Capped at your own. \
                          Default delegate, so it can talk to its siblings and start its own.",
                         &ACCESS_IDS,
+                    ),
+                    "placement": one_of(
+                        "Where this engineer is allowed to write, and it is your call rather \
+                         than its own. `explore` = read-only: no branch, no worktree, no pull \
+                         request, right for anything that only looks. `worktree` = a branch and \
+                         worktree of its own, cut before its session starts, for anything that \
+                         writes. `share` = join the worktree another work already holds, named \
+                         in `share_with`. `direct` = write in Reljod's real checkout, allowed \
+                         only where there is no git remote, no other work on the project and \
+                         nothing uncommitted — ask for it when any of those is false and you \
+                         are refused with every failing reason at once.\n\n\
+                         Leaving this out is not the same as `explore`. An unplaced session \
+                         starts on the read-only checkout and calls `claim_worktree` for itself \
+                         the moment it needs to write, which is how every session worked before \
+                         placements existed; `explore` tells it plainly that it was opened to \
+                         look and that needing to write is a thing to report.",
+                        &crate::leases::PLACEMENT_IDS,
+                    ),
+                    "share_with": text(
+                        "The id of the work whose worktree to join. Required when `placement` \
+                         is `share`, and meaningless without it."
+                    ),
+                    "paths": strings(
+                        "The files this engineer owns, as repository-relative path prefixes, \
+                         and the only ones it may change. Recorded on the work's first task, \
+                         which is what keeps two engineers sharing one worktree off each \
+                         other's files. Leave it out for anything that only reads."
                     )
                 }),
                 &["instruction"],
+            ),
+        },
+        // ---- the board ------------------------------------------------------
+        //
+        // A work has had a board since works existed, and until these three
+        // there was no verb anywhere in this catalogue that put a task on one.
+        // A manager told in its brief to break an instruction down had nowhere
+        // to put the breakdown — the same trap `claim_lease` fell into before
+        // `claim_worktree` named it, and it makes the instruction in a preamble
+        // unfollowable rather than merely unhelpful.
+        Tool {
+            name: "plan_work",
+            description:
+                "Write a job's whole breakdown onto its board in one call: one task per \
+                 engineer, and every task naming the files that engineer owns and nobody else \
+                 touches.\n\n\
+                 **Two tasks that claim the same file are refused**, by title and by path, \
+                 before any of it is handed out. Two engineers editing one file in one worktree \
+                 is a merge conflict neither of them can see coming, so plan around it rather \
+                 than discovering it. A task that only reads — a look, a search, a review — \
+                 owns no files at all, and an empty `paths` is the honest way to say so.\n\n\
+                 Write the tasks in the order the work has to happen in. That is the board's \
+                 order, and it is the order `stack_pull_requests` stacks the pull requests in, \
+                 so a plan written in the order you happened to think of things produces a \
+                 stack whose bases are wrong.\n\n\
+                 The whole plan goes in one call, because a plan accumulated a task at a time \
+                 cannot be checked for collisions before it is handed out. A refused plan \
+                 writes nothing: the board is exactly as it was. Planning again later is fine, \
+                 and the new tasks are checked against the ones still open as well as against \
+                 each other.",
+            // `delegate`, on the same line as `open_work` and for a related
+            // reason. This does not start an agent itself, but it is the call
+            // that decides what agents are started to do and where each of them
+            // may write — and completing the last task on a board closes the
+            // work. A run built from a webhook or a stranger's pull request is
+            // capped at `read_only` by `Service::spawn_from_untrusted`, which
+            // is precisely the material that should not be laying out who owns
+            // which files in Reljod's repository.
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({
+                    "work_id": text("The work to plan. `open_work` returns one; `work_board` reads one back."),
+                    "tasks": {
+                        "type": "array",
+                        "description":
+                            "The breakdown, in dependency order — the first task is the one \
+                             everything else is built on.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": text("What this engineer is to do, in one line."),
+                                "paths": strings(
+                                    "The files this task owns, as repository-relative path \
+                                     prefixes — `core/src/mcp.rs`, `cli/src/tui`. Leave it \
+                                     empty for a task that only reads."
+                                )
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                }),
+                &["work_id", "tasks"],
+            ),
+        },
+        Tool {
+            name: "work_board",
+            description:
+                "Every task on a work's board, in the order it was planned, each with its \
+                 owner, whether it is done, and the files it owns.\n\n\
+                 This is how you find out whether a job is finished without asking an engineer. \
+                 While one task is still open the job is not finished, whatever anybody's last \
+                 message sounded like. When nothing is open, the work has closed itself and \
+                 what it produced is yours to report.",
+            // Reading a board costs nothing and hides nothing, which is the
+            // line every other `read_only` tool here sits on.
+            needs: ToolAccess::ReadOnly,
+            schema: obj(
+                json!({ "work_id": text("The work whose board to read.") }),
+                &["work_id"],
+            ),
+        },
+        Tool {
+            name: "complete_task",
+            description:
+                "Say your task is done, and report what you did. This marks it off the board \
+                 and delivers your report into your manager's conversation, which starts your \
+                 manager's next turn.\n\n\
+                 **Your report reaches your manager and nobody above it.** Reljod is not \
+                 reading this transcript, so what you write here is the whole of what he will \
+                 be told you did — write it for somebody who has not seen your work. Say what \
+                 you changed, what you deliberately left alone, and anything outside your own \
+                 files that needs changing, because widening the plan is your manager's call \
+                 and not yours.\n\n\
+                 Call it once, when the task is genuinely finished. The answer says whether \
+                 yours was the last open task, so your closing line is not a guess about \
+                 whether anybody else is still working.",
+            // `read_only` for something that writes, and it is the line
+            // `record_decision` already sits on: this writes a row in Jod's own
+            // database, starts no agent, spends nothing and cuts no branch.
+            //
+            // The level has to be this low for a second reason that is not
+            // about the effect at all. An engineer is spawned at whatever
+            // `open_work` was asked for, which includes `read_only` — an
+            // engineer sent to read, search or review. An engineer that cannot
+            // report is one whose work is invisible, so putting reporting
+            // behind `delegate` would silence exactly the most confined
+            // sessions on the box.
+            //
+            // **It is deliberately not a card.** Cards cascade upward through
+            // the whole ancestor chain, so a routine "I finished" raised as one
+            // arrives on main's rail three links up, which is the bug this
+            // whole change exists to fix. `ask_question` and `request_secret`
+            // still cascade and still reach Reljod, because a blocked engineer
+            // must get through whether or not its manager is running again this
+            // hour. The manager owns reporting, not escalation.
+            needs: ToolAccess::ReadOnly,
+            schema: obj(
+                json!({
+                    "task_id": text("The task you were given. Your brief names it; `work_board` lists them."),
+                    "report": text(
+                        "What you did, for a manager that did not watch you do it. This is \
+                         relayed upward — it is not a note to yourself."
+                    )
+                }),
+                &["task_id", "report"],
+            ),
+        },
+        Tool {
+            name: "stack_pull_requests",
+            description:
+                "Link a job's pull requests into a stack on GitHub, bottom to top.\n\n\
+                 Three engineers on one job cut three branches from the same starting point, so \
+                 you get three pull requests that each claim to change the same files from the \
+                 same base, and whoever merges first breaks the other two. Stacking them says \
+                 which sits on which, and each diff shrinks to the part its own engineer \
+                 added.\n\n\
+                 What comes back is the ordered list and the `gh stack link` command — Jod does \
+                 not run it, because you are the one who can see whether the order still holds \
+                 and which branches have already landed. The order is the order you planned the \
+                 tasks in, so it is your own stated order rather than the order the engineers \
+                 happened to finish in.\n\n\
+                 Refused when the work has fewer than two pull requests, and the refusal says \
+                 how many it found. One pull request is not a stack, and linking it rewrites \
+                 its base branch in public for no gain.",
+            // `delegate` rather than `read_only`, even though what comes back
+            // is a command line rather than a call Jod makes. What decides the
+            // level is the effect the tool exists to cause: linking rewrites
+            // the base branch of every pull request named on that line, which
+            // is a visible change to open work on somebody else's screen.
+            // `claim_worktree` sits here for the same reason — it is the other
+            // tool whose effect lands outside the database.
+            needs: ToolAccess::Delegate,
+            schema: obj(
+                json!({ "work_id": text("The work whose pull requests to stack.") }),
+                &["work_id"],
             ),
         },
         // ---- the bus ------------------------------------------------------
@@ -851,7 +1058,15 @@ pub fn catalogue() -> Vec<Tool> {
 ///
 /// Expressed through [`ToolAccess`]'s own predicates rather than a second
 /// ordering, so there is one definition of what each level means.
-fn allows(have: ToolAccess, need: ToolAccess) -> bool {
+///
+/// Visible to the rest of the crate because the preambles have to be checked
+/// against it. A brief that names a tool the run's level filters out of the
+/// catalogue is broken in exactly the way a brief that names a misspelled tool
+/// is broken, and the only way for
+/// [`crate::orchestrator`]'s test to know the difference between the two is to
+/// ask the same question this function answers — see
+/// `every_tool_the_preamble_tells_an_agent_to_call_is_one_that_exists`.
+pub(crate) fn allows(have: ToolAccess, need: ToolAccess) -> bool {
     match need {
         ToolAccess::ReadOnly => true,
         ToolAccess::Delegate => have.may_delegate(),
@@ -1125,6 +1340,10 @@ impl Server {
             "claim_worktree" => self.claim_worktree(args),
             "release_worktree" => self.release_worktree(args),
             "open_work" => self.open_work(args).await,
+            "plan_work" => self.plan_work(args),
+            "work_board" => self.work_board(args),
+            "complete_task" => self.complete_task(args),
+            "stack_pull_requests" => self.stack_pull_requests(args),
             "roster" => self.roster(),
             "read_messages" => self.read_messages(),
             "send_message" => self.send_message(args),
@@ -3140,6 +3359,90 @@ impl Server {
     async fn open_work(&self, args: &Value) -> Result<String, ToolError> {
         let raiser = self.raiser()?;
         self.refuse_routing_from_main("open_work")?;
+        let Planned { opening, paths } = self.opening_for(&raiser, args)?;
+        let placement = opening.placement.clone();
+
+        if !self.jod.supervisor_available() {
+            return Err(ToolError::Refused(
+                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
+            ));
+        }
+
+        let opened = crate::orchestrator::open_work(&self.jod, opening)
+            .await
+            .map_err(|e| ToolError::Refused(format!("could not open that work: {e}")))?;
+        // The parent link is already written — `Opening::under` carried it into
+        // `attach_conversation`, which is the richer form of it — so this
+        // records the decision only. Without it, the routing outcome the
+        // orchestrator is now told to prefer would be the one outcome missing
+        // from what `jod main` says the chat set in motion.
+        self.record_handoff("open_work", &opened.agent.id, false);
+        // The write side of `conversations.task_id`, and the reason it is here
+        // rather than in the orchestrator is written on `Opening::assignment`:
+        // this is the tool boundary's job. Two finished features read this
+        // column and both of them were inert without it — see
+        // [`spawn_onto_first_task`].
+        let task_id =
+            spawn_onto_first_task(self.store()?, &opened.work.id, &opened.conversation_id, &paths);
+        as_json(&json!({
+            "work_id": opened.work.id,
+            "title": opened.work.title,
+            "colour": opened.work.colour,
+            "conversation_id": opened.conversation_id,
+            "session": opened.name,
+            "run_id": opened.agent.id,
+            // Reported rather than kept quiet, because two things downstream
+            // silently degrade when it is missing rather than failing: the
+            // stack comes out in finish order and the collision guard waves
+            // every share through. A `null` here is the only warning either of
+            // those gives.
+            "task_id": task_id,
+            // Echoed back for the same reason. A placement that was accepted
+            // and ignored answers exactly like one that was acted on, which is
+            // how a manager comes to believe it placed an engineer read-only.
+            "placement": placement.as_ref().map(|p| p.as_str()),
+            "paths": paths,
+            "worktree": opened.claim.as_ref()
+                .and_then(|claim| claim.lease())
+                .map(|lease| lease.worktree_path.to_string_lossy().to_string()),
+            "note": match &placement {
+                None => "opened and running. The checkout is a read-only root; the session \
+                         claims a worktree itself if it needs to write. Its cards will arrive \
+                         on your rail.",
+                Some(crate::leases::Placement::Explore) =>
+                    "opened and running, read-only. It holds no writable root and its brief \
+                     says so — if it turns out to need one, it reports that rather than \
+                     claiming it. No branch, so no pull request either.",
+                Some(crate::leases::Placement::Worktree) =>
+                    "opened and running, with a worktree already cut and writable. It will not \
+                     call `claim_worktree`; it has one. Ask it for a draft pull request off \
+                     that branch before it reports.",
+                Some(crate::leases::Placement::Share { .. }) =>
+                    "opened and running in the worktree the other work holds. Both engineers \
+                     are writing in one directory, so what keeps them apart is the files each \
+                     task owns and nothing else.",
+                Some(crate::leases::Placement::Direct) =>
+                    "opened and running in Reljod's real checkout. There is no branch between \
+                     this session and his working tree.",
+            },
+        }))
+    }
+
+    /// Everything `open_work` decides before a process has to exist.
+    ///
+    /// Split out at exactly the seam [`crate::orchestrator::prepare_work`] is
+    /// split at, and for the same reason: the spawn needs a supervisor and a
+    /// harness binary, so a test that has to reach it cannot run, and the whole
+    /// of the judgement here would go unchecked. Every argument the manager
+    /// passes is read, validated and refused in this function; the caller below
+    /// does the launching and the bookkeeping and no deciding.
+    ///
+    /// This is not a hypothetical worry. `obj()` puts no
+    /// `additionalProperties: false` on any schema in this catalogue, so before
+    /// the placement arguments existed a call carrying `placement: "explore"`
+    /// was accepted, ignored, and answered with a success — a manager placing
+    /// an engineer read-only was told it worked and got an ordinary one.
+    fn opening_for(&self, raiser: &Raiser, args: &Value) -> Result<Planned, ToolError> {
         let instruction = required_str(args, "instruction")?;
         let harness = match opt_str(args, "harness") {
             Some(h) => parse_harness(&h)
@@ -3201,10 +3504,79 @@ impl Server {
             }
         };
 
-        if !self.jod.supervisor_available() {
-            return Err(ToolError::Refused(
-                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
-            ));
+        // Where the manager decided this engineer writes. **Absent is not
+        // `explore`.** An absent placement is `None`, which is what every
+        // caller that predates placements passes and what keeps their spawns
+        // byte-identical: the checkout arrives read-only and the session calls
+        // `claim_worktree` for itself. `explore` is a decision somebody made,
+        // and the brief says so.
+        let share_with = opt_str(args, "share_with");
+        let placement = match opt_str(args, "placement") {
+            Some(id) => Some(
+                crate::leases::Placement::parse(&id, share_with.as_deref())
+                    .map_err(|e| ToolError::BadParams(e.to_string()))?,
+            ),
+            // Refused rather than ignored. A `share_with` with no `placement`
+            // is a manager that meant to share and will otherwise be told the
+            // work opened, get an ordinary engineer with a branch of its own,
+            // and have no way to tell from the answer.
+            None if share_with.is_some() => {
+                return Err(ToolError::BadParams(
+                    "`share_with` names the work whose worktree to join, which only means \
+                     something with `placement: \"share\"`. Pass both, or neither."
+                        .into(),
+                ))
+            }
+            None => None,
+        };
+
+        // The files this engineer owns, settled before anything is created so
+        // a bad prefix refuses instead of opening a work and then failing.
+        let mut paths = Vec::new();
+        for raw in string_list(args, "paths")? {
+            paths.push(
+                crate::works::normalise_path(&raw)
+                    .map_err(|e| ToolError::BadParams(e.to_string()))?,
+            );
+        }
+
+        // **The gate on `direct`, and it lives here rather than in
+        // `prepare_work` on purpose.** By the time a placement reaches the
+        // orchestrator somebody has decided; this is the last point at which
+        // the refusal can carry every failing condition at once and name what
+        // to ask for instead. Run before the work exists, which is what makes
+        // "no other work on this project" mean what it says — see
+        // [`crate::leases::direct_is_allowed`].
+        if matches!(placement, Some(crate::leases::Placement::Direct)) {
+            let store = self.store()?;
+            // An uncatalogued directory has no project id, and the empty
+            // string counts no works — which is the honest answer for a
+            // repository Jod has never been told about. The two git conditions
+            // still decide it.
+            let project = store.project_for_path(&checkout).ok().flatten();
+            let verdict = crate::leases::direct_is_allowed(
+                store,
+                project.as_ref().map(|p| p.id.as_str()).unwrap_or(""),
+                &checkout,
+            )
+            .map_err(|e| {
+                ToolError::Refused(format!("could not check whether `direct` is allowed here: {e}"))
+            })?;
+            if !verdict.allowed {
+                return Err(ToolError::Refused(format!(
+                    "`direct` is not allowed in `{}`:\n{}\n\nOpen this work with \
+                     `placement: \"worktree\"` instead. That cuts a branch and a worktree of \
+                     this engineer's own, leaves Reljod's checkout beside it read-only, and is \
+                     what every one of those conditions exists to send you to.",
+                    checkout.display(),
+                    verdict
+                        .because
+                        .iter()
+                        .map(|reason| format!("- {reason}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )));
+            }
         }
 
         // Inherited, not chosen here. This used to ask for `accept_edits`
@@ -3223,35 +3595,330 @@ impl Server {
         let mut opening = crate::orchestrator::Opening::new(instruction, checkout)
             .on(harness)
             .with_permission(permission)
-            .under(raiser.conversation_id);
+            .under(raiser.conversation_id.clone());
         opening.tools = tools;
         // The first session on a work is an engineer. Dropped when the call
         // named a harness, for the reason `delegate` drops it: an argument in
         // the tool call is the highest rung of the four.
         opening.role = opt_str(args, "harness").is_none().then_some(Role::Engineer);
+        if let Some(placement) = placement {
+            opening = opening.placed(placement);
+        }
         if let Some(model) = opt_str(args, "model") {
             opening = opening.with_model(model);
         }
+        Ok(Planned { opening, paths })
+    }
 
-        let opened = crate::orchestrator::open_work(&self.jod, opening)
-            .await
-            .map_err(|e| ToolError::Refused(format!("could not open that work: {e}")))?;
-        // The parent link is already written — `Opening::under` carried it into
-        // `attach_conversation`, which is the richer form of it — so this
-        // records the decision only. Without it, the routing outcome the
-        // orchestrator is now told to prefer would be the one outcome missing
-        // from what `jod main` says the chat set in motion.
-        self.record_handoff("open_work", &opened.agent.id, false);
+    // ---- the board --------------------------------------------------------
+
+    /// Write a manager's whole breakdown onto a work's board.
+    ///
+    /// Thin wiring over [`Store::plan_work`], and deliberately so. Every
+    /// judgement this tool looks like it makes — whether two tasks collide,
+    /// what a path prefix means, whether a plan half-written is worse than none
+    /// — is settled in `works.rs` where it can be tested without a tool call.
+    /// What is here is the shape of the arguments and the refusal getting back
+    /// to the model unedited.
+    ///
+    /// The store's refusal is passed through verbatim rather than wrapped in
+    /// "could not plan that". It already names both colliding titles and both
+    /// paths, in the words a manager needs to write a different plan, and a
+    /// prefix would only push the useful half further from the start of the
+    /// line.
+    fn plan_work(&self, args: &Value) -> Result<String, ToolError> {
+        let work_id = required_str(args, "work_id")?;
+        let Some(tasks) = args.get("tasks").and_then(Value::as_array) else {
+            return Err(ToolError::BadParams(
+                "`tasks` is the breakdown, as a list of `{title, paths}` objects. A call with \
+                 none hands nothing out and leaves the board as it was."
+                    .into(),
+            ));
+        };
+        let mut plan = crate::works::Plan::default();
+        for (index, task) in tasks.iter().enumerate() {
+            let Some(title) = task.get("title").and_then(Value::as_str) else {
+                return Err(ToolError::BadParams(format!(
+                    "task {} has no `title`. A task nobody can name is one nobody can report \
+                     finishing.",
+                    index + 1
+                )));
+            };
+            plan.tasks.push(crate::works::PlannedTask {
+                title: title.to_string(),
+                paths: string_list(task, "paths")?,
+            });
+        }
+
+        let board = self
+            .store()?
+            .plan_work(&work_id, &plan)
+            .map_err(|e| ToolError::Refused(e.to_string()))?;
         as_json(&json!({
-            "work_id": opened.work.id,
-            "title": opened.work.title,
-            "colour": opened.work.colour,
-            "conversation_id": opened.conversation_id,
-            "session": opened.name,
-            "run_id": opened.agent.id,
-            "note": "opened and running. The checkout is a read-only root; the session claims a \
-                     worktree itself if it needs to write. Its cards will arrive on your rail.",
+            "work_id": work_id,
+            "tasks": board.iter().map(task_row).collect::<Vec<_>>(),
+            "note": "on the board, in the order you wrote them. Hand out the ones nothing is \
+                     waiting on — `open_work` takes one engineer at a time — and keep the rest \
+                     until what they depend on has landed.",
         }))
+    }
+
+    /// A work's board, which is the answer to "is it done yet" that does not
+    /// cost an engineer a turn.
+    ///
+    /// An unknown work is refused rather than answered with an empty board. A
+    /// manager that mistypes a work id and is handed `[]` reads it as a job
+    /// with nothing left to do, which is the one wrong answer this tool can
+    /// give that looks exactly like a right one.
+    fn work_board(&self, args: &Value) -> Result<String, ToolError> {
+        let work_id = required_str(args, "work_id")?;
+        let store = self.store()?;
+        if store
+            .work(&work_id)
+            .map_err(|e| ToolError::Refused(format!("could not read that work: {e}")))?
+            .is_none()
+        {
+            return Err(ToolError::Refused(format!(
+                "no work `{work_id}`. An empty board and a work that does not exist read alike \
+                 and mean opposite things, so this is a refusal rather than an empty list."
+            )));
+        }
+        let tasks = store
+            .work_tasks(&work_id)
+            .map_err(|e| ToolError::Refused(format!("could not read that board: {e}")))?;
+        let open = tasks.iter().filter(|t| t.status != "done").count();
+        as_json(&json!({
+            "work_id": work_id,
+            "tasks": tasks.iter().map(task_row).collect::<Vec<_>>(),
+            "open": open,
+            "done": tasks.len() - open,
+            // Not simply `open == 0`: a board nobody has planned yet is empty
+            // and is the opposite of finished.
+            "finished": !tasks.is_empty() && open == 0,
+        }))
+    }
+
+    /// An engineer says its one task is done, and its report goes to its
+    /// manager.
+    ///
+    /// Three things happen, in this order, and the order matters. The task is
+    /// marked done first, because that is what the caller asked for and it must
+    /// not depend on there being anybody to tell. The report is then delivered
+    /// into the manager's conversation. Last, the caller is told plainly
+    /// whether it was the last open task, so an engineer's closing line is not
+    /// a guess about whether its colleagues are still working.
+    ///
+    /// **The report is a delivery, not a card, and that is the whole of D4.4.**
+    /// A card cascades upward through every ancestor — [`Store::cards_in`]
+    /// walks the subtree — so an engineer's routine "I finished" raised as one
+    /// lands on main's rail three links up, which is the noise Reljod asked to
+    /// be rid of. Nothing about the cascade is changed here; what changed is
+    /// that routine reporting stopped travelling as a card. A blocked
+    /// engineer's `ask_question` still goes all the way to him, because a
+    /// manager that will not run again for an hour cannot answer it.
+    fn complete_task(&self, args: &Value) -> Result<String, ToolError> {
+        let raiser = self.raiser()?;
+        let task_id = required_str(args, "task_id")?;
+        let report = required_str(args, "report")?;
+        if report.trim().is_empty() {
+            return Err(ToolError::BadParams(
+                "`report` is the whole of what your manager will be told you did, so an empty \
+                 one finishes the task and says nothing about it"
+                    .into(),
+            ));
+        }
+        let store = self.store()?;
+
+        // Read before the task is marked done, because the title is what names
+        // the report and the session name is what tells the manager who is
+        // speaking. Both are best effort: a caller outside a work still gets to
+        // finish its task and still gets its report delivered.
+        let work_id = store
+            .work_for_conversation(&raiser.conversation_id)
+            .ok()
+            .flatten();
+        let title = work_id
+            .as_deref()
+            .and_then(|work| store.work_tasks(work).ok())
+            .and_then(|tasks| tasks.into_iter().find(|t| t.id == task_id))
+            .map(|t| t.title);
+        let who = work_id
+            .as_deref()
+            .and_then(|work| store.work_sessions(work).ok())
+            .and_then(|sessions| {
+                sessions
+                    .into_iter()
+                    .find(|s| s.conversation_id == raiser.conversation_id)
+            })
+            .map(|s| s.name)
+            .filter(|name| !name.is_empty());
+
+        let closing = store
+            .complete_work_task(&task_id)
+            .map_err(|e| ToolError::Refused(e.to_string()))?;
+        let last = closing.is_some();
+        let still_open = work_id
+            .as_deref()
+            .and_then(|work| store.work_tasks(work).ok())
+            .map(|tasks| tasks.iter().filter(|t| t.status != "done").count());
+
+        let body = report_body(
+            who.as_deref(),
+            title.as_deref(),
+            &task_id,
+            &report,
+            work_id.as_deref(),
+            last,
+            still_open,
+        );
+        let addressee = self.report_addressee(&raiser.conversation_id)?;
+        let delivered = match &addressee {
+            Some(to) => store
+                .enqueue_delivery(&to.conversation_id, delivery::Kind::Mail, &task_id, &body)
+                .map(|_| true)
+                .map_err(|e| ToolError::Refused(format!("could not deliver your report: {e}")))?,
+            None => false,
+        };
+
+        as_json(&json!({
+            "task_id": task_id,
+            "task": title,
+            "last": last,
+            "still_open": still_open,
+            "reported_to": addressee.as_ref().map(|to| to.conversation_id.clone()),
+            "delivered": delivered,
+            "note": match (&addressee, last) {
+                (Some(to), true) if to.is_manager =>
+                    "done, and yours was the last open task on this board — the work is closed. \
+                     Your report is with your manager, which decides what to tell Reljod. Stop \
+                     here rather than looking for more to do.".to_string(),
+                (Some(_), true) =>
+                    "done, and yours was the last open task on this board — the work is closed. \
+                     Your report went to the conversation that started you, because there is no \
+                     manager above this session. Stop here.".to_string(),
+                (Some(to), false) if to.is_manager =>
+                    "done. Your report is with your manager. Other tasks on this board are still \
+                     open, so the job is not finished — that is somebody else's task and not \
+                     yours to pick up. Stop here.".to_string(),
+                (Some(_), false) =>
+                    "done. Your report went to the conversation that started you, because there \
+                     is no manager above this session. Other tasks on this board are still open. \
+                     Stop here.".to_string(),
+                (None, _) =>
+                    "done, and the task is off the board — but this session has no conversation \
+                     above it, so there was nobody to deliver the report to. Say what you did in \
+                     your own output as well, because nothing else carried it.".to_string(),
+            },
+        }))
+    }
+
+    /// Where an engineer's report goes: the nearest manager above it, or its
+    /// parent when there is no manager.
+    ///
+    /// A manager is a conversation named by some project's
+    /// `manager_conversation_id`, and "above" is the `parent_conversation_id`
+    /// chain — the same edge the rail's cascade walks, in the other direction.
+    /// The nearest one wins, so an engineer that opened work of its own reports
+    /// to the manager that owns the repository rather than to main.
+    ///
+    /// **Falling back to the parent is required, not a convenience.** An
+    /// engineer started by main directly, or by a test, has no manager over it,
+    /// and a report with no addressee is the failure this whole change exists
+    /// to remove. Only a conversation with no parent at all — main itself —
+    /// ends up with nobody to tell.
+    ///
+    /// The walk is SQL here rather than a `Store` method because
+    /// `conversations` has no ancestor query and the files that would host one
+    /// belong to other people this week. It is the one statement in this module
+    /// and it should move to `store.rs` beside
+    /// [`Store::descendant_conversations`], which is its mirror image. The
+    /// depth bound is what a recursive walk over a parent chain needs in order
+    /// not to hang the process holding the store lock if a cycle is ever
+    /// written — the same worry `descendant_conversations` answers with `UNION`
+    /// rather than `UNION ALL`.
+    fn report_addressee(&self, from: &str) -> Result<Option<Addressee>, ToolError> {
+        let store = self.store()?;
+        let conn = store.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn
+            .prepare(
+                "WITH RECURSIVE above(id, parent_id, depth) AS (
+                   SELECT id, parent_conversation_id, 0
+                     FROM conversations WHERE id = ?1
+                   UNION ALL
+                   SELECT c.id, c.parent_conversation_id, above.depth + 1
+                     FROM conversations c JOIN above ON c.id = above.parent_id
+                    WHERE above.depth < 64
+                 )
+                 SELECT above.id,
+                        EXISTS (SELECT 1 FROM projects p
+                                 WHERE p.manager_conversation_id = above.id)
+                   FROM above
+                  WHERE above.depth > 0
+                  ORDER BY above.depth",
+            )
+            .map_err(|e| ToolError::Refused(format!("could not look for your manager: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![from], |r| {
+                Ok(Addressee {
+                    conversation_id: r.get(0)?,
+                    is_manager: r.get::<_, i64>(1)? != 0,
+                })
+            })
+            .map_err(|e| ToolError::Refused(format!("could not look for your manager: {e}")))?;
+        let chain: Vec<Addressee> = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ToolError::Refused(format!("could not look for your manager: {e}")))?;
+        Ok(chain
+            .iter()
+            .find(|a| a.is_manager)
+            .or_else(|| chain.first())
+            .cloned())
+    }
+
+    /// Hand a manager the `gh stack link` line for its work's pull requests.
+    ///
+    /// Every hard part of this is in [`crate::prs`]: which pull request sits on
+    /// which, how a shared worktree's single pull request is ranked, what the
+    /// command line looks like, and what to say when there is nothing worth
+    /// linking. This is wiring, and the refusal in particular comes from
+    /// [`crate::prs::stack_refusal`] rather than being written again here —
+    /// two sentences about the same rule are two sentences that can disagree.
+    fn stack_pull_requests(&self, args: &Value) -> Result<String, ToolError> {
+        let work_id = required_str(args, "work_id")?;
+        let store = self.store()?;
+        if store
+            .work(&work_id)
+            .map_err(|e| ToolError::Refused(format!("could not read that work: {e}")))?
+            .is_none()
+        {
+            return Err(ToolError::Refused(format!("no work `{work_id}` to stack")));
+        }
+        match store
+            .stack_for_work(&work_id)
+            .map_err(|e| ToolError::Refused(format!("could not read the pull requests: {e}")))?
+        {
+            crate::prs::Stacking::TooFew { found } => {
+                Err(ToolError::Refused(crate::prs::stack_refusal(found)))
+            }
+            crate::prs::Stacking::Ready(stack) => as_json(&json!({
+                "work_id": work_id,
+                "count": stack.prs.len(),
+                // Bottom to top, which is the order the command takes and the
+                // order the list has to be read in. Said in the field name as
+                // well as in the instruction, because a list whose order
+                // carries meaning and does not say so gets re-sorted.
+                "bottom_to_top": stack.prs.iter().map(|pr| json!({
+                    "number": pr.number,
+                    "url": pr.url,
+                    "branch": pr.branch,
+                    "repo": pr.repo,
+                    "title": pr.title,
+                    "state": pr.state.as_str(),
+                })).collect::<Vec<_>>(),
+                "command": crate::prs::stack_link_command(&stack.prs),
+                "instruction": crate::prs::stack_instruction(&stack.prs),
+            })),
+        }
     }
 
     // ---- the bus ----------------------------------------------------------
@@ -3654,6 +4321,169 @@ fn can_write(run_id: &str, worktree: &std::path::Path) -> CanWrite {
             granted: grant.dirs,
         },
     }
+}
+
+// ---- the board's own small pieces ----------------------------------------
+
+/// An `open_work` call, read and settled, with nothing started yet.
+///
+/// The paths ride beside the [`crate::orchestrator::Opening`] rather than on it
+/// because they belong to a task that does not exist until the orchestrator
+/// creates the work. See [`spawn_onto_first_task`], which is where they land.
+struct Planned {
+    opening: crate::orchestrator::Opening,
+    paths: Vec<String>,
+}
+
+/// Record that this session was spawned onto its work's first task, and answer
+/// with the task it was pointed at.
+///
+/// **This is the only production writer of `conversations.task_id`, and the
+/// column had none at all until it existed.** That is worth spelling out
+/// because nothing failed while it was missing. Two finished, tested, green
+/// features read the column and both of them degrade *quietly* to a wrong
+/// answer rather than to an error:
+///
+/// - [`Store::stack_for_work`] joins through it to rank a pull request by its
+///   task's position in the plan. A null matches nothing, so every pull request
+///   falls into the no-position bucket and the ordering drops through to
+///   `detected_at_ms` — finish order, which is the exact bug the column was
+///   added to fix. The stack comes out with its bases inverted and looks fine.
+/// - `leases::share_lease` asks each session in a shared worktree what its open
+///   task owns, through the same join, before letting a borrower in. A null
+///   means "claims nothing", so the comparison has nothing to compare and every
+///   share is waved through — at the moment file ownership matters most.
+///
+/// **The first task, not a chosen one.** `create_work_in` puts the work's
+/// instruction on the board as its first task, so a work always has one and
+/// the session opening that work is the session doing it. Once `open_work`
+/// takes a placement and a task of its own, this is where that id goes instead;
+/// until then, the first task is the true answer rather than a placeholder.
+///
+/// **And the files that task owns**, when the manager named any. `open_work`
+/// creates the work, so the only task there is to hang them on is the one
+/// `create_work_in` wrote, and it does not exist until the orchestrator has
+/// run. They are recorded rather than merely reported because
+/// `leases::share_lease` reads them back through `conversations.task_id` before
+/// it lets a second engineer into a worktree — a task that owns nothing claims
+/// nothing, and the collision guard has nothing to compare.
+///
+/// Both writes are one transaction. A session pointed at a task whose paths
+/// did not land would be the same silent half-state this function exists to
+/// remove.
+///
+/// Best effort, and it returns what it wrote so the caller can say. Failing the
+/// tool call here would be worse than a null: the agent is already running by
+/// the time this executes, so a refusal would tell a manager the work did not
+/// open and invite it to open a second one.
+fn spawn_onto_first_task(
+    store: &Store,
+    work_id: &str,
+    conversation_id: &str,
+    paths: &[String],
+) -> Option<String> {
+    let task = store.work_tasks(work_id).ok()?.into_iter().next()?;
+    // The same encoding `works::paths_from_column` reads, which is the only
+    // reader there is. Written here because that module's writer is private to
+    // it and this file may not grow one; the round trip is held by a test
+    // rather than by the two agreeing on paper.
+    let stored = match paths.is_empty() {
+        true => None,
+        false => serde_json::to_string(paths).ok(),
+    };
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET task_id = ?2 WHERE id = ?1",
+                rusqlite::params![conversation_id, task.id],
+            )?;
+            if stored.is_some() {
+                tx.execute(
+                    "UPDATE tasks SET paths = ?2 WHERE id = ?1",
+                    rusqlite::params![task.id, stored],
+                )?;
+            }
+            Ok(())
+        })
+        .ok()?;
+    Some(task.id)
+}
+
+/// Where a completion report is delivered, and whether that is a manager.
+///
+/// The flag is carried rather than recomputed because the answer changes what
+/// the engineer is told: reporting to a manager means somebody will decide what
+/// Reljod hears, and reporting to a plain parent means nobody above has that
+/// job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Addressee {
+    conversation_id: String,
+    is_manager: bool,
+}
+
+/// One task, as both board tools render it.
+///
+/// Shared so `plan_work` and `work_board` cannot describe the same row two
+/// ways. A manager that plans a board and then reads it back must see the same
+/// fields under the same names, or it will believe the board changed between
+/// the two calls.
+fn task_row(task: &crate::team::TeamTask) -> Value {
+    json!({
+        "task_id": task.id,
+        "title": task.title,
+        "owner": task.owner,
+        "status": task.status,
+        "paths": task.paths,
+    })
+}
+
+/// The turn a manager is handed when one of its engineers finishes.
+///
+/// Written here rather than left as the raw report, because a delivered turn
+/// arrives in a session whose framing is several turns back — the argument
+/// [`crate::delivery::render_injection`] already makes about mail. A manager
+/// reading a bare paragraph of prose has to work out which engineer wrote it,
+/// which task it was, and whether anything is still running; all three are
+/// facts Jod already holds, so all three travel with the report.
+///
+/// It says how many tasks are still open rather than telling the manager what
+/// to conclude from that. Deciding whether the job is finished is the manager's
+/// job and `work_board` is where it is done properly — this only makes sure the
+/// question is asked.
+fn report_body(
+    who: Option<&str>,
+    title: Option<&str>,
+    task_id: &str,
+    report: &str,
+    work_id: Option<&str>,
+    last: bool,
+    still_open: Option<usize>,
+) -> String {
+    let engineer = who.unwrap_or("An engineer");
+    let task = match title {
+        Some(title) => format!("`{title}`"),
+        None => format!("task `{task_id}`"),
+    };
+    let standing = match (last, still_open) {
+        (true, _) => {
+            "That was the last open task on this board, so the work has closed itself. Nothing \
+             else is running on it. You are the one who says the job is done — read the board, \
+             then report what the whole job produced rather than relaying this message."
+                .to_string()
+        }
+        (false, Some(1)) => {
+            "One task is still open on this board, so the job is not finished yet.".to_string()
+        }
+        (false, Some(open)) => {
+            format!("{open} tasks are still open on this board, so the job is not finished yet.")
+        }
+        (false, None) => "This task belongs to no board Jod could read back.".to_string(),
+    };
+    let board = match work_id {
+        Some(work_id) => format!(" Call `work_board` with `{work_id}` before you answer."),
+        None => String::new(),
+    };
+    format!("{engineer} has finished {task} and reports:\n\n{report}\n\n{standing}{board}")
 }
 
 /// Who this MCP server is entitled to speak as.
@@ -4587,7 +5417,7 @@ mod tests {
     /// agree with any mistake made there, and the whole question is whether the
     /// line falls where the design says it does — reading is free and visible,
     /// delegating spends money now, scheduling spends it at 2am for ever.
-    const READ_ONLY_TOOLS: [&str; 15] = [
+    const READ_ONLY_TOOLS: [&str; 17] = [
         "list_agents",
         "schedule_list",
         "goal_list",
@@ -4614,11 +5444,20 @@ mod tests {
         // confined agent already learns from its own roots.
         "project_list",
         "project_current",
+        // Reading a board is reading. It is also the one question a manager
+        // must be able to answer without spending an engineer's turn on it.
+        "work_board",
+        // Reporting writes a row and nothing else: no agent, no branch, no
+        // money. It has to be here rather than a level up for a second reason —
+        // an engineer is spawned at whatever `open_work` was asked for, and one
+        // sent to read at `read_only` that cannot report is one whose work is
+        // invisible.
+        "complete_task",
     ];
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 15] = [
+    const DELEGATE_TOOLS: [&str; 18] = [
         "delegate",
         // Starting an assistant starts an agent, and one holding this same
         // level. Main runs at `Orchestrate`, which is above it, so main is
@@ -4653,13 +5492,26 @@ mod tests {
         // consequence: an untracked project is not inferrable, so the next
         // vague sentence about that repository resolves somewhere else.
         "project_untrack",
+        // Writing a fact spends nothing and wakes nobody, so it fails the test
+        // the level above is for. What it does change is what Jod believes, and
+        // `delegate` is where the design already puts "started by a person or
+        // by main": nothing built from outside reaches this far, because
+        // `Service::spawn_from_untrusted` caps it at read-only first.
+        "remember",
+        // Writing a plan starts no agent, and it still belongs here: it decides
+        // what agents are started to do and which files each of them may write,
+        // and completing the last task on the board it writes closes the work.
+        "plan_work",
+        // Linking a stack rewrites the base branch of every pull request it
+        // names, which is a visible change to open work — the same line
+        // `claim_worktree` sits on, and for the same reason.
+        "stack_pull_requests",
     ];
-    const ORCHESTRATE_TOOLS: [&str; 5] = [
+    const ORCHESTRATE_TOOLS: [&str; 4] = [
         "schedule_create",
         "schedule_pause",
         "schedule_run_now",
         "goal_create",
-        "remember",
     ];
 
     fn offered(access: ToolAccess) -> Vec<String> {
@@ -4789,10 +5641,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_above_your_access_is_not_performed_before_it_is_refused() {
-        // The belt to the braces: `remember` needs orchestrate, and a delegating
+        // The belt to the braces: `remember` needs delegate, and a read-only
         // agent calling it anyway must leave the store exactly as it found it.
         let store = Arc::new(Store::in_memory().unwrap());
-        let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::Delegate);
+        let server = Server::new(Jod::with_store(store.clone())).with_access(ToolAccess::ReadOnly);
         let answer = call(
             &server,
             "remember",
@@ -6414,7 +7266,9 @@ mod tests {
         /// holding the whole repository in its head.
         #[test]
         fn a_managers_brief_sends_a_new_instruction_to_whoever_is_free() {
-            let said = crate::orchestrator::manager_preamble("tetris");
+            // The cap is a separate sentence and this test is about none of
+            // it, so any non-zero one will do — `orchestrator` covers both arms.
+            let said = crate::orchestrator::manager_preamble("tetris", 3);
 
             assert!(
                 said.contains("free"),
@@ -8652,5 +9506,1045 @@ mod tests {
         .await;
         assert!(ended.is_ok());
         assert!(out.is_empty());
+    }
+
+    // ---- the board ---------------------------------------------------------
+
+    mod board {
+        use super::*;
+        use crate::projects::NewProject;
+        use crate::works::Origin;
+
+        /// A work with one engineer session on it, and a server speaking as
+        /// that engineer's run.
+        ///
+        /// No manager above it, which is the plainer of the two shapes and the
+        /// one every fixture that does not care about reporting wants.
+        ///
+        /// **The board is not empty when this returns.** `create_work_in` puts
+        /// the instruction on it as the first task, which is production's own
+        /// shape — a work always has the thing it was opened to do — and it is
+        /// what `plan_work` plans on top of. Every assertion below counts that
+        /// row rather than pretending a fresh work has nothing on it.
+        fn on_a_work(access: ToolAccess) -> (Arc<Store>, Server, String, String) {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let work = store.create_work_in("port the parser", None).unwrap();
+            let engineer = engineer_in(&store, &work.id, None, "run-1");
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(access)
+                .for_run("run-1");
+            (store, server, work.id, engineer)
+        }
+
+        /// A session attached to a work, hanging under `parent`, with a run
+        /// behind it — which is the join [`Server::raiser`] reads.
+        fn engineer_in(
+            store: &Store,
+            work_id: &str,
+            parent: Option<&str>,
+            run_id: &str,
+        ) -> String {
+            let id = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+                .unwrap()
+                .id;
+            store
+                .attach_conversation(&id, work_id, parent, Origin::Agent)
+                .unwrap();
+            store.append_prompt(&id, run_id, "do the thing").unwrap();
+            id
+        }
+
+        /// A catalogued project with a manager conversation, which is what
+        /// makes a conversation "a manager" as far as reporting is concerned.
+        fn with_a_manager(store: &Store, dir: &str) -> String {
+            std::fs::create_dir_all(dir).unwrap();
+            let project = store.add_project(NewProject::at(dir).named("tetris")).unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            manager
+        }
+
+        fn tool(name: &str) -> Tool {
+            catalogue()
+                .into_iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is not in the catalogue"))
+        }
+
+        /// The titles on a board, in the order the board is in.
+        fn titles(store: &Store, work_id: &str) -> Vec<String> {
+            store
+                .work_tasks(work_id)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.title)
+                .collect()
+        }
+
+        /// A plan written straight through the store, for the tests that are
+        /// about what happens to a board rather than about the tool that
+        /// writes one.
+        fn planned(store: &Store, work_id: &str, titles: &[&str]) -> Vec<crate::team::TeamTask> {
+            store
+                .plan_work(
+                    work_id,
+                    &crate::works::Plan {
+                        tasks: titles
+                            .iter()
+                            .map(|title| crate::works::PlannedTask {
+                                title: (*title).to_string(),
+                                paths: Vec::new(),
+                            })
+                            .collect(),
+                    },
+                )
+                .unwrap()
+        }
+
+        /// One task off a board, by the title it was planned under.
+        ///
+        /// By title rather than by index, because `plan_work` answers with the
+        /// **whole** board — the work's own instruction included — so position
+        /// in the returned list is not position in the plan.
+        fn task_called(board: &[crate::team::TeamTask], title: &str) -> String {
+            board
+                .iter()
+                .find(|t| t.title == title)
+                .unwrap_or_else(|| panic!("no task called `{title}` on this board"))
+                .id
+                .clone()
+        }
+
+        fn body(store: &Store, conversation: &str) -> String {
+            let queued = store.pending_for(conversation).unwrap();
+            assert_eq!(
+                queued.len(),
+                1,
+                "expected exactly one thing waiting for `{conversation}`, got {queued:?}"
+            );
+            queued[0].body.clone()
+        }
+
+        // ---- check 8 -------------------------------------------------------
+
+        /// Each of the four sits at the level its effect earns, and the two
+        /// that a manager reads or an engineer calls sit low enough to be
+        /// reachable at all.
+        ///
+        /// Asserted against the catalogue rather than against the table above,
+        /// because the table is what a human reads and this is what the
+        /// dispatcher enforces. The pair disagreeing is the bug.
+        #[test]
+        fn the_board_tools_sit_at_the_level_their_effect_earns() {
+            assert_eq!(tool("plan_work").needs, ToolAccess::Delegate);
+            assert_eq!(tool("work_board").needs, ToolAccess::ReadOnly);
+            assert_eq!(tool("complete_task").needs, ToolAccess::ReadOnly);
+            assert_eq!(tool("stack_pull_requests").needs, ToolAccess::Delegate);
+        }
+
+        /// A manager is spawned at `delegate`, so every tool it is told to call
+        /// has to be callable there. `complete_task` has a lower ceiling still:
+        /// an engineer may be opened at `read_only`, and one that cannot report
+        /// is one whose work never reaches anybody.
+        #[test]
+        fn a_manager_can_reach_all_four_and_an_engineer_can_always_report() {
+            for name in ["plan_work", "work_board", "complete_task", "stack_pull_requests"] {
+                assert!(
+                    allows(ToolAccess::Delegate, tool(name).needs),
+                    "a manager runs at `delegate` and cannot call `{name}`"
+                );
+            }
+            assert!(
+                allows(ToolAccess::ReadOnly, tool("complete_task").needs),
+                "an engineer opened read-only cannot report what it did"
+            );
+        }
+
+        /// The constraint has to be in the description, because that is where
+        /// the manager reads it. A manager that learns "two tasks cannot claim
+        /// one file" from a refusal has already spent a turn writing a plan
+        /// that was never going to be accepted.
+        #[test]
+        fn plan_work_states_the_rule_before_the_call_rather_than_after_it() {
+            let said = tool("plan_work").description.to_lowercase();
+            assert!(
+                said.contains("one task per engineer"),
+                "`plan_work` does not say how a plan is shaped: {said}"
+            );
+            assert!(
+                said.contains("refused"),
+                "`plan_work` does not say a colliding plan is refused, so the manager \
+                 finds out by being refused: {said}"
+            );
+            assert!(
+                said.contains("same file"),
+                "`plan_work` does not say what the collision is: {said}"
+            );
+            assert!(
+                said.contains("stack"),
+                "`plan_work` does not say that the order it is written in is the order the \
+                 pull requests stack in, which is the fact that makes plan order matter: \
+                 {said}"
+            );
+        }
+
+        // ---- planning and reading a board ----------------------------------
+
+        /// The ordinary path, end to end through the tool: a plan goes on, and
+        /// the board reads back the same rows with the same paths in the same
+        /// order.
+        #[tokio::test]
+        async fn a_plan_written_through_the_tool_is_the_board_the_tool_reads_back() {
+            let (_, server, work, _) = on_a_work(ToolAccess::Delegate);
+            let answer = call(
+                &server,
+                "plan_work",
+                json!({
+                    "work_id": work,
+                    "tasks": [
+                        { "title": "the board", "paths": ["core/src/works.rs"] },
+                        { "title": "the tools", "paths": ["core/src/mcp.rs"] },
+                        { "title": "read the harness docs" }
+                    ]
+                }),
+            )
+            .await;
+            assert!(!is_error_result(&answer), "{answer}");
+            let written: Value = serde_json::from_str(&said(&answer)).unwrap();
+
+            let read: Value = serde_json::from_str(&said(
+                &call(&server, "work_board", json!({ "work_id": work })).await,
+            ))
+            .unwrap();
+            assert_eq!(read["tasks"], written["tasks"], "the two disagree: {read}");
+            // Four, not three: the work's own instruction was already on the
+            // board and a plan is written under it.
+            assert_eq!(read["open"], json!(4), "{read}");
+            assert_eq!(read["done"], json!(0), "{read}");
+            assert_eq!(read["finished"], json!(false), "{read}");
+            let order: Vec<&str> = read["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["title"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                order,
+                vec!["port the parser", "the board", "the tools", "read the harness docs"],
+                "the board came back out of plan order: {read}"
+            );
+            assert_eq!(read["tasks"][1]["paths"], json!(["core/src/works.rs"]), "{read}");
+            assert_eq!(
+                read["tasks"][3]["paths"],
+                json!([]),
+                "a task that only reads must own nothing: {read}"
+            );
+        }
+
+        /// The refusal is the feature, so it has to arrive with both titles in
+        /// it. A manager told only "that plan is not allowed" has to guess
+        /// which two of five tasks collided.
+        #[tokio::test]
+        async fn planning_two_tasks_onto_one_file_is_refused_and_names_both_of_them() {
+            let (store, server, work, _) = on_a_work(ToolAccess::Delegate);
+            let answer = call(
+                &server,
+                "plan_work",
+                json!({
+                    "work_id": work,
+                    "tasks": [
+                        { "title": "the board", "paths": ["core/src"] },
+                        { "title": "the tools", "paths": ["core/src/mcp.rs"] }
+                    ]
+                }),
+            )
+            .await;
+            assert!(is_error_result(&answer), "the collision was written: {answer}");
+            let refusal = said(&answer);
+            assert!(refusal.contains("the board"), "{refusal}");
+            assert!(refusal.contains("the tools"), "{refusal}");
+            assert!(refusal.contains("core/src/mcp.rs"), "{refusal}");
+            assert_eq!(
+                titles(&store, &work),
+                vec!["port the parser".to_string()],
+                "a refused plan left half a board behind"
+            );
+        }
+
+        /// An unknown work reads back as an empty board, and an empty board is
+        /// what a finished job looks like. Refusing is the only answer that
+        /// does not let a mistyped id read as "there is nothing left to do".
+        #[tokio::test]
+        async fn reading_a_board_that_does_not_exist_is_refused_rather_than_answered_empty() {
+            let (_, server, _, _) = on_a_work(ToolAccess::ReadOnly);
+            let answer = call(&server, "work_board", json!({ "work_id": "no-such-work" })).await;
+            assert!(is_error_result(&answer), "{answer}");
+            assert!(said(&answer).contains("no-such-work"), "{}", said(&answer));
+        }
+
+        // ---- check 9 -------------------------------------------------------
+
+        /// `last` is the engineer's only way to know whether it is the one
+        /// holding the job up, so it must be false while anybody else is still
+        /// working and true exactly once.
+        #[tokio::test]
+        async fn completing_a_task_says_it_was_the_last_one_only_when_it_was() {
+            let (store, server, work, _) = on_a_work(ToolAccess::ReadOnly);
+            let board = planned(&store, &work, &["the board", "the tools"]);
+
+            let finish = |title: &str, report: &str| {
+                let id = task_called(&board, title);
+                let report = report.to_string();
+                let server = &server;
+                async move {
+                    let answer = call(
+                        server,
+                        "complete_task",
+                        json!({ "task_id": id, "report": report }),
+                    )
+                    .await;
+                    assert!(!is_error_result(&answer), "{answer}");
+                    serde_json::from_str::<Value>(&said(&answer)).unwrap()
+                }
+            };
+
+            let first = finish("the board", "the board carries paths now").await;
+            assert_eq!(first["last"], json!(false), "{first}");
+            assert_eq!(first["still_open"], json!(2), "{first}");
+            assert_eq!(first["task"], "the board", "{first}");
+
+            let second = finish("the tools", "four tools, all wired").await;
+            assert_eq!(second["last"], json!(false), "{second}");
+            assert_eq!(second["still_open"], json!(1), "{second}");
+
+            // The work's own instruction is a task like any other, and it is
+            // the one that empties the board.
+            let last = finish("port the parser", "and the parser is ported").await;
+            assert_eq!(last["last"], json!(true), "{last}");
+            assert_eq!(last["still_open"], json!(0), "{last}");
+
+            let read: Value = serde_json::from_str(&said(
+                &call(&server, "work_board", json!({ "work_id": work })).await,
+            ))
+            .unwrap();
+            assert_eq!(read["finished"], json!(true), "{read}");
+            assert_eq!(read["open"], json!(0), "{read}");
+        }
+
+        // ---- check 10 ------------------------------------------------------
+
+        /// D4.4, asserted from both sides: the report is in the manager's
+        /// queue, and no card exists anywhere.
+        ///
+        /// The card half is the one that matters. Cards cascade up the whole
+        /// ancestor chain, so an engineer's routine "I finished" raised as one
+        /// arrives on main's rail as well — which is the noise this change
+        /// exists to remove, and it would come back the moment somebody
+        /// reached for `raise_card` here because it was the nearest verb.
+        ///
+        /// **A task that is not the last one**, which is what "routine" means
+        /// here and the whole of what this test covers. Finishing the last task
+        /// on a board closes the work, and closing a work raises a card of its
+        /// own that does cascade — see
+        /// `the_last_report_closes_the_work_and_that_card_does_cascade`, which
+        /// is the other half and is deliberately a different test.
+        #[tokio::test]
+        async fn a_routine_report_reaches_its_manager_and_raises_no_card() {
+            let dir = std::env::temp_dir().join(format!("jod-mcp-report-{}", std::process::id()));
+            let store = Arc::new(Store::in_memory().unwrap());
+            let manager = with_a_manager(&store, &dir.to_string_lossy());
+            let work = store.create_work_in("port the parser", None).unwrap();
+            let engineer = engineer_in(&store, &work.id, Some(&manager), "run-1");
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::ReadOnly)
+                .for_run("run-1");
+            let task = store.add_work_task(&work.id, "the tools").unwrap();
+
+            let answer = call(
+                &server,
+                "complete_task",
+                json!({ "task_id": task, "report": "four tools, all wired" }),
+            )
+            .await;
+            assert!(!is_error_result(&answer), "{answer}");
+            let said_back: Value = serde_json::from_str(&said(&answer)).unwrap();
+            assert_eq!(said_back["reported_to"], json!(manager), "{said_back}");
+            assert_eq!(said_back["delivered"], json!(true), "{said_back}");
+
+            let delivered = body(&store, &manager);
+            assert!(delivered.contains("four tools, all wired"), "{delivered}");
+            assert!(
+                delivered.contains("the tools"),
+                "the manager cannot tell which task this was: {delivered}"
+            );
+            assert!(
+                delivered.contains("work_board"),
+                "the manager is not told how to check the board it now has to read: {delivered}"
+            );
+            assert!(
+                store.pending_for(&engineer).unwrap().is_empty(),
+                "the report was delivered back to its own author"
+            );
+
+            for conversation in [&manager, &engineer] {
+                let cards = store
+                    .cards(&Query {
+                        conversation_id: Some(conversation.clone()),
+                        ..Query::default()
+                    })
+                    .unwrap();
+                assert!(
+                    cards.is_empty(),
+                    "reporting raised a card, which cascades to main: {cards:?}"
+                );
+            }
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// The other half, said plainly rather than left to be discovered.
+        ///
+        /// D4.4 stops the *routine* report travelling as a card and does not
+        /// touch the cascade, deliberately: teaching `cards_in` to stop at a
+        /// manager would silence a blocked engineer's question, which is the
+        /// one message that must always reach Reljod. So finishing the last
+        /// task still puts something on main's rail — not the report, but the
+        /// work's own closing card, raised by `close_work` against the work's
+        /// root session.
+        ///
+        /// That is within spec and it is worth a test rather than a sentence,
+        /// because "an engineer's report raises no card" is true and reads as
+        /// "nothing an engineer does raises a card", which is not.
+        #[tokio::test]
+        async fn the_last_report_closes_the_work_and_that_card_does_cascade() {
+            let dir = std::env::temp_dir().join(format!("jod-mcp-closing-{}", std::process::id()));
+            let store = Arc::new(Store::in_memory().unwrap());
+            let manager = with_a_manager(&store, &dir.to_string_lossy());
+            let work = store.create_work_in("port the parser", None).unwrap();
+            let engineer = engineer_in(&store, &work.id, Some(&manager), "run-1");
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::ReadOnly)
+                .for_run("run-1");
+            // The work's own instruction is its only task, so this one is the
+            // last one.
+            let task = store.work_tasks(&work.id).unwrap()[0].id.clone();
+
+            let answer = call(
+                &server,
+                "complete_task",
+                json!({ "task_id": task, "report": "the parser is ported" }),
+            )
+            .await;
+            let said_back: Value = serde_json::from_str(&said(&answer)).unwrap();
+            assert_eq!(said_back["last"], json!(true), "{said_back}");
+
+            // The report itself still went to the manager and still raised
+            // nothing.
+            assert!(body(&store, &manager).contains("the parser is ported"));
+
+            // What the manager does see on its rail is the work closing, which
+            // cascaded up from the engineer's conversation. Not the report.
+            let cascaded = store
+                .cards(&Query {
+                    subtree_of: Some(manager.clone()),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert_eq!(cascaded.len(), 1, "expected only the closing card: {cascaded:?}");
+            assert_eq!(cascaded[0].conversation_id, engineer);
+            assert!(
+                cascaded[0].title.starts_with("work "),
+                "that is not the work's closing card: {:?}",
+                cascaded[0].title
+            );
+            assert!(
+                !cascaded[0].body.contains("the parser is ported"),
+                "the report travelled as a card after all: {:?}",
+                cascaded[0].body
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// The nearest manager, not the first one found. An engineer that
+        /// opened work of its own reports to the manager that owns the
+        /// repository rather than to whatever sits above that.
+        #[tokio::test]
+        async fn a_report_climbs_only_as_far_as_the_nearest_manager() {
+            let dir = std::env::temp_dir().join(format!("jod-mcp-nearest-{}", std::process::id()));
+            let store = Arc::new(Store::in_memory().unwrap());
+            let manager = with_a_manager(&store, &dir.to_string_lossy());
+            let work = store.create_work_in("port the parser", None).unwrap();
+            let senior = engineer_in(&store, &work.id, Some(&manager), "run-1");
+            engineer_in(&store, &work.id, Some(&senior), "run-2");
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::ReadOnly)
+                .for_run("run-2");
+            let task = store.add_work_task(&work.id, "the tools").unwrap();
+
+            let answer = call(
+                &server,
+                "complete_task",
+                json!({ "task_id": task, "report": "done" }),
+            )
+            .await;
+            let said_back: Value = serde_json::from_str(&said(&answer)).unwrap();
+            assert_eq!(
+                said_back["reported_to"],
+                json!(manager),
+                "a report stopped at the session that spawned it instead of climbing to the \
+                 manager: {said_back}"
+            );
+            assert!(
+                store.pending_for(&senior).unwrap().is_empty(),
+                "the session in between was told as well"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        // ---- check 11 ------------------------------------------------------
+
+        /// No manager above it is the ordinary state of an engineer main
+        /// started directly, and of every test. A report with no addressee is
+        /// the failure this whole change exists to remove, so it goes to the
+        /// parent rather than nowhere.
+        #[tokio::test]
+        async fn a_report_with_no_manager_above_it_goes_to_the_parent_conversation() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let work = store.create_work_in("port the parser", None).unwrap();
+            let parent = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+                .unwrap()
+                .id;
+            let engineer = engineer_in(&store, &work.id, Some(&parent), "run-1");
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::ReadOnly)
+                .for_run("run-1");
+            let task = store.add_work_task(&work.id, "the tools").unwrap();
+
+            let answer = call(
+                &server,
+                "complete_task",
+                json!({ "task_id": task, "report": "four tools, all wired" }),
+            )
+            .await;
+            assert!(!is_error_result(&answer), "no manager was treated as a failure: {answer}");
+            let said_back: Value = serde_json::from_str(&said(&answer)).unwrap();
+            assert_eq!(said_back["reported_to"], json!(parent), "{said_back}");
+            assert!(body(&store, &parent).contains("four tools, all wired"));
+            assert!(store.pending_for(&engineer).unwrap().is_empty());
+        }
+
+        /// An empty report finishes the task and tells the manager nothing, so
+        /// it is refused before the task is marked off rather than after.
+        #[tokio::test]
+        async fn a_report_with_nothing_in_it_is_refused_before_the_task_is_marked_done() {
+            let (store, server, work, _) = on_a_work(ToolAccess::ReadOnly);
+            let task = store.add_work_task(&work, "the tools").unwrap();
+            let answer = call(
+                &server,
+                "complete_task",
+                json!({ "task_id": task, "report": "   " }),
+            )
+            .await;
+            // A malformed argument is a protocol error rather than a tool
+            // result, which is how every other `BadParams` here answers.
+            assert_eq!(error_code(&answer), INVALID_PARAMS, "{answer}");
+            assert!(
+                store
+                    .work_tasks(&work)
+                    .unwrap()
+                    .iter()
+                    .all(|t| t.status == "open"),
+                "the task was completed by a call that was refused"
+            );
+        }
+
+        // ---- the column an engineer is spawned onto ------------------------
+
+        /// What `conversations.task_id` holds, read straight.
+        ///
+        /// A read, not a write. Nothing in these tests sets the column by
+        /// hand — that is the shape of test that let a column with no writer
+        /// look covered — so every value this returns was put there by
+        /// [`spawn_onto_first_task`], which is the production writer.
+        fn task_of(store: &Store, conversation_id: &str) -> Option<String> {
+            let conn = store.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT task_id FROM conversations WHERE id = ?1",
+                rusqlite::params![conversation_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+
+        /// Everything opening a work does short of starting a process, which
+        /// is exactly what `Server::open_work` does before it writes the
+        /// column.
+        ///
+        /// `orchestrator::prepare_work` is the real thing — it creates the
+        /// work, puts the instruction on its board, and attaches the session —
+        /// and it exists as a separate function precisely so this half can be
+        /// exercised without a supervisor. The half that cannot be reached from
+        /// here is the spawn, and the tool's own call to
+        /// [`spawn_onto_first_task`] sits on the far side of it.
+        fn opened(store: &Store, instruction: &str) -> (String, String) {
+            let prepared = crate::orchestrator::prepare_work(
+                store,
+                &crate::orchestrator::Opening::new(instruction, "/tmp"),
+            )
+            .unwrap();
+            (prepared.work.id, prepared.conversation_id)
+        }
+
+        /// The engineer a work opens is spawned onto that work's first task,
+        /// and the writer says which one it wrote.
+        ///
+        /// The first task is the work's own instruction — `create_work_in` puts
+        /// it on the board — so a work always has one and there is no case
+        /// where an engineer opens a work and owns nothing.
+        #[test]
+        fn opening_a_work_spawns_its_session_onto_the_works_first_task() {
+            let store = Store::in_memory().unwrap();
+            let (work, engineer) = opened(&store, "port the parser");
+            assert_eq!(
+                task_of(&store, &engineer),
+                None,
+                "the column starts empty, so the assertion below is about the writer"
+            );
+
+            let wrote = spawn_onto_first_task(&store, &work, &engineer, &[]);
+
+            let board = store.work_tasks(&work).unwrap();
+            assert_eq!(board.len(), 1, "a fresh work carries its instruction: {board:?}");
+            assert_eq!(wrote.as_deref(), Some(board[0].id.as_str()));
+            assert_eq!(task_of(&store, &engineer).as_deref(), Some(board[0].id.as_str()));
+            assert_eq!(board[0].title, "port the parser");
+        }
+
+        /// The wire, proved through the thing on the other end of it.
+        ///
+        /// `Store::stack_for_work` ranks a pull request by its opener's task
+        /// position and sorts every pull request with no task above the ranked
+        /// ones. With the column written, the engineer's pull request is ranked
+        /// and sits at the bottom of the stack; with the column null, both fall
+        /// through to `detected_at_ms` and come back in the order they were
+        /// opened.
+        ///
+        /// **They are opened in that failing order on purpose.** The unranked
+        /// one is detected first, so a null column produces exactly the
+        /// reversal this asserts against — which is what makes this a test of
+        /// the writer rather than a test that two rows come back.
+        #[test]
+        fn the_task_a_session_is_spawned_onto_is_what_orders_its_pull_request() {
+            let store = Store::in_memory().unwrap();
+            let (work, engineer) = opened(&store, "port the parser");
+            spawn_onto_first_task(&store, &work, &engineer, &[]);
+
+            // A session on the same work that nobody spawned onto a task —
+            // every session that existed before the column had a writer.
+            let stranger = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+                .unwrap()
+                .id;
+            for (number, conversation) in [(41, &stranger), (42, &engineer)] {
+                store
+                    .note_pull_requests(
+                        &format!("https://github.com/Reljod/Jod/pull/{number}"),
+                        &crate::prs::Attribution {
+                            work_id: Some(work.clone()),
+                            conversation_id: Some(conversation.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+
+            let crate::prs::Stacking::Ready(stack) = store.stack_for_work(&work).unwrap() else {
+                panic!("two pull requests are a stack");
+            };
+            let numbers: Vec<i64> = stack.prs.iter().map(|pr| pr.number.unwrap()).collect();
+            assert_eq!(
+                numbers,
+                vec![42, 41],
+                "the ranked pull request did not sink to the bottom of the stack, which is                  what a null `conversations.task_id` looks like: {numbers:?}"
+            );
+        }
+
+        /// Continuing an engineer does not move it to a new task, so nothing on
+        /// that path may touch the column.
+        ///
+        /// The call itself cannot get as far as a spawn from here — that needs
+        /// a supervisor — and the guard does not depend on it doing so. What is
+        /// asserted is that the column reads the same afterwards whatever
+        /// `continue_agent` decided, which is the property a future change to
+        /// that tool would break.
+        #[tokio::test]
+        async fn continuing_an_agent_leaves_the_task_it_was_spawned_onto_alone() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let (work, engineer) = opened(&store, "port the parser");
+            let task = spawn_onto_first_task(&store, &work, &engineer, &[])
+                .expect("a fresh work has a first task");
+            store.append_prompt(&engineer, "run-1", "do the thing").unwrap();
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-1");
+
+            call(
+                &server,
+                "continue_agent",
+                json!({ "run_id": "run-1", "prompt": "carry on" }),
+            )
+            .await;
+
+            assert_eq!(
+                task_of(&store, &engineer).as_deref(),
+                Some(task.as_str()),
+                "continuing an engineer moved it off the task it was spawned onto"
+            );
+        }
+
+        // ---- where the manager put this engineer ---------------------------
+
+        /// A settled `open_work` call, without a supervisor anywhere near it.
+        ///
+        /// `Server::opening_for` is where every placement argument is read,
+        /// validated and refused, and it is split from the spawn precisely so
+        /// this can be driven. A checkout is always passed: the fixture's
+        /// conversation has no roots and no project, and resolving one is a
+        /// different refusal from the ones being tested here.
+        fn settle(args: Value) -> Result<Planned, ToolError> {
+            let (_, server, _) = working(ToolAccess::Delegate);
+            let raiser = server.raiser().unwrap();
+            let mut args = args;
+            args["instruction"] = json!("port the parser");
+            // Only when the caller did not name one. The fixture's
+            // conversation has no roots and no project, so a call with no
+            // checkout is refused for a reason none of these tests is about —
+            // but a test that brought its own git repository must keep it.
+            if args.get("checkout").is_none() {
+                args["checkout"] = json!("/tmp");
+            }
+            server.opening_for(&raiser, &args)
+        }
+
+        fn placement_of(args: Value) -> Option<crate::leases::Placement> {
+            settle(args).expect("this call should have settled").opening.placement
+        }
+
+        fn refusal(args: Value) -> String {
+            match settle(args) {
+                Ok(planned) => panic!(
+                    "this call should have been refused, and settled as {:?}",
+                    planned.opening.placement
+                ),
+                Err(ToolError::BadParams(said)) | Err(ToolError::Refused(said)) => said,
+                Err(other) => panic!("refused in the wrong shape: {other:?}"),
+            }
+        }
+
+        /// Every placement the manager's brief names is one the schema will
+        /// take.
+        ///
+        /// The brief tells every manager that `open_work` takes a placement and
+        /// spells out all four. `obj()` emits no `additionalProperties: false`,
+        /// so a value the schema does not offer is accepted, ignored and
+        /// answered with a success — which is the exact failure this pair of
+        /// lists exists to keep out.
+        #[test]
+        fn open_work_offers_every_placement_the_managers_brief_names() {
+            let schema = tool("open_work").schema;
+            let offered: Vec<&str> = schema["properties"]["placement"]["enum"]
+                .as_array()
+                .expect("`placement` is not an enum in the schema")
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                offered,
+                crate::leases::PLACEMENT_IDS.to_vec(),
+                "the schema and the placements have drifted apart"
+            );
+            for named in ["share_with", "paths"] {
+                assert!(
+                    schema["properties"][named].is_object(),
+                    "`open_work` does not take `{named}`, so a manager passing it is ignored"
+                );
+            }
+        }
+
+        /// **The regression guard on the default.** Absent is `None`, not
+        /// `Explore`, and the difference is a whole paragraph of the session's
+        /// brief: an unplaced session is told to call `claim_worktree` when it
+        /// needs to write, and an `explore` one is told it was opened to look
+        /// and must report instead.
+        #[tokio::test]
+        async fn opening_a_work_with_no_placement_leaves_it_unplaced_rather_than_exploring() {
+            assert_eq!(placement_of(json!({})), None);
+        }
+
+        #[tokio::test]
+        async fn every_placement_a_manager_can_name_reaches_the_opening() {
+            use crate::leases::Placement;
+            assert_eq!(
+                placement_of(json!({ "placement": "explore" })),
+                Some(Placement::Explore)
+            );
+            assert_eq!(
+                placement_of(json!({ "placement": "worktree" })),
+                Some(Placement::Worktree)
+            );
+            assert_eq!(
+                placement_of(json!({ "placement": "share", "share_with": "work-1" })),
+                Some(Placement::Share { work_id: "work-1".into() })
+            );
+        }
+
+        /// `share` means joining a worktree that belongs to a named work, so a
+        /// share with nobody to share with is refused rather than turned into
+        /// an empty work id that fails later somewhere less explicable.
+        #[tokio::test]
+        async fn sharing_without_saying_whose_worktree_is_refused_by_name() {
+            let said = refusal(json!({ "placement": "share" }));
+            assert!(said.contains("share_with"), "{said}");
+            assert!(
+                said.contains("worktree"),
+                "the refusal does not offer the alternative: {said}"
+            );
+        }
+
+        /// The mirror of it, and the one that would otherwise be silent. A
+        /// manager that names a lender and forgets the placement gets an
+        /// ordinary engineer on a branch of its own, is told the work opened,
+        /// and has nothing in the answer to read that from.
+        #[tokio::test]
+        async fn naming_a_worktree_to_join_without_asking_to_share_is_refused() {
+            let said = refusal(json!({ "share_with": "work-1" }));
+            assert!(said.contains("share_with"), "{said}");
+            assert!(said.contains("share"), "{said}");
+        }
+
+        /// A misspelt placement is refused rather than read as the nearest
+        /// thing. Quietly becoming `explore` would leave an engineer that was
+        /// meant to write with no writable root, and the first anyone heard of
+        /// it would be that engineer reporting it could not do its task.
+        #[tokio::test]
+        async fn a_placement_nobody_defined_is_refused_and_lists_the_ones_that_exist() {
+            let said = refusal(json!({ "placement": "wherever" }));
+            assert!(said.contains("wherever"), "{said}");
+            for id in crate::leases::PLACEMENT_IDS {
+                assert!(said.contains(id), "the refusal leaves out `{id}`: {said}");
+            }
+        }
+
+        /// Paths are tidied into the one form everything downstream compares,
+        /// and the two shapes that would make ownership unenforceable are
+        /// refused at the boundary rather than stored.
+        #[tokio::test]
+        async fn the_files_an_engineer_owns_are_normalised_and_the_unenforceable_ones_refused() {
+            let planned = settle(json!({ "paths": ["./core/src/mcp.rs", "cli/src/tui/"] }))
+                .expect("both of those are ordinary prefixes");
+            assert_eq!(planned.paths, vec!["core/src/mcp.rs", "cli/src/tui"]);
+
+            let absolute = refusal(json!({ "paths": ["/Users/reljod/Jod/core"] }));
+            assert!(absolute.contains("/Users/reljod/Jod/core"), "{absolute}");
+            let escaping = refusal(json!({ "paths": ["core/../../elsewhere"] }));
+            assert!(escaping.contains("elsewhere"), "{escaping}");
+        }
+
+        /// A git checkout, made where a test may make one.
+        fn a_checkout(name: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!("jod-mcp-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            git(&dir, &["init", "--quiet"]);
+            std::fs::canonicalize(&dir).unwrap()
+        }
+
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git is on this machine");
+            assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        }
+
+        /// `direct` on a repository that satisfies all three conditions is
+        /// allowed through, which is the half that proves the gate is a gate
+        /// rather than a refusal wearing one.
+        #[tokio::test]
+        async fn direct_is_allowed_in_a_fresh_clean_checkout_with_no_remote() {
+            let dir = a_checkout("direct-ok");
+            let planned = settle(json!({
+                "placement": "direct",
+                "checkout": dir.to_string_lossy(),
+            }))
+            .expect("no remote, no other work, nothing uncommitted");
+            assert_eq!(planned.opening.placement, Some(crate::leases::Placement::Direct));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// Check 21. Every failing condition at once, and `worktree` named as
+        /// the thing to ask for instead.
+        ///
+        /// All of them together rather than the first, because a manager told
+        /// only about the remote fixes that, asks again, and is then told about
+        /// the uncommitted file — two turns spent learning two facts that were
+        /// both true at the same moment.
+        #[tokio::test]
+        async fn direct_on_a_checkout_that_fails_its_conditions_is_refused_with_all_of_them() {
+            let dir = a_checkout("direct-no");
+            git(&dir, &["remote", "add", "origin", "https://github.com/Reljod/Jod.git"]);
+            std::fs::write(dir.join("scratch.txt"), "uncommitted").unwrap();
+
+            let said = refusal(json!({
+                "placement": "direct",
+                "checkout": dir.to_string_lossy(),
+            }));
+            assert!(said.contains("remote"), "the remote is not named: {said}");
+            assert!(
+                said.contains("uncommitted") || said.contains("scratch.txt"),
+                "the dirty tree is not named: {said}"
+            );
+            assert!(
+                said.contains("worktree"),
+                "the refusal does not say what to ask for instead: {said}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// The files a manager gave an engineer land on the task it was spawned
+        /// onto, and come back through the reader the rest of the crate uses.
+        ///
+        /// **The round trip is the assertion.** `works::paths_to_column` is
+        /// private to its module, so the encoder here is a second one, and two
+        /// encoders that agree on paper are two that diverge the first time one
+        /// changes. `work_tasks` decodes with `paths_from_column`, so this
+        /// fails the moment they stop matching.
+        #[test]
+        fn the_files_an_engineer_owns_are_recorded_on_the_task_it_is_spawned_onto() {
+            let store = Store::in_memory().unwrap();
+            let (work, engineer) = opened(&store, "port the parser");
+            let owned = vec!["core/src/mcp.rs".to_string(), "cli/src/tui".to_string()];
+
+            let task = spawn_onto_first_task(&store, &work, &engineer, &owned)
+                .expect("a fresh work has a first task");
+
+            let board = store.work_tasks(&work).unwrap();
+            assert_eq!(board[0].id, task);
+            assert_eq!(
+                board[0].paths, owned,
+                "the paths did not survive the column: {board:?}"
+            );
+        }
+
+        /// An engineer that owns nothing writes nothing to the column, which is
+        /// the honest state for anything exploratory and the state every task
+        /// written before there were paths is already in.
+        #[test]
+        fn an_engineer_given_no_files_leaves_its_task_claiming_nothing() {
+            let store = Store::in_memory().unwrap();
+            let (work, engineer) = opened(&store, "read the harness docs");
+            spawn_onto_first_task(&store, &work, &engineer, &[]);
+            assert!(store.work_tasks(&work).unwrap()[0].paths.is_empty());
+        }
+
+        // ---- checks 29 and 30 ----------------------------------------------
+
+        /// One pull request is not a stack, and the tool says so in the
+        /// module's own words rather than in a second set of them.
+        #[tokio::test]
+        async fn stacking_a_work_with_one_pull_request_is_refused_and_says_it_found_one() {
+            let (store, server, work, _) = on_a_work(ToolAccess::Delegate);
+            store
+                .note_pull_requests(
+                    "https://github.com/Reljod/Jod/pull/41",
+                    &crate::prs::Attribution {
+                        work_id: Some(work.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            let answer = call(&server, "stack_pull_requests", json!({ "work_id": work })).await;
+            assert!(is_error_result(&answer), "a stack of one was linked: {answer}");
+            assert_eq!(
+                said(&answer),
+                crate::prs::stack_refusal(1),
+                "the tool wrote its own refusal instead of using the module's"
+            );
+        }
+
+        /// Plan order, not finish order, all the way out through the tool.
+        ///
+        /// The pull requests are opened backwards on purpose. Opening them in
+        /// plan order passes against a timestamp sort too, so it would prove an
+        /// ordering exists without proving it came from the plan — which is the
+        /// only part worth asserting, because finish order is the plausible
+        /// wrong answer and it produces a stack whose bases are wrong while
+        /// looking perfectly fine.
+        #[tokio::test]
+        async fn the_stack_a_manager_is_handed_is_in_plan_order_not_finish_order() {
+            let (store, server, work, _) = on_a_work(ToolAccess::Delegate);
+            let board = planned(&store, &work, &["the board", "placement", "stacking"]);
+
+            // One engineer per planned task, and they finish 3, 1, 2.
+            for (number, title) in [(43, "stacking"), (41, "the board"), (42, "placement")] {
+                let conversation = store
+                    .new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
+                    .unwrap()
+                    .id;
+                store
+                    .write(|tx| {
+                        tx.execute(
+                            "UPDATE conversations SET task_id = ?2 WHERE id = ?1",
+                            rusqlite::params![conversation, task_called(&board, title)],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+                store
+                    .note_pull_requests(
+                        &format!("https://github.com/Reljod/Jod/pull/{number}"),
+                        &crate::prs::Attribution {
+                            work_id: Some(work.clone()),
+                            conversation_id: Some(conversation),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+
+            let answer = call(&server, "stack_pull_requests", json!({ "work_id": work })).await;
+            assert!(!is_error_result(&answer), "{answer}");
+            let stacked: Value = serde_json::from_str(&said(&answer)).unwrap();
+            let numbers: Vec<i64> = stacked["bottom_to_top"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pr| pr["number"].as_i64().unwrap())
+                .collect();
+            assert_eq!(
+                numbers,
+                vec![41, 42, 43],
+                "the stack came back in finish order: {stacked}"
+            );
+            assert_eq!(stacked["count"], json!(3), "{stacked}");
+            assert_eq!(
+                stacked["command"], "gh stack link 41 42 43",
+                "the command takes its argument order literally: {stacked}"
+            );
+            assert!(
+                stacked["instruction"]
+                    .as_str()
+                    .unwrap()
+                    .contains("base branch"),
+                "the manager is not warned that linking rewrites a base: {stacked}"
+            );
+        }
     }
 }
