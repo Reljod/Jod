@@ -2131,8 +2131,21 @@ async fn perform(
                     "{NO_STORE} — this preference lasts the session only"
                 )],
             };
+            // Setting one preference is one sentence about one preference, so
+            // it replaces that preference's last line the way `/mode` does —
+            // `/thinking` four times is one line saying what thinking is now.
+            // The other two forms are tables and stay as they are, and so does
+            // a set that grew a second line because it had to forget a model
+            // belonging to the harness just left.
+            let one = match &request {
+                config::Request::Set(pref, _) if lines.len() == 1 => Some(pref.name()),
+                _ => None,
+            };
             for line in lines {
-                app.push(Entry::Notice(line));
+                match one {
+                    Some(pref) => app.push_setting(pref, line),
+                    None => app.push(Entry::Notice(line)),
+                }
             }
         }
         // The other multi-line answer, for the same reason: a list of
@@ -3351,7 +3364,10 @@ fn on_key(
             }
             let said = app.cycle_mode();
             if app.workspace == Workspace::Chat {
-                app.push(Entry::Notice(said));
+                // Over the line the last press left, not under it: this is the
+                // key you hold down to walk the four modes, and each press
+                // makes the one before it wrong.
+                app.push_setting(config::Pref::Mode.name(), said);
             }
             return None;
         }
@@ -6180,7 +6196,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             // some later turn overwrote it. Two lines disagreeing about the
             // model is indistinguishable from the switch not working.
             app.reported_model = None;
-            app.push(Entry::Notice(said));
+            app.push_setting(config::Pref::Model.name(), said);
             return Some(remember_model(model));
         }
         // Naming a mode sets it; naming none moves to the next, so `/mode` and
@@ -6193,7 +6209,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 }
                 None => app.cycle_mode(),
             };
-            app.push(Entry::Notice(said));
+            app.push_setting(config::Pref::Mode.name(), said);
             // `app.mode` rather than `mode`: cycling picked one, and this has to
             // record the mode arrived at, not the argument that was absent.
             return Some(remember_mode(app.mode));
