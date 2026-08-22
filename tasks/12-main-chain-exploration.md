@@ -290,6 +290,20 @@ options worth weighing are a higher limit, a limit that counts something other
 than raw added lines, or accepting that this repo's normal change needs a human
 and removing the expectation that agents merge their own work.
 
+**Three live instances from a single night, which is a stronger case than the
+historical sample above.** All three are correct, CI-green, independently
+reviewed, and blocked by nothing except the line count:
+
+| PR | Code lines | Other findings from the gate |
+|---|---|---|
+| #237 | 1133 | none |
+| #239 | 1017 | none |
+| #252 | 686 | none |
+
+#252 is a fix for X5 in this very file. So the limit is now blocking the repair
+of a bug the same night it was reported, and the gate has nothing else to say
+against any of the three.
+
 Check: none — this is a decision. Green is a line in `docs/decisions.md` saying
 what the limit is for and why it is the number it is.
 
@@ -411,7 +425,26 @@ AGY.
 ---
 
 ## X7. Changing a role's harness leaves the conversation's old model in place, and every turn then fails
-Status: **open** · Severity: critical · Owner: —
+Status: **fixed — PR #254 (`dcef647`), merged** · Severity: critical · Owner: the pull-request session
+
+**How it was fixed.** `prefer_conversation_settings` now takes the
+conversation's model only when the run is going to the conversation's own
+harness. When the two disagree the model is dropped, the harness picks its own
+default, and a line on stderr says so. An unrecognised harness id leaves the
+model alone, on the grounds that not knowing what a row says is not the same as
+knowing it disagrees. Dropping rather than refusing matches what `/harness`
+already does, and `docs/harness-config.md` now states the rule as covering any
+harness change rather than that one command.
+
+**Worth recording: PR #237 does not fix this, though it looked as though it
+might.** That was checked before the fix was written rather than assumed. #237
+changes `apply_role` alone — its `if req.model.is_none()` branch, so that a role
+row naming a harness the request is not going to no longer contributes its own
+model. X7 lives in `prefer_conversation_settings`, which #237 does not touch,
+and the foreign model in the failure below came from the *conversation* row and
+was written **after** `apply_role` had already run. The two compose rather than
+conflict: #237's hunk is near `core/src/service.rs:475`, this one near `:394`.
+The guess that "#237 will probably cover it" was reasonable and it was wrong.
 
 Setting the `main` role's harness to `agy` in the roles panel — the supported
 path, done with the keyboard, exactly as the panel invites — breaks the main
@@ -468,9 +501,23 @@ $ jod main --wait "Say hello in one word."
 
 Both produced `agy | failed` runs with the message above.
 
-**A smaller thing visible in the same line, worth fixing alongside:** the
-command line carries `--effort ""`. An empty string is being passed as a flag
-value rather than the flag being omitted.
+**Correction — `--effort ""` was not a second bug, and this finding was wrong
+about it.** The original text of X7 claimed that the `--effort ""` visible in
+the error above showed an empty string being passed as a flag value. It does
+not. Checked against the installed binary rather than reasoned from the code:
+`agy --model "opencode/deepseek-v4-flash-free" -p "hi"`, with no effort flag
+given at all, prints the identical message with `--effort ""` in it. AGY echoes
+its own effort setting as part of its error text, and it is empty because
+nothing set it. All three of Jod's adapters gate the flag behind
+`req.effort.and_then(|e| e.flag_value(kind))`, so `None` emits nothing.
+
+The claim is corrected here rather than deleted because the mistake is the
+instructive part: it was read out of a harness's error text and filed without
+being reproduced, and a phantom bug in a finding is a fix waiting to be written
+against working code. This repo's own task index opens by describing a near-miss
+of exactly that shape. A test asserting `--effort` is absent when no effort is
+set has since been added, so a real regression would now be caught in the suite
+instead of in a harness error message.
 
 **This is reachable in two keystrokes from a working console and leaves it
 unusable**, which is what makes it critical rather than merely wrong. The panel
@@ -990,6 +1037,16 @@ Status: **open** · Severity: critical · Owner: —
 The mechanism behind half of X14, established from the code and confirmed
 against a live store. It is small, self-contained, and can be fixed without
 answering any of X14's harder questions.
+
+**This is about code that has not merged yet, and that matters for who fixes
+it.** Neither `finish_review` nor `under_review_for` exists on `main` — checked
+with `git grep` against `origin/main`, both return nothing. They live only on
+the branch this whole exploration was run against, which is PR #247's. So
+nobody should go looking for this on main, and the fix belongs to that pull
+request rather than to a separate one landing on top of it. Being found before
+the branch merges is the good case: the sweep can be wired up as part of the
+feature that needs it, instead of shipping and being discovered by somebody
+whose urgent message vanished.
 
 **`finish_review` is the one way out of `reviewing`, and every one of its
 callers covers a doorman that never started.** All three are in
