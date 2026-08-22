@@ -37,10 +37,6 @@ mod secret;
 pub mod sessions;
 mod text;
 mod todo;
-/// Public for `examples/screens.rs`, which compiles this module in by path and
-/// renders the traffic log off a real database — the same reason [`data`] and
-/// [`ui`] are public. Nothing outside the TUI links against this crate.
-pub mod traffic;
 mod yank;
 pub mod ui;
 mod workspace;
@@ -4666,7 +4662,6 @@ fn on_workspace_key(
         Workspace::Tasks => on_task_key(app, key),
         Workspace::Activity => on_activity_key(app, key),
         Workspace::Team => on_team_key(app, key),
-        Workspace::Traffic => on_traffic_key(app, key),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
 }
@@ -4719,55 +4714,6 @@ fn on_preview_wheel(app: &mut App, shape: ui::Preview, notches: i32) {
     let last = i32::from(shape.max_scroll());
     let at = i32::from(app.preview_scroll.min(shape.max_scroll()));
     app.preview_scroll = at.saturating_add(notches.saturating_mul(3)).clamp(0, last) as u16;
-}
-
-/// The traffic log's own verbs.
-///
-/// Two of them, because `/` and `S` are the spine's and are already handled
-/// above — which is the point of G5.S5: narrowing this list works exactly as
-/// narrowing every other one does.
-///
-/// No I/O, like every key handler here. `f` and `⏎` change what the *next*
-/// render draws out of state the tick already loaded; nothing reaches the
-/// store, so both are testable without a runtime.
-fn on_traffic_key(app: &mut App, key: KeyEvent) -> Option<Action> {
-    match key.code {
-        // The message in full, in the transcript rather than in an overlay: a
-        // message is prose of unknown length, and the transcript is the one
-        // pane in this program that scrolls.
-        KeyCode::Enter => {
-            let held = app.selected_is_held();
-            let envelope = app.selected_message()?.clone();
-            let mut said = format!(
-                "{} → {} · {} · depth {}\n{}",
-                envelope.message.from,
-                envelope.message.to,
-                traffic::state_word(&envelope, held),
-                envelope.depth,
-                envelope.message.text
-            );
-            // The reason last, so it is the thing left on screen. A refusal
-            // that printed its state and buried its cause would be the silence
-            // A8 exists to prevent, one layer along.
-            if let Some(trouble) = traffic::trouble(&envelope, held) {
-                said.push_str(&format!("\n{trouble}"));
-            }
-            app.push(Entry::Notice(said));
-            None
-        }
-        // The state cycle, spelled as the rail's `f` is. Said out loud, because
-        // a filter nobody can see is a screen that looks empty for no reason.
-        KeyCode::Char('f') => {
-            app.traffic_shown = app.traffic_shown.next();
-            app.reconcile();
-            app.push(Entry::Notice(format!(
-                "showing {}",
-                app.traffic_shown.label()
-            )));
-            None
-        }
-        _ => None,
-    }
 }
 
 /// The tree's own keys. `Some` means the tree took the key.
@@ -4884,20 +4830,6 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
             app.tree.collapse_all(&forest);
             handled(None)
         }
-        // The archives. Off by default and off again after looking, because a
-        // tree holding everything ever done is one people stop reading.
-        KeyCode::Char('z') => {
-            app.tree.show_closed = !app.tree.show_closed;
-            app.push(Entry::Notice(
-                if app.tree.show_closed {
-                    "closed works shown, collapsed, below the live ones"
-                } else {
-                    "closed works hidden"
-                }
-                .into(),
-            ));
-            handled(None)
-        }
         // `x` — stop tracking the repository the cursor is on.
         //
         // The same letter that forgets a memory and deletes a schedule, because
@@ -4960,35 +4892,6 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                 name: node.label.clone(),
             }))
         }
-        // `T` — what these agents are saying to each other.
-        //
-        // From a session or a run as well as from a work, and it opens the
-        // *work's* bus in each case: G5.S1 is a message log per work, and a
-        // session's own half of a conversation is not a conversation. Walking
-        // up is what makes the key work from wherever the cursor happens to be,
-        // which is the difference between a screen people find and one they are
-        // told about.
-        //
-        // Capital because `t` retries a run on this screen, and a letter that
-        // retried on one press and navigated on the next would be a collision
-        // where one of the two is destructive.
-        KeyCode::Char('T') => {
-            let Some(work) = work_above(app) else {
-                app.push(Entry::Notice(
-                    "that row belongs to no work, so there is no bus to read — \
-                     traffic is a work's, and a session's half of it is not a conversation"
-                        .into(),
-                ));
-                return handled(None);
-            };
-            app.traffic_of = Some(traffic::Watching::work(work));
-            // Emptied rather than left holding the last work's messages: the
-            // tick fills it within a frame, and a screen that opens showing
-            // another work's conversation is worse than one that opens empty.
-            app.traffic = traffic::Log::default();
-            app.drill(Workspace::Traffic);
-            handled(None)
-        }
         // `⏎` opens whatever the row stands for. A run is something to watch; a
         // session is a conversation to go into; a manager is a conversation to
         // go *into* the way the pinned row is; a work and a project are
@@ -5042,18 +4945,6 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
     }
 }
 
-/// The work the cursor is inside, whichever level of the tree it is on.
-///
-/// Read out of `work_of` rather than climbed to. The tree no longer *has* work
-/// rows to climb to — `fleet::condense` folds them away and hangs their
-/// sessions straight off the project — so the answer comes from the map built
-/// while the fold still knew it. A project row and the pinned chat belong to no
-/// work and answer `None`, which is what the caller reports.
-fn work_above(app: &App) -> Option<String> {
-    let id = app.tree.selected.as_ref()?;
-    app.work_of.get(id).cloned()
-}
-
 /// The screens where editing and deleting mean something.
 ///
 /// A run is not edited and an activity line is not deleted, so on those screens
@@ -5092,9 +4983,6 @@ fn selected_label(app: &App, ws: Workspace) -> Option<String> {
         Workspace::Tasks => app.selected_board_task().map(|t| t.id),
         Workspace::Activity => app.selected_activity().map(|a| a.id.clone()),
         Workspace::Team => app.selected_task().map(|t| t.id.clone()),
-        Workspace::Traffic => app
-            .selected_message()
-            .map(|e| format!("message #{}", e.message.id)),
         Workspace::Chat | Workspace::MemoryGraph => None,
     }
 }
@@ -5135,30 +5023,6 @@ fn accept_prompt(
         // The board is the one kind the store can already take.
         PromptIntent::New(Workspace::Tasks) | PromptIntent::New(Workspace::Team) => {
             Some(Action::AddTask(typed))
-        }
-        // A branch named by the `#id` printed beside it.
-        //
-        // The conversation is read off the fleet cursor rather than carried in
-        // the overlay, for the reason `confirmed` gives: an overlay owns the
-        // keyboard for as long as it is up, so the selection cannot have moved
-        // between `g` and `⏎`.
-        //
-        // It has to be carried at all — `Request::Restore` takes a
-        // *conversation*, and handing it a message id let a number prefix-match
-        // a uuid and move the head of a thread nobody was looking at. Parsing
-        // and the refusals belong to `sessions::goto`, which is why the typed
-        // line goes through unexamined.
-        PromptIntent::Branch => {
-            let Some(conversation) = app.selected_agent().map(|a| a.id.clone()) else {
-                app.push(Entry::Notice(
-                    "the fleet moved on — reopen the branch list and try again".into(),
-                ));
-                return None;
-            };
-            Some(Action::Sessions(sessions::Request::GoTo {
-                conversation,
-                branch: typed,
-            }))
         }
         // `Store::remember` takes a triple — subject, predicate, object — and
         // splitting one typed line into three would be Jod guessing at which
@@ -5248,7 +5112,7 @@ fn refusal_to_continue(name: &str, status: &str) -> Option<String> {
         Some(AgentStatus::Completed | AgentStatus::Running) => None,
         Some(AgentStatus::Killed | AgentStatus::Failed) => Some(format!(
             "{name} did not finish cleanly — it is {status}. Continuing it would pick up a \
-             turn that broke off part-way, so press d to start a fresh agent instead"
+             turn that broke off part-way, so start a fresh agent with /delegate instead"
         )),
         // A word this build cannot read, which `list_agents` cannot produce:
         // every row's status is written out of an `AgentStatus` a few lines
@@ -5265,7 +5129,7 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     // tree's things — but that half runs in `on_workspace_key`, *above* the
     // list spine, because the spine owns `↑`/`↓` and would answer them first.
     // What is left here are the row verbs, which the tree does not know: `s`
-    // still stops a run, `d` still delegates, on a tree row as on a flat one.
+    // still stops a run, on a tree row as on a flat one.
     //
     // The tree's pinned chat is the same case as the flat list's pinned row
     // further down, and it comes first because `selected_node` cannot answer
@@ -5381,7 +5245,6 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             }
             Some(Action::Stop(id))
         }
-        KeyCode::Char('a') => Some(Action::Attach(app.selected_agent()?.id.clone())),
         // Continue the selected agent's conversation from the input box, which
         // is how an unattended run gets picked up and corrected.
         KeyCode::Char('r') => {
@@ -5390,8 +5253,7 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             // reasons. How a run ended is a fact about the run, while a missing
             // session id is a fact about the mechanism for resuming one, so a
             // killed run that also lost its session id is better told it was
-            // killed. And the way out of this refusal is `d`, which is a fleet
-            // key: answering here leaves the cursor on the row it is about.
+            // killed.
             if let Some(refusal) = refusal_to_continue(&agent.name, &agent.status) {
                 app.push(Entry::Notice(refusal));
                 return None;
@@ -5418,12 +5280,6 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             }
             None
         }
-        // Run the same prompt again as a fresh background agent — the fastest
-        // way to retry something that nearly worked.
-        KeyCode::Char('d') => {
-            let agent = app.selected_agent()?;
-            Some(Action::Delegate(agent.name.clone()))
-        }
         // ---- the conversation graph ------------------------------------
         //
         // Every key below is about the run under the cursor, because that is
@@ -5431,55 +5287,6 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // `Store::conversation_for_run` turns one into a thread, and
         // `sessions::resolve` makes that the caller's problem instead of this
         // function's.
-        // `b` — the branches of the selected run's thread: the turns, which one
-        // the head is on, and every leaf a revert left behind, each named.
-        KeyCode::Char('b') => Some(Action::Sessions(sessions::Request::Open(
-            app.selected_agent()?.id.clone(),
-        ))),
-        // `u` undoes the last turn and `U` puts it back — the pair OpenCode
-        // ships as `revert`/`unrevert`.
-        //
-        // Lowercase is *undo*, and the capital is the inverse, because
-        // `on_memory_key` already spells undo `u`. The usual defence for a
-        // letter meaning two things — `a` attaches here and answers an
-        // escalation in goals — does not cover this pair: those are unrelated
-        // verbs, so nothing transfers, while undo and redo are one verb
-        // inverted and the muscle memory transfers exactly. Reaching for `u` on
-        // a screen of destructive-looking verbs and getting redo is the one
-        // collision worth spending a capital on, and `S` for sort and `M` for
-        // mark-all already set that pattern.
-        //
-        // Neither is behind `Overlay::Confirm`, and that is a decision rather
-        // than an omission. That overlay's frame reads "this cannot be undone",
-        // which is true of `x` on a webhook and false of every verb here:
-        // `revert_to` keeps every row and every parent edge on purpose, and
-        // `move_head` exists precisely so the head can be put back. Making a
-        // reversible act wear an irreversible warning teaches the user to click
-        // through the warning that matters. What these do instead is name the
-        // way back in the same breath — see `sessions::rewind`.
-        KeyCode::Char('u') => Some(Action::Sessions(sessions::Request::Rewind(
-            app.selected_agent()?.id.clone(),
-        ))),
-        KeyCode::Char('U') => Some(Action::Sessions(sessions::Request::Restore(
-            app.selected_agent()?.id.clone(),
-        ))),
-        // `g` — go to a branch by the `#id` printed beside it.
-        //
-        // `U` takes the newest tip, which is the only case most people ever
-        // have: undo, then change your mind. This is for the rest — three or
-        // more branches set aside, and the one you want is not the last one you
-        // left. Without it those branches are listed, numbered, and
-        // unreachable, which is worse than not listing them: it shows you
-        // something and gives you no way to get to it.
-        KeyCode::Char('g') => {
-            app.selected_agent()?;
-            app.overlay = Overlay::Prompt {
-                label: "go to branch #".to_string(),
-                value: String::new(),
-                intent: PromptIntent::Branch,
-            };
-            None
-        }
         // `f` forks at the head: a second conversation from this point, sharing
         // the prefix rather than copying it. It writes one row and destroys
         // nothing, so it asks nothing either.
@@ -5500,26 +5307,6 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('m') => Some(Action::Sessions(sessions::Request::Delivery(
             app.selected_agent()?.id.clone(),
         ))),
-        // `t` — try the last question again. The answer it got stays where it
-        // is and the new attempt lands beside it, so this is "regenerate" with
-        // both attempts kept rather than the second painted over the first.
-        KeyCode::Char('t') => Some(Action::Sessions(sessions::Request::Retry(
-            app.selected_agent()?.id.clone(),
-        ))),
-        // `T` belongs to the tree, and is answered here for the case where
-        // there is no tree — a fleet of sessions started before works existed.
-        // The keybar prints it on this screen whatever the fleet holds, so
-        // falling through would be an advertised key that silently does
-        // nothing, which is exactly the trap the keymap's drift net exists to
-        // stop one spelling of.
-        KeyCode::Char('T') => {
-            app.push(Entry::Notice(
-                "traffic is a work's bus, and nothing here belongs to a work yet — \
-                 delegate something and the tree will have one"
-                    .into(),
-            ));
-            None
-        }
         _ => None,
     }
 }
@@ -7119,7 +6906,7 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // untracked from the fleet, or archived by another session, leaves the
     // cursor naming a project nothing draws.
     app.reconcile_catalog();
-    let tree = data::forest(jod, app.tree.show_closed);
+    let tree = data::forest(jod);
     app.forest = tree.nodes;
     app.closed_works = tree.closed;
     app.work_of = tree.works;
@@ -7127,12 +6914,6 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.run_of = tree.run_of;
     let rows = app.tree_rows();
     app.tree.reconcile(&rows);
-    // The bus a work's agents are talking on. Loaded here rather than when `T`
-    // is pressed, for the reason every list on this tick is: agents write to it
-    // from other processes, so a copy read once at open would be stale by the
-    // second message. Cheap when nothing has been opened — `data::traffic`
-    // returns an empty log without touching the store.
-    app.traffic = data::traffic(jod, app.traffic_of.as_ref());
     // Said once, and only while there is something being watched. Every session
     // now arms a heartbeat, so without a daemon the fleet would draw every
     // wedged agent as healthy — which is precisely the state the mark was added
@@ -10293,15 +10074,6 @@ mod tests {
         assert!(last_notice(&app).contains("nothing to stop"));
     }
 
-    #[test]
-    fn a_asks_how_to_attach_to_the_selected_agent() {
-        let mut app = panel_with_agents();
-        assert_eq!(
-            press(&mut app, KeyCode::Char('a')),
-            Some(Action::Attach("aaa11111".into()))
-        );
-    }
-
     /// How an unattended run gets picked up and corrected: point the next turn
     /// at its conversation without leaving the UI.
     #[test]
@@ -10356,14 +10128,10 @@ mod tests {
         let said = last_notice(&app);
         assert!(said.contains("killed"), "the refusal is silent about why: {said}");
         assert!(
-            said.contains("press d"),
-            "the refusal does not say what to press instead: {said}"
+            said.contains("/delegate"),
+            "the refusal does not say what to do instead: {said}"
         );
-        assert_eq!(
-            app.workspace,
-            Workspace::Fleet,
-            "refused, then left on a screen where `d` does not exist"
-        );
+        assert_eq!(app.workspace, Workspace::Fleet, "refused, and left where it was");
     }
 
     /// The commoner half of the same fault. `rehydrate` marks any run `failed`
@@ -10391,7 +10159,7 @@ mod tests {
                 "a refusal that does not name the status: {refusal}"
             );
             assert!(
-                refusal.contains("press d"),
+                refusal.contains("/delegate"),
                 "a refusal that does not say what to do instead: {refusal}"
             );
         }
@@ -12581,7 +12349,7 @@ mod tests {
         assert!(app.schedules.is_empty());
     }
 
-    // ---- the traffic log is reachable, and is fed ----
+    // ---- the fleet tree ----
 
     /// A work with one session and one run under it, exactly as
     /// `Store::forest_of` flattens them.
@@ -12731,8 +12499,11 @@ mod tests {
     #[test]
     fn the_run_verbs_act_on_the_loose_row_under_the_cursor() {
         for (key, expected) in [
-            (KeyCode::Char('a'), Action::Attach("r2".into())),
             (KeyCode::Enter, Action::Watch("r2".into())),
+            (
+                KeyCode::Char('f'),
+                Action::Sessions(sessions::Request::Fork("r2".into())),
+            ),
         ] {
             let mut app = with_a_loose_run();
             press(&mut app, KeyCode::End);
@@ -12830,8 +12601,8 @@ mod tests {
             "it stopped whatever the invisible list cursor was on"
         );
         assert_eq!(
-            press(&mut app, KeyCode::Char('a')),
-            Some(Action::Attach("r1".into()))
+            press(&mut app, KeyCode::Char('f')),
+            Some(Action::Sessions(sessions::Request::Fork("r1".into())))
         );
     }
 
@@ -13495,215 +13266,6 @@ mod tests {
         app.tree.selected = Some(NodeId::project("p1"));
 
         assert_eq!(press(&mut app, KeyCode::Enter), None, "a heading opens nothing");
-    }
-
-    /// **G5.S2.** The screen is opened from the tree, through the router — not
-    /// by calling the handler, which would prove only that the handler works.
-    #[test]
-    fn t_on_a_work_in_the_tree_opens_that_works_traffic() {
-        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
-        assert_eq!(press(&mut app, KeyCode::Char('T')), None);
-        assert_eq!(app.workspace, Workspace::Traffic);
-        assert_eq!(
-            app.traffic_of,
-            Some(traffic::Watching::work("w1")),
-            "the screen opened on some other scope than the row under the cursor"
-        );
-    }
-
-    /// From an agent's row as well, and it is the *work's* bus: a session's
-    /// half of a conversation is not a conversation.
-    ///
-    /// The tree has no work row above it to climb to any more, so this is also
-    /// the check that the fold remembered which work the agent came out of.
-    #[test]
-    fn t_on_a_session_opens_the_bus_of_the_work_it_came_out_of() {
-        let row = jod_core::tree::NodeId::session("s1");
-        let mut app = on_the_tree(row.clone());
-        press(&mut app, KeyCode::Char('T'));
-        assert_eq!(app.workspace, Workspace::Traffic, "from {row:?}");
-        assert_eq!(
-            app.traffic_of,
-            Some(traffic::Watching::work("w1")),
-            "from {row:?}"
-        );
-    }
-
-    /// Drilled rather than jumped to, so `Esc` comes back to the tree you were
-    /// reading rather than to the chat — the same relationship memory's local
-    /// graph has to its list.
-    #[test]
-    fn escape_comes_back_from_the_traffic_log_to_the_tree() {
-        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
-        press(&mut app, KeyCode::Char('T'));
-        press(&mut app, KeyCode::Esc);
-        assert_eq!(app.workspace, Workspace::Fleet);
-    }
-
-    /// Opening a work's traffic must not show the last one's conversation for
-    /// the frame before the tick catches up.
-    #[test]
-    fn opening_a_works_traffic_starts_from_an_empty_log() {
-        let mut app = on_the_tree(jod_core::tree::NodeId::work("w1"));
-        press(&mut app, KeyCode::Char('T'));
-        app.traffic.title = "port the parser".into();
-        app.traffic.messages = vec![];
-        app.traffic.used = 12;
-
-        app.go(Workspace::Fleet);
-        app.tree.selected = Some(jod_core::tree::NodeId::work("w1"));
-        press(&mut app, KeyCode::Char('T'));
-        assert_eq!(app.traffic, traffic::Log::default(), "{:?}", app.traffic);
-    }
-
-    /// `T` on a session that belongs to no work has nothing to open, and says
-    /// so rather than looking broken.
-    #[test]
-    fn t_on_a_row_with_no_work_above_it_explains_itself() {
-        use jod_core::tree::{Node, NodeId, NodeKind};
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.forest = vec![Node {
-            id: NodeId::session("orphan"),
-            parent: None,
-            kind: NodeKind::Session,
-            depth: 0,
-            label: "started before works existed".into(),
-            summary: String::new(),
-            running: false,
-            status: None,
-            stalled_for_ms: None,
-            cards: 0,
-            blocked: 0,
-            stalled: 0,
-            colour: String::new(),
-            branch: None,
-            worktree: None,
-            expanded: true,
-            has_children: false,
-        }];
-        app.go(Workspace::Fleet);
-        app.tree.selected = Some(NodeId::session("orphan"));
-        press(&mut app, KeyCode::Char('T'));
-        assert_eq!(app.workspace, Workspace::Fleet, "nothing to open");
-        assert!(app.traffic_of.is_none());
-        let said = last_notice(&app);
-        assert!(said.contains("no work"), "{said}");
-    }
-
-    /// The keybar prints `T traffic` on the fleet whatever the fleet holds, so
-    /// the one state where there is no tree to press it on has to answer rather
-    /// than do nothing.
-    #[test]
-    fn t_on_a_fleet_with_no_works_in_it_says_why_there_is_nothing_to_read() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.go(Workspace::Fleet);
-        assert!(!app.has_tree());
-        press(&mut app, KeyCode::Char('T'));
-        assert_eq!(app.workspace, Workspace::Fleet);
-        let said = last_notice(&app);
-        assert!(said.contains("traffic is a work's bus"), "{said}");
-    }
-
-    /// **The screen is fed by the tick**, not by the keypress that opened it.
-    /// Agents write to this bus from other processes, so a log read once at
-    /// open would be stale by the second message — and a screen nothing
-    /// refreshes is a screen that quietly shows yesterday.
-    #[tokio::test]
-    async fn the_tick_loads_the_traffic_of_whichever_work_is_open() {
-        use jod_core::team::{Post, Scope};
-        let store = store();
-        let work = store.create_work("port the parser").unwrap();
-        store
-            .join_scope(
-                Scope::Work,
-                &work.id,
-                "asker",
-                HarnessKind::ClaudeCode,
-                "engineer",
-                None,
-            )
-            .unwrap();
-        store
-            .join_scope(
-                Scope::Work,
-                &work.id,
-                "answerer",
-                HarnessKind::ClaudeCode,
-                "engineer",
-                None,
-            )
-            .unwrap();
-        store
-            .post(&Post::new(Scope::Work, &work.id, "asker", "where is the lexer?").to("answerer"))
-            .unwrap();
-
-        let jod = jod_with(store);
-        let mut app = app_on(HarnessKind::ClaudeCode);
-
-        // Nothing open: the tick must not invent a scope, and must not pay for
-        // a query nobody asked for.
-        refresh_workspaces(&jod, &mut app);
-        assert!(app.traffic.messages.is_empty());
-
-        app.traffic_of = Some(traffic::Watching::work(&work.id));
-        refresh_workspaces(&jod, &mut app);
-        assert_eq!(app.traffic.messages.len(), 1, "the tick did not read the bus");
-        assert_eq!(app.traffic.messages[0].message.from, "asker");
-        assert_eq!(app.traffic.budget, jod_core::works::DEFAULT_MESSAGE_BUDGET);
-        assert_eq!(app.traffic.used, 1, "and it read the budget the bus enforces");
-        assert_eq!(
-            app.row_ids(Workspace::Traffic).len(),
-            1,
-            "the cursor has a row to sit on"
-        );
-    }
-
-    /// `f` is the screen's own verb and it reaches the screen's own handler.
-    /// Pressed through the router, because a handler nothing routes to is the
-    /// bug this suite exists to catch.
-    #[test]
-    fn f_on_the_traffic_log_cycles_which_states_are_shown() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.traffic_of = Some(traffic::Watching::work("w1"));
-        app.go(Workspace::Traffic);
-        assert_eq!(app.traffic_shown, traffic::Shown::Everything);
-
-        press(&mut app, KeyCode::Char('f'));
-        assert_eq!(app.traffic_shown, traffic::Shown::Problems);
-        let said = last_notice(&app);
-        assert!(said.contains(traffic::Shown::Problems.label()), "{said}");
-
-        for _ in 1..traffic::Shown::ALL.len() {
-            press(&mut app, KeyCode::Char('f'));
-        }
-        assert_eq!(app.traffic_shown, traffic::Shown::Everything, "the cycle closes");
-    }
-
-    /// `⏎` puts the whole message in the transcript, reason and all — the row
-    /// is one line and a message is prose.
-    #[tokio::test]
-    async fn enter_on_a_refused_message_prints_the_reason_it_was_refused() {
-        use jod_core::team::{Post, Scope};
-        let store = store();
-        let work = store.create_work("port the parser").unwrap();
-        store
-            .post(&Post::new(Scope::Work, &work.id, "asker", "are you free?").to("nobody-here"))
-            .unwrap();
-
-        let jod = jod_with(store);
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.traffic_of = Some(traffic::Watching::work(&work.id));
-        refresh_workspaces(&jod, &mut app);
-        app.go(Workspace::Traffic);
-
-        press(&mut app, KeyCode::Enter);
-        let said = last_notice(&app);
-        assert!(said.contains("asker"), "{said}");
-        assert!(said.contains("are you free?"), "the message itself: {said}");
-        assert!(
-            said.contains("`nobody-here` is not a member of this work"),
-            "and why nobody read it: {said}"
-        );
     }
 
     /// A TUI with no database must lose the keypress, not the session.
@@ -14629,13 +14191,13 @@ mod tests {
             on_key(
                 &mut app,
                 &mut Thread::default(),
-                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
                 20,
                 40,
                 shape,
             ),
-            Some(Action::Delegate("work".into())),
-            "`d` still delegates the run the preview is describing"
+            Some(Action::Sessions(sessions::Request::Fork("loose-1".into()))),
+            "`f` still acts on the run the preview is describing"
         );
     }
 
@@ -14686,18 +14248,12 @@ mod tests {
         app
     }
 
-    /// The audit's complaint was that `tips`, `branch_at`, `children` and
-    /// `sibling_pager` had no production call site. These five keys are that
-    /// call site, and this asserts the keypress produces the verb rather than
-    /// `None` — the state the whole feature was in before.
+    /// Asserts the keypress produces the verb rather than `None` — the state
+    /// the whole feature was in before it had a call site at all.
     #[test]
     fn the_fleet_keys_reach_the_conversation_graph() {
         for (key, expected) in [
-            ('b', sessions::Request::Open("run-7".into())),
-            ('u', sessions::Request::Rewind("run-7".into())),
-            ('U', sessions::Request::Restore("run-7".into())),
             ('f', sessions::Request::Fork("run-7".into())),
-            ('t', sessions::Request::Retry("run-7".into())),
             ('m', sessions::Request::Delivery("run-7".into())),
         ] {
             let mut app = on_fleet_with_a_run();
@@ -14707,44 +14263,6 @@ mod tests {
                 "`{key}` on the fleet"
             );
         }
-    }
-
-    /// `g` has to carry *which thread* as well as which branch.
-    ///
-    /// Its first cut handed the typed number to `Request::Restore`, which takes
-    /// a conversation rather than a message. Conversation ids are uuids and
-    /// uuids are hex, so a plain number can prefix-match one — the key could
-    /// move the head of a thread the user was not looking at, and it never
-    /// consulted the fleet cursor at all. Both halves are asserted here because
-    /// the shape, not the arithmetic, is what stops it coming back.
-    #[test]
-    fn going_to_a_branch_carries_the_thread_it_was_read_off() {
-        let mut app = on_fleet_with_a_run();
-
-        assert_eq!(press(&mut app, KeyCode::Char('g')), None, "`g` asks first");
-        assert!(
-            matches!(
-                app.overlay,
-                Overlay::Prompt {
-                    intent: PromptIntent::Branch,
-                    ..
-                }
-            ),
-            "got {:?}",
-            app.overlay
-        );
-
-        type_line(&mut app, "57");
-        let action = press(&mut app, KeyCode::Enter);
-
-        assert_eq!(
-            action,
-            Some(Action::Sessions(sessions::Request::GoTo {
-                conversation: "run-7".into(),
-                branch: "57".into(),
-            })),
-            "the run under the cursor travels with the branch number"
-        );
     }
 
     /// The gap this key closes: the fleet says `completed` and is silent about
@@ -14794,38 +14312,6 @@ mod tests {
         );
     }
 
-    /// `u` is undo on every screen that has one.
-    ///
-    /// This shipped inverted for a while — `v` undid and `u` redid — which put
-    /// `u` on undo in memory and on *redo* in the fleet. The usual defence for
-    /// one letter meaning two things does not apply to a verb and its inverse:
-    /// `a` attaching here and answering an escalation in goals are unrelated,
-    /// so nothing transfers, while undo and redo are one verb inverted and the
-    /// habit transfers exactly — onto a screen where the neighbouring keys stop
-    /// and fork things.
-    #[test]
-    fn undo_is_the_lower_case_key_on_every_screen_that_has_one() {
-        let mut app = on_fleet_with_a_run();
-        assert_eq!(
-            press(&mut app, KeyCode::Char('u')),
-            Some(Action::Sessions(sessions::Request::Rewind("run-7".into()))),
-            "lower-case `u` undoes"
-        );
-
-        // The binding this pair had to agree with. It is still a named to-do
-        // rather than a store call, but the *letter* is already spoken for and
-        // that is what the fleet had to match.
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        app.memory = vec![memory_node("linear")];
-        app.go(Workspace::Memory);
-        app.reconcile();
-        let said = press(&mut app, KeyCode::Char('u'));
-        assert!(
-            matches!(said, Some(Action::Pending { ref verb, .. }) if verb.contains("undo")),
-            "memory's `u` is an undo too, got {said:?}"
-        );
-    }
-
     /// The run under the cursor is what these act on, so with no cursor they
     /// must do nothing — not act on a thread the user cannot see.
     #[test]
@@ -14867,13 +14353,13 @@ mod tests {
             .expect("a message from run-7");
 
         let mut app = on_fleet_with_a_run();
-        let Some(Action::Sessions(request)) = press(&mut app, KeyCode::Char('b')) else {
-            panic!("`b` on the fleet asks for the selected run's thread");
+        let Some(Action::Sessions(request)) = press(&mut app, KeyCode::Char('f')) else {
+            panic!("`f` on the fleet asks for the selected run's thread");
         };
 
         let said = sessions::apply(&store, &request, 0).join("\n");
         assert!(
-            said.contains("port the parser"),
+            said.contains("forked"),
             "the run id under the cursor found its thread: {said}"
         );
     }

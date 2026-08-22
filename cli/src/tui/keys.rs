@@ -10,8 +10,8 @@
 //!
 //! The rule used to be that every one of a screen's verbs had to be on the bar,
 //! because the same letter deliberately means different things on different
-//! screens — `a` attaches in the fleet and answers an escalation in goals — so
-//! a verb that was not printed would be a trap rather than a shortcut.
+//! screens — `r` resumes in the fleet and runs a goal now in goals — so a verb
+//! that was not printed would be a trap rather than a shortcut.
 //!
 //! That rule was already false when it was written down. `ui::two_ends`
 //! reserved room for the verbs and dropped the right-hand half when none was
@@ -34,7 +34,7 @@
 //! 1. `⏎` — the primary action, always first.
 //! 2. Verbs **unique to this screen**, most important first. Where two are
 //!    equally important, prefer the one whose letter means something *else* on
-//!    another screen: `a` attaches here and answers an escalation in goals, and
+//!    another screen: `r` resumes here and runs a goal now in goals, and
 //!    printing only one half of that pair teaches a habit the other screen
 //!    breaks. That is a tie-break and not a rule — importance wins. `s stop`
 //!    stays above `r resume` on the fleet even though `r` is the collided
@@ -56,10 +56,10 @@
 //!
 //! Only step 3 is enforced by a test, deliberately. An attempt to pin step 2's
 //! tie-break — "a collided letter must be printed on every screen that defines
-//! it, or on none" — was written, run, and deleted: the fleet has thirteen
-//! verbs, room for five at eighty columns, and seven collided letters among
-//! them (`r a c u g f t`). No ordering satisfies it, so the guarantee could only
-//! have been met by deleting verbs. A weaker form — collided letters first
+//! it, or on none" — was written, run, and deleted: the fleet has more verbs
+//! than fit at eighty columns, and several of their letters are collided. No
+//! ordering satisfies it, so the guarantee could only have been met by deleting
+//! verbs. A weaker form — collided letters first
 //! within step 2 — was also tried and also deleted, because it demanded
 //! `r resume` outrank `s stop` on the fleet, which is the tie-break overruling
 //! importance rather than settling it. What survives is the part that is both
@@ -285,74 +285,30 @@ const CHAT: &[Key] = &[
     k("?", "keys"),
 ];
 
-/// The fleet is the widest screen, because it is the only one that is both a
-/// list of runs and a handle on the conversation graph behind them: `s r d a`
-/// act on the run under the cursor, `b u U g f t` act on its thread. `/` is
+/// The fleet is a list of runs with a handle on the conversation behind them:
+/// `s` and `r` act on the run under the cursor, `f` acts on its thread. `/` is
 /// last because it is the spine's, not the fleet's — see the module header.
-///
-/// `u` undoes and `U` puts it back. Lower case is undo on every screen that has
-/// one — memory's `u` is an undo too — because undo and redo are a verb and its
-/// inverse, and that is the one case where a habit transferring between screens
-/// does damage rather than nothing.
 ///
 /// `⇥` is first because it is the key that makes the screen navigable: the
 /// fleet draws three panes and one of them is the runs that belong to no work,
 /// which is otherwise only reachable by walking the cursor past every row of
 /// every project above it.
-///
-/// `g` is spelled `go to #` because `#` is the exact token printed beside each
-/// branch in the listing — the label names what is on screen rather than
-/// describing it.
 const FLEET: &[Key] = &[
     k("⇥", "next pane"),
     k("⏎", "watch"),
     k("s", "stop"),
     k("r", "resume"),
-    // Above `d` because `a` is the collided letter — it answers an escalation
-    // on goals, which does print it. See the ordering rule in the header.
-    k("a", "attach"),
-    // `delegate`, word for word as the task board spells it, because it is the
-    // same `Action::Delegate` on the selected row. Two spellings of one verb
-    // read as a collision and are not one: `d` is the one letter here that
-    // transfers between screens intact, and it only does so while both screens
-    // call it the same thing. Six characters shorter is why it now survives
-    // eighty columns, but matching the board is the reason.
-    k("d", "delegate"),
-    // The work's bus. High in the table because it is the only verb here that
-    // answers "what are these agents saying to each other", and a work whose
-    // traffic cannot be read is a work you can only watch spend money — see
-    // `tui::traffic`. Capital because `t` already retries a run on this screen.
-    k("T", "traffic"),
-    k("b", "branches"),
-    // One row for the pair, the way `→←` below is one row for two arrows.
-    //
-    // Both keys still fire and both are still advertised; what changed is that
-    // they cost the `?` overlay one line instead of two. The overlay is two
-    // columns of twenty-eight rows at the design size, and the fleet's own
-    // section plus the spine plus the global chords came to exactly one line
-    // more than that when `T traffic` arrived — so a screen that had promised
-    // to be complete at 100×30 started saying `1 more — widen the window`.
-    // Undo and redo are a verb and its inverse and read as one thing anyway,
-    // which is why this pair is the one that gives way rather than a verb that
-    // would have had to be dropped.
-    k("uU", "undo / redo"),
-    k("g", "go to #"),
     k("f", "fork"),
-    k("t", "retry"),
     // The tree's own verbs, in force once there is a work to draw. Below the
     // run verbs because those act on the row and these act on the shape, and
     // the row is what people come here for; above `/` because that one is the
     // spine's and means the same thing on every screen.
     k("→←", "in / out"),
     k("space", "expand / collapse"),
-    // One row for the pair, the way `uU` and `→←` above are. Both keys still
-    // fire and both are still advertised; what it buys is the row that `x`
-    // needed. The `?` overlay promises to be complete at 100×30 and was exactly
-    // at that limit — see the note on `uU` — so a new verb here had to come
-    // from somewhere, and expand-all with its inverse is the same trade that
-    // note describes: a row given up without a verb given up.
+    // One row for the pair, the way `→←` above is. Both keys still fire and
+    // both are still advertised; expand-all and its inverse read as one thing,
+    // so the overlay spends one line on them rather than two.
     k("EC", "expand / collapse all"),
-    k("z", "closed works"),
     // Last of the tree's own verbs, and the only one on this screen that
     // changes the catalog rather than the shape of what is drawn from it.
     //
@@ -365,25 +321,6 @@ const FLEET: &[Key] = &[
     // front of something that can is how people learn to dismiss them.
     k("x", "untrack project"),
     k("/", "filter"),
-];
-
-/// The traffic log, opened from the tree with `T`.
-///
-/// `T` is capital because lower-case `t` is already *retry* on the fleet, and a
-/// letter that retried a run on one press and opened a screen on the next would
-/// be the worst kind of collision — one of the two is destructive. `E`, `C`,
-/// `U` and `S` set that pattern on this screen already: when the letter is
-/// spoken for, the verb goes to the capital rather than to an unrelated key
-/// nobody can guess.
-///
-/// `f` is the state cycle, spelled and ordered exactly as the rail's `f` is,
-/// because G5.S5 asks for one way to narrow a list in this program rather than
-/// a second idiom for the same job. `/` and `S` are the spine's and go last.
-const TRAFFIC: &[Key] = &[
-    k("⏎", "the message in full"),
-    k("f", "every / failed / waiting / delivered"),
-    k("/", "filter"),
-    k("S", "cycle sort"),
 ];
 
 const MEMORY: &[Key] = &[
@@ -564,7 +501,7 @@ pub fn rail_footer() -> String {
 
 /// This screen's own verbs, in keybar order.
 ///
-/// Fleet's `s`, `a` and `r` are exactly what they are today. `S` is capital
+/// Fleet's `s` and `r` are exactly what they are today. `S` is capital
 /// precisely because lowercase `s` is spoken for there.
 pub fn local(ws: Workspace) -> &'static [Key] {
     match ws {
@@ -578,7 +515,6 @@ pub fn local(ws: Workspace) -> &'static [Key] {
         Workspace::Tasks => TASKS,
         Workspace::Activity => ACTIVITY,
         Workspace::Team => TEAM,
-        Workspace::Traffic => TRAFFIC,
     }
 }
 
@@ -1034,11 +970,11 @@ mod tests {
         }
     }
 
-    /// A verb is never cut in half. `a att` is a key that does not exist, and
+    /// A verb is never cut in half. `r res` is a key that does not exist, and
     /// a bar that prints one is worse than a bar that prints fewer.
     #[test]
     fn a_dropped_verb_goes_whole_rather_than_being_cut() {
-        // Narrow enough that the fleet's twelve verbs cannot all fit.
+        // Narrow enough that the fleet's verbs cannot all fit.
         let bar = keybar(Workspace::Fleet, 80);
         assert!(bar.contains(MORE), "expected the fleet to be truncated at 80: {bar}");
         for item in bar.split(SEP) {
@@ -1049,22 +985,22 @@ mod tests {
         }
     }
 
-    /// `a` attaches in the fleet and answers an escalation in goals. Both are
-    /// on the bar when there is room, and both are always in the overlay —
-    /// which is what makes the collision safe now that the bar can be partial.
+    /// `r` resumes in the fleet and runs a goal now in goals. Both are on the
+    /// bar when there is room, and both are always in the overlay — which is
+    /// what makes the collision safe now that the bar can be partial.
     #[test]
     fn a_letter_that_changes_meaning_is_reachable_on_both_screens() {
-        assert!(keybar(Workspace::Fleet, 150).contains("a attach"));
-        assert!(keybar(Workspace::Goals, 150).contains("a answer"));
+        assert!(keybar(Workspace::Fleet, 150).contains("r resume"));
+        assert!(keybar(Workspace::Goals, 150).contains("r run now"));
         for (ws, what) in [
-            (Workspace::Fleet, "attach"),
-            (Workspace::Goals, "answer"),
+            (Workspace::Fleet, "resume"),
+            (Workspace::Goals, "run now"),
         ] {
             assert!(
                 keymap(ws)
                     .into_iter()
-                    .any(|(_, bs)| bs.iter().any(|b| b.key == "a" && b.what == what)),
-                "{ws:?} does not carry `a {what}` in the overlay"
+                    .any(|(_, bs)| bs.iter().any(|b| b.key == "r" && b.what == what)),
+                "{ws:?} does not carry `r {what}` in the overlay"
             );
         }
     }

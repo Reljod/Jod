@@ -23,7 +23,6 @@ use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::{self, RailState};
 use super::secret::Typed;
-use super::traffic;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
 use jod_core::commands::Discovered;
@@ -262,21 +261,12 @@ pub enum PromptIntent {
     New(Workspace),
     /// Link the selected memory node to another, named here.
     Link(String),
-    /// Go to one specific abandoned branch, named by the `#id` printed beside
-    /// it.
-    ///
-    /// The redo key takes the newest tip, which covers undo-then-changed-my-mind
-    /// — the only case most people ever have. This is for the rest: three or
-    /// more branches set aside, and the one you want is not the last one you
-    /// left. Without it those branches are listed, numbered, and unreachable,
-    /// which is a worse state than not listing them at all.
-    Branch,
     /// Answer a card in prose rather than by picking one of its options.
     ///
     /// Carries the card id rather than reading it off the rail's cursor, which
     /// is the one place here that departs from the "an overlay owns the
-    /// keyboard, so the selection cannot have moved" rule that `confirmed` and
-    /// [`PromptIntent::Branch`] rely on. It has to: the rail re-queries on the
+    /// keyboard, so the selection cannot have moved" rule that `confirmed`
+    /// relies on. It has to: the rail re-queries on the
     /// tick *underneath* the prompt, so an answer that landed on whatever card
     /// had sorted to the cursor by the time `⏎` was pressed would be an answer
     /// given to the wrong agent.
@@ -870,19 +860,6 @@ pub struct App {
     /// every lap is one people use once.
     pub tree_mark: Option<NodeId>,
 
-    // ---- the traffic log ------------------------------------------------
-    /// Which scope's bus the traffic screen is reading, or `None` before one
-    /// has been opened from the tree.
-    ///
-    /// The *request*, kept apart from the loaded [`traffic::Log`] on purpose:
-    /// the log is rebuilt from the store on every tick, so a scope stored only
-    /// on the data would be forgotten by the first refresh after opening the
-    /// screen.
-    pub traffic_of: Option<traffic::Watching>,
-    /// That scope's messages, refreshed on the tick like every other list.
-    pub traffic: traffic::Log,
-    /// Which states the log is narrowed to. `f` cycles it.
-    pub traffic_shown: traffic::Shown,
 }
 
 /// One background shell this console started.
@@ -1463,9 +1440,6 @@ impl App {
             preview_focused: false,
             preview_scroll: 0,
             tree_mark: None,
-            traffic_of: None,
-            traffic: traffic::Log::default(),
-            traffic_shown: traffic::Shown::Everything,
         }
     }
 
@@ -2598,15 +2572,6 @@ impl App {
             Workspace::Tasks => self.task_rows().iter().map(|t| t.id.clone()).collect(),
             Workspace::Activity => self.activity_rows().iter().map(|a| a.id.clone()).collect(),
             Workspace::Team => self.tasks.iter().map(|t| t.id.clone()).collect(),
-            // A message id is a number and every other list here keys on a
-            // string, so it is spelled as one. The cursor is still the id and
-            // never the row: the log reshapes under it every tick as agents
-            // answer each other.
-            Workspace::Traffic => self
-                .traffic_rows()
-                .iter()
-                .map(|e| e.message.id.to_string())
-                .collect(),
             Workspace::Chat | Workspace::MemoryGraph => Vec::new(),
         }
     }
@@ -2857,38 +2822,6 @@ impl App {
         rows
     }
 
-    /// The traffic on screen: filtered, threaded and in the order it is drawn.
-    ///
-    /// The `/` filter and the sort come out of the screen's own [`ListState`],
-    /// like every other list here, so `Esc` clears it and the line under the
-    /// box reports it without anything extra being wired.
-    pub fn traffic_rows(&self) -> Vec<&jod_core::team::Envelope> {
-        let list = self.list(Workspace::Traffic);
-        traffic::rows(
-            &self.traffic.messages,
-            &self.traffic.held,
-            self.traffic_shown,
-            list.filter.as_deref(),
-            list.sort,
-        )
-    }
-
-    pub fn selected_message(&self) -> Option<&jod_core::team::Envelope> {
-        let id: i64 = self
-            .list(Workspace::Traffic)
-            .selected
-            .as_deref()?
-            .parse()
-            .ok()?;
-        self.traffic.messages.iter().find(|e| e.message.id == id)
-    }
-
-    /// Whether the selected message is one nobody will ever read.
-    pub fn selected_is_held(&self) -> bool {
-        self.selected_message()
-            .is_some_and(|e| self.traffic.held.contains(&e.message.id))
-    }
-
     /// The run every fleet verb acts on — read off whichever cursor the screen
     /// is actually drawing.
     ///
@@ -3110,30 +3043,6 @@ impl App {
                     )
                 }
             },
-            // The budget is in the count line rather than only in the pane,
-            // because G4.S5 asks for it to be seen *before* it is spent and the
-            // status bar is the one row that is always on screen.
-            Workspace::Traffic => {
-                if self.traffic_of.is_none() {
-                    return "no work chosen — T on a fleet row opens one".into();
-                }
-                let mut line = format!(
-                    "{} · {} in {}",
-                    self.traffic.title,
-                    plural(self.traffic.messages.len(), "message"),
-                    plural(self.traffic.threads(), "thread")
-                );
-                let troubled = self.traffic.troubled();
-                if troubled > 0 {
-                    line.push_str(&format!(" · {troubled} undelivered"));
-                }
-                line.push_str(&format!(
-                    " · {} of {} budget left",
-                    self.traffic.budget_left(),
-                    self.traffic.budget
-                ));
-                line
-            }
         }
     }
 

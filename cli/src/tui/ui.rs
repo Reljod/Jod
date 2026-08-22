@@ -9,7 +9,6 @@
 //! the ones the user's own theme controls and Jod runs on other people's boxes
 //! over SSH.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -37,7 +36,6 @@ use super::picker;
 use super::rail;
 use super::secret;
 use super::text;
-use super::traffic;
 use super::workspace::Workspace;
 use jod_core::cards::{Card, CardKind, Delivery, Importance, Sort, Status};
 use jod_core::projects::How;
@@ -3891,7 +3889,6 @@ fn draw_workspace(f: &mut Frame, app: &App, area: Rect) -> Preview {
         Workspace::Tasks => draw_tasks(f, app, area),
         Workspace::Activity => draw_activity(f, app, area),
         Workspace::Team => draw_team(f, app, area),
-        Workspace::Traffic => draw_traffic(f, app, area),
         Workspace::Chat => {}
     }
     Preview::default()
@@ -4243,7 +4240,7 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) -> Preview {
             area,
             agent_detail(app, a, area.width),
             " run ",
-            " ⏎ watch · s stop · r resume · a attach ",
+            " ⏎ watch · s stop · r resume · f fork ",
             MUTED,
         );
     }
@@ -4344,9 +4341,7 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) -> Preview {
     // its conversation. A row you can enter, stop and resume, advertising
     // nothing, is a row nobody finds.
     let verbs = match app.selected_node().map(|node| node.kind) {
-        Some(jod_core::tree::NodeKind::Session) => {
-            " ⏎ enter · s stop · r resume · a attach · T bus "
-        }
+        Some(jod_core::tree::NodeKind::Session) => " ⏎ enter · s stop · r resume · f fork ",
         Some(jod_core::tree::NodeKind::Manager) => " ⏎ enter ",
         _ => "",
     };
@@ -4640,7 +4635,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) -> Preview {
     let Some(right) = right else {
         return Preview::default();
     };
-    // Its own pane, and its own footer: none of `s stop · r resume · a attach`
+    // Its own pane, and its own footer: none of `s stop · r resume · f fork`
     // means anything to a conversation, and offering keys that quietly do
     // nothing is how a list teaches people not to trust its footer.
     if app.main_selected() {
@@ -4664,7 +4659,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) -> Preview {
         right,
         lines,
         " run ",
-        " ⏎ watch · s stop · r resume · a attach ",
+        " ⏎ watch · s stop · r resume · f fork ",
         MUTED,
     )
 }
@@ -5762,237 +5757,9 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(page(Workspace::Activity, app, lines, area.width), area);
 }
 
-/// One work's bus: who said what to whom, threaded, and what did not arrive.
-///
-/// **The column drop order is declared here and nowhere else**: the message
-/// text is what gives way, and never the sender, the recipient or the reason a
-/// message failed. Two of those three are the row's identity and the third is
-/// the only thing on this screen that is *wrong* — a log that clipped
-/// `` `nobody-here` is not a member of this work `` down to `undeliverable`
-/// would have printed the state everybody already suspected and dropped the
-/// half worth reading.
-fn draw_traffic(f: &mut Frame, app: &App, area: Rect) {
-    let (left, right) = split(area);
-    draw_traffic_log(f, app, left);
-    if let Some(right) = right {
-        draw_traffic_detail(f, app, right);
-    }
-}
-
-fn draw_traffic_log(f: &mut Frame, app: &App, area: Rect) {
-    let rows = app.traffic_rows();
-    let selected = app
-        .list(Workspace::Traffic)
-        .index(&app.row_ids(Workspace::Traffic));
-    let width = area.width.saturating_sub(2) as usize;
-
-    let mut items: Vec<ListItem> = Vec::new();
-    items.push(ListItem::new(traffic_header(app, width)));
-
-    if app.traffic_of.is_none() {
-        items.extend(empty("  no work chosen — T on a fleet row opens its bus", area.width));
-    } else if rows.is_empty() {
-        items.extend(empty(
-            if app.here().filtering() {
-                "  nothing matches — Esc clears the filter"
-            } else {
-                "  nothing has been said on this bus yet"
-            },
-            area.width,
-        ));
-    }
-
-    // One row shorter than the other lists, because the header above is drawn
-    // out of the same budget.
-    let (first, height) = window(area, selected, rows.len());
-    // Which threads a row is the first of, so the pause marker lands on the
-    // thread rather than on every message in it.
-    let mut thread_seen: HashSet<&str> = HashSet::new();
-    for (i, envelope) in rows.iter().enumerate() {
-        let opens_thread = thread_seen.insert(envelope.thread_id.as_str());
-        if i < first || i >= first + height.saturating_sub(1) {
-            continue;
-        }
-        let chosen = i == selected;
-        let held = app.traffic.held.contains(&envelope.message.id);
-        let trouble = traffic::trouble(envelope, held);
-        let colour = if trouble.is_some() { BAD } else { MUTED };
-        let mut spans = vec![
-            Span::styled(if chosen { "▸" } else { " " }, fg(USER)),
-            Span::styled(format!("{} ", traffic::glyph(envelope, held)), fg(colour)),
-            Span::styled(traffic::indent(envelope.depth), fg(MUTED)),
-            Span::styled(traffic::depth_marker(envelope.depth), fg(MUTED)),
-            Span::styled(
-                format!("{} → {}  ", envelope.message.from, envelope.message.to),
-                if chosen { bold(USER) } else { fg(USER) },
-            ),
-        ];
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        // A paused thread says so on its opening message: G4.S3 pauses a
-        // thread and never the work, so the marker belongs to the thread.
-        let marker = match app.traffic.paused.get(&envelope.thread_id) {
-            Some(state) if state.is_paused() && opens_thread => "  ← paused",
-            _ => "",
-        };
-        // The reason a message failed takes the text's place rather than
-        // sitting after it. On a failure the text is what the sender *tried* to
-        // say and the reason is what happened, and at eighty columns there is
-        // room for exactly one of them.
-        let said = trouble.unwrap_or_else(|| envelope.message.text.clone());
-        let (said, marked) = fit_row(used, &one_line(&said), marker, width);
-        spans.push(Span::styled(
-            said,
-            match (chosen, colour) {
-                (_, BAD) => bold(BAD),
-                (true, _) => bold(AGENT),
-                _ => fg(AGENT),
-            },
-        ));
-        if marked {
-            spans.push(Span::styled(marker.to_string(), fg(WARN)));
-        }
-        items.push(ListItem::new(Line::from(spans)));
-    }
-
-    if let Some(line) = filter_line(app) {
-        items.push(ListItem::new(Line::from("")));
-        items.push(ListItem::new(line));
-    }
-    f.render_widget(body(Workspace::Traffic, items, area.width), area);
-}
-
-/// The line above the log: whose bus this is, and what is left of its budget.
-///
-/// G4.S5 asks for the budget to be visible *before* it is spent, and this is
-/// the row that does it — the escalation card is far too late to be the first
-/// time anybody hears that two agents have been talking for two hundred turns.
-/// The work's colour tints the glyph, so one work's traffic is distinguishable
-/// from another's at a glance; the figures are the channel that survives
-/// `NO_COLOR`.
-fn traffic_header(app: &App, width: usize) -> Line<'static> {
-    if app.traffic_of.is_none() {
-        return Line::from(Span::styled("  nothing open", fg(MUTED)));
-    }
-    let left = app.traffic.budget_left();
-    // Bold and warning-coloured once the allowance is nearly gone, because a
-    // number that looks the same at 190 left and at 3 is a number nobody reads.
-    let tight = left * 10 <= app.traffic.budget;
-    let mut budget = format!("{left} of {} messages left", app.traffic.budget);
-    // The state filter, on the header rather than only in the notice `f`
-    // prints. A notice scrolls away and the narrowing does not, so a log that
-    // said nothing here would look empty for no reason the next time it was
-    // opened.
-    if app.traffic_shown != traffic::Shown::Everything {
-        budget.push_str(&format!(" · {}", app.traffic_shown.label()));
-    }
-    // Six cells of fixed furniture: the margin, the glyph and its space, and
-    // the gap before the budget. The budget is what survives a narrow pane —
-    // the title is repeated in the status bar and the allowance is not.
-    let room = width.saturating_sub(budget.chars().count() + 6);
-    let spans = vec![
-        Span::styled("  ", fg(MUTED)),
-        Span::styled("■ ", fg(work_colour(&app.traffic.colour))),
-        Span::styled(cut(&app.traffic.title, room), bold(AGENT)),
-        Span::styled("  ", fg(MUTED)),
-        Span::styled(budget, if tight { bold(WARN) } else { fg(MUTED) }),
-    ];
-    Line::from(spans)
-}
-
-/// The selected message, whole — which is what the log's rows cannot be.
-fn draw_traffic_detail(f: &mut Frame, app: &App, area: Rect) {
-    let lines: Vec<Line> = match app.selected_message() {
-        None => vec![Line::from(Span::styled(" nothing selected", fg(MUTED)))],
-        Some(envelope) => {
-            let held = app.traffic.held.contains(&envelope.message.id);
-            let mut lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        format!(" {} → {}", envelope.message.from, envelope.message.to),
-                        bold(USER),
-                    ),
-                    Span::styled(
-                        format!("   #{}", envelope.message.id),
-                        fg(MUTED),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    format!(
-                        " {} · depth {} · {}",
-                        traffic::state_word(envelope, held),
-                        envelope.depth,
-                        clock(envelope.message.at_ms)
-                    ),
-                    fg(MUTED),
-                )),
-            ];
-            // The reason above the message rather than below it. What a refused
-            // message *said* is the least useful thing about it — nobody read
-            // it — and burying why under the body is how a reader concludes
-            // the row was merely slow.
-            if let Some(trouble) = traffic::trouble(envelope, held) {
-                lines.push(Line::from(""));
-                // Wrapped like the body, and for a sharper reason: this is the
-                // sentence the whole screen exists to deliver, and a reason cut
-                // off at `is not a member o` is a reason nobody can act on.
-                for line in wrapped(&trouble, area.width.saturating_sub(3) as usize) {
-                    lines.push(Line::from(Span::styled(format!(" {line}"), bold(BAD))));
-                }
-            }
-            if let Some(state) = app.traffic.paused.get(&envelope.thread_id) {
-                if state.is_paused() {
-                    lines.push(Line::from(Span::styled(
-                        format!(" this thread is paused · {}", state.as_str().replace('_', " ")),
-                        fg(WARN),
-                    )));
-                }
-            }
-            lines.push(Line::from(""));
-            for line in wrapped(&envelope.message.text, area.width.saturating_sub(3) as usize) {
-                lines.push(Line::from(Span::styled(format!(" {line}"), fg(AGENT))));
-            }
-            lines
-        }
-    };
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(fg(USER))
-                .title(" the message ")
-                .title_bottom(fit_verbs(&keys::footer(Workspace::Traffic), area.width)),
-        ),
-        area,
-    );
-}
-
 /// A message as one line, because a row is one line and a message is prose.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Wrap prose to a width, on whole words.
-///
-/// Hand-rolled rather than `Wrap`, because the detail pane mixes wrapped body
-/// text with lines that must not wrap — the header, the reason, the thread
-/// state — and `Paragraph::wrap` is all or nothing.
-fn wrapped(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(LEAST_TEXT);
-    let mut lines: Vec<String> = Vec::new();
-    for paragraph in text.lines() {
-        let mut line = String::new();
-        for word in paragraph.split_whitespace() {
-            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
-                lines.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        lines.push(line);
-    }
-    lines
 }
 
 /// The team: who is on it, and what each of them is doing.
@@ -10633,7 +10400,7 @@ mod tests {
     }
 
     /// Selecting it swaps the detail pane for one about a conversation, keys
-    /// included: `s stop · r resume · a attach` are meaningless here and
+    /// included: `s stop · r resume · f fork` are meaningless here and
     /// offering them is how a footer stops being trusted.
     #[test]
     fn the_pinned_rows_detail_pane_describes_a_chat_not_a_run() {
@@ -14440,202 +14207,6 @@ mod tests {
         assert!(
             !row.contains(&session),
             "narrowed or not, the row is the card's: {row}"
-        );
-    }
-
-    // ---- the traffic log ----
-
-    /// A work with three agents on its bus, one exchange threaded, and one
-    /// message sent to somebody who is not a member of it.
-    ///
-    /// Built against a **real store** and read through `data::traffic_from` —
-    /// the loader the tick actually calls — rather than by assigning to
-    /// `app.traffic`. Threading, the depth, and the sentence explaining a
-    /// refusal are all facts about what `Store::post` wrote; a fixture built by
-    /// hand would assert that the renderer draws whatever it is handed, which
-    /// nobody doubted.
-    fn traffic_store() -> (RealStore, String) {
-        let store = RealStore::in_memory().expect("an in-memory store");
-        let work = store.create_work("port the parser").expect("a work");
-        store
-            .set_work_title(&work.id, "port the parser")
-            .expect("a title");
-        for name in ["asker", "answerer", "scribe"] {
-            store
-                .join_scope(
-                    Scope::Work,
-                    &work.id,
-                    name,
-                    HarnessKind::ClaudeCode,
-                    "engineer",
-                    None,
-                )
-                .expect("a member");
-        }
-
-        let post = |from: &str, to: &str, text: &str, replying_to: Option<i64>| -> Sent {
-            let mut p = Post::new(Scope::Work, &work.id, from, text).to(to);
-            if let Some(id) = replying_to {
-                p = p.replying_to(id);
-            }
-            store.post(&p).expect("a post")
-        };
-
-        let question = match post("asker", "answerer", "where does the lexer live?", None) {
-            Sent::Queued { ids, .. } => ids[0],
-            other => panic!("the question did not go on the bus: {other:?}"),
-        };
-        post(
-            "answerer",
-            "asker",
-            "in core, beside the tokeniser",
-            Some(question),
-        );
-        post("scribe", "asker", "the docs are written", None);
-        // The one that could not be delivered. `reljod` is the person's name on
-        // this bus and *is* a member of the work, so the refusal a real fleet
-        // produces needs a name that is not — exactly as `tests/e2e/jod/out/a2a.txt`
-        // records it.
-        let refused = post("asker", "nobody-here", "are you free?", None);
-        assert!(
-            matches!(refused, Sent::Undeliverable { .. }),
-            "the fixture must actually produce a refusal: {refused:?}"
-        );
-        (store, work.id)
-    }
-
-    fn traffic_app(store: &RealStore, work: &str) -> App {
-        let mut a = app();
-        a.traffic_of = Some(traffic::Watching::work(work));
-        a.traffic = crate::tui::data::traffic_from(store, a.traffic_of.as_ref().unwrap());
-        a.go(Workspace::Traffic);
-        a
-    }
-
-    /// **G5's check, word for word:** a rendered frame showing a threaded
-    /// exchange between three members with one undelivered message marked.
-    #[test]
-    fn the_traffic_log_shows_a_threaded_exchange_between_three_members_with_one_undelivered() {
-        let (store, work) = traffic_store();
-        let a = traffic_app(&store, &work);
-        let frame = rendered(&a, 150, 30);
-
-        for member in ["asker", "answerer", "scribe"] {
-            assert!(frame.contains(member), "{member} is not on the log:\n{frame}");
-        }
-
-        // Threaded: the reply is drawn *further in* than the question it
-        // answers, which is the whole of "a reply should be visibly under what
-        // it answers". Measured as a column rather than as a substring,
-        // because an indent is a position and asserting on spaces in a
-        // formatted string proves only that the string was formatted.
-        let question = column_of(&frame, "asker → answerer");
-        let answer = column_of(&frame, "answerer → asker");
-        assert!(
-            answer > question,
-            "the reply is not indented under its question — {answer} vs {question}:\n{frame}"
-        );
-
-        // Marked, and marked with the reason rather than with the state word.
-        // A8: mail that fails silently is worse than mail that fails.
-        assert!(
-            frame.contains("undeliverable"),
-            "the refusal is not marked:\n{frame}"
-        );
-        assert!(
-            frame.contains("`nobody-here` is not a member of this work"),
-            "the row says what went wrong but not why:\n{frame}"
-        );
-    }
-
-    /// Which column a phrase starts in, or a panic naming the frame — the
-    /// indent test is worthless if a missing row reads as column zero.
-    fn column_of(frame: &str, needle: &str) -> usize {
-        frame
-            .lines()
-            .find_map(|line| line.find(needle))
-            .unwrap_or_else(|| panic!("{needle:?} is not on the frame:\n{frame}"))
-    }
-
-    /// G4.S5: the allowance is on screen before it is spent, because the
-    /// escalation card is far too late to be the first time anybody hears that
-    /// two agents have been talking for two hundred turns.
-    #[test]
-    fn the_traffic_log_says_what_is_left_of_the_works_message_budget() {
-        let (store, work) = traffic_store();
-        let a = traffic_app(&store, &work);
-        let frame = rendered(&a, 150, 30);
-        // Three delivered messages spend the budget; the refused one does not,
-        // which is `MailState::counts_against_budget` and is core's rule rather
-        // than this screen's.
-        assert!(
-            frame.contains("197 of 200 messages left"),
-            "the budget is not on the screen:\n{frame}"
-        );
-    }
-
-    /// The work's colour is what tells one work's traffic from another's at a
-    /// glance, and it has to reach the header rather than staying in the store.
-    #[test]
-    fn the_traffic_header_is_tinted_with_the_works_own_colour() {
-        let (store, work) = traffic_store();
-        let colour = store
-            .work(&work)
-            .expect("the work")
-            .expect("the work exists")
-            .colour;
-        let a = traffic_app(&store, &work);
-        assert_eq!(a.traffic.colour, colour, "the loader dropped the colour");
-        let line = traffic_header(&a, 60);
-        let glyph = line
-            .spans
-            .iter()
-            .find(|s| s.content.trim() == "■")
-            .expect("the header carries a work glyph");
-        assert_eq!(
-            glyph.style.fg,
-            Some(work_colour(&colour)),
-            "the glyph is not the work's colour"
-        );
-        assert!(
-            line.spans.iter().any(|s| s.content.contains("port the parser")),
-            "and the header names the work"
-        );
-    }
-
-    /// The screen has to be honest before anything has been opened on it —
-    /// an empty box with no explanation reads as a broken screen.
-    #[test]
-    fn a_traffic_log_with_no_work_chosen_says_how_to_choose_one() {
-        let mut a = app();
-        a.go(Workspace::Traffic);
-        let frame = rendered(&a, 120, 20);
-        assert!(frame.contains("T on a fleet row"), "{frame}");
-    }
-
-    /// The state cycle narrows the log to what did not arrive, which is the
-    /// question this screen is opened to answer.
-    #[test]
-    fn the_state_filter_narrows_the_log_to_what_never_arrived() {
-        let (store, work) = traffic_store();
-        let mut a = traffic_app(&store, &work);
-        a.traffic_shown = traffic::Shown::Problems;
-        a.reconcile();
-        let frame = rendered(&a, 150, 30);
-        assert!(
-            frame.contains("`nobody-here` is not a member of this work"),
-            "{frame}"
-        );
-        assert!(
-            !frame.contains("the docs are written"),
-            "a delivered message survived the problems filter:\n{frame}"
-        );
-        // And the screen says it is narrowed. A notice scrolls away; the
-        // narrowing does not, so a log that only announced it once would look
-        // empty for no reason the next time it was opened.
-        assert!(
-            frame.contains(traffic::Shown::Problems.label()),
-            "the header does not say the log is narrowed:\n{frame}"
         );
     }
 

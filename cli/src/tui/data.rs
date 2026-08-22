@@ -38,13 +38,11 @@ use jod_core::schedule::{
 };
 use jod_core::activity as core_activity;
 use jod_core::store::{Edge, Fact, Origin, Store, StoredRun};
-use jod_core::team::{Scope, TeamTask};
+use jod_core::team::TeamTask;
 use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
 
 use super::app::{short_duration, Current};
-use super::traffic;
-use super::traffic::Watching;
 use super::workspace::Workspace;
 
 /// How a run, a fire or a delivery ended.
@@ -1432,14 +1430,14 @@ pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
 /// exactly, which a [`Node`] cannot: it carries no state, and inferring one
 /// from a label would be guessing.
 ///
-/// `show_closed` off is the cheaper path *and* the default, because a tree that
-/// opens as a list of everything ever done is one people stop reading.
+/// Only the live works are asked for: a tree that opens as a list of everything
+/// ever done is one people stop reading.
 ///
 /// What comes back is [`fleet::condense`]d: core answers with the whole forest,
 /// and the fleet screen shows two levels of it. This is the one place the fold
 /// happens, so every reader of `App::forest` — the rows, the cursor, the detail
 /// pane, the keys — is looking at the same tree the screen is.
-pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> Condensed {
+pub fn forest(jod: &Arc<Jod>) -> Condensed {
     let Some(store) = jod.store() else {
         return Condensed {
             nodes: Vec::new(),
@@ -1449,8 +1447,7 @@ pub fn forest(jod: &Arc<Jod>, show_closed: bool) -> Condensed {
             closed: HashSet::new(),
         };
     };
-    let want = if show_closed { Filter::All } else { Filter::Live };
-    let Ok((folded, closed)) = store.fleet(want) else {
+    let Ok((folded, closed)) = store.fleet(Filter::Live) else {
         return Condensed {
             nodes: Vec::new(),
             works: HashMap::new(),
@@ -1507,93 +1504,6 @@ pub fn watched_but_unswept(jod: &Arc<Jod>, now_ms: i64) -> bool {
         .flatten()
         .and_then(|v| v.parse::<i64>().ok());
     jod_core::ticker::sweep_is_stale(last, now_ms)
-}
-
-/// One scope's agent-to-agent traffic, and the bounds it is running against.
-///
-/// Five reads rather than one, and deliberately: `traffic` is the log,
-/// `bounds_for` and `messages_used` are the budget the bus itself enforces,
-/// `thread_state` is per thread because G4.S3 pauses a thread and never a work,
-/// and `mail_held` is the only thing that knows a queued message is waiting for
-/// a work that has already closed. Every one of them is an indexed read over a
-/// table bounded by one work's conversation, on the same tick the fleet already
-/// refreshes on.
-///
-/// A store error leaves the field as it is loaded so far rather than taking the
-/// UI down, like every other loader here.
-pub fn traffic(jod: &Arc<Jod>, watching: Option<&Watching>) -> traffic::Log {
-    let (Some(store), Some(watching)) = (jod.store(), watching) else {
-        return traffic::Log::default();
-    };
-    traffic_from(store, watching)
-}
-
-pub fn traffic_from(store: &Store, watching: &Watching) -> traffic::Log {
-    let messages = store
-        .traffic(watching.scope, &watching.id)
-        .unwrap_or_default();
-
-    // The title and the colour come from the work itself. A team has neither,
-    // and says so by being named after itself rather than by borrowing a
-    // work's tint — the colour is what distinguishes one *work* from another.
-    let (title, colour) = match watching.scope {
-        Scope::Work => match store.work(&watching.id) {
-            Ok(Some(work)) => {
-                let title = if work.title.trim().is_empty() {
-                    work.id.chars().take(8).collect()
-                } else {
-                    work.title
-                };
-                (title, work.colour)
-            }
-            _ => (watching.id.chars().take(8).collect(), String::new()),
-        },
-        Scope::Team => (watching.id.clone(), String::new()),
-    };
-
-    // Read from the bus rather than off `works.messages_used`: `bounds_for` is
-    // the function that actually refuses a message, so a second number on the
-    // screen that could disagree with it would be worse than no number.
-    let bounds = store
-        .bounds_for(watching.scope, &watching.id)
-        .unwrap_or_default();
-    let used = store
-        .messages_used(watching.scope, &watching.id)
-        .unwrap_or_default();
-
-    // One state per distinct thread. The list is short — it is bounded by the
-    // conversations one work has had — and asking per message would ask the
-    // same question once per hop.
-    let mut paused: HashMap<String, jod_core::team::ThreadState> = HashMap::new();
-    for envelope in &messages {
-        if paused.contains_key(&envelope.thread_id) {
-            continue;
-        }
-        if let Ok(state) = store.thread_state(watching.scope, &watching.id, &envelope.thread_id) {
-            paused.insert(envelope.thread_id.clone(), state);
-        }
-    }
-
-    // Mail that is waiting and will never move, because the work it was
-    // addressed into is over. `queued` is the honest state and the misleading
-    // word; this is what tells the two apart.
-    let held: HashSet<i64> = store
-        .mail_held()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|w| w.scope == watching.scope && w.team == watching.id)
-        .flat_map(|w| w.pending.into_iter().map(|m| m.id))
-        .collect();
-
-    traffic::Log {
-        title,
-        colour,
-        used,
-        budget: bounds.message_budget,
-        messages,
-        paused,
-        held,
-    }
 }
 
 // ---- the decision rail, and the `@` picker ------------------------------

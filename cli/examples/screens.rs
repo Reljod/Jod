@@ -130,38 +130,6 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", render(&app));
     }
 
-    // The traffic log, which has no digit and so is not in the menu above: it
-    // is the fleet's second level, reached with `T` on a row. Rendered for the
-    // first work that has one, because a work with an empty bus renders the
-    // empty state and says nothing about whether the loader works.
-    if let Some(store) = jod.store() {
-        let busiest = store
-            .works(jod_core::works::Filter::All)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|w| {
-                let used = store
-                    .messages_used(jod_core::team::Scope::Work, &w.id)
-                    .unwrap_or_default();
-                (used, w.id)
-            })
-            .max_by_key(|(used, _)| *used);
-        match busiest.filter(|(used, _)| *used > 0) {
-            Some((_, id)) => {
-                app.traffic_of = Some(tui::traffic::Watching::work(&id));
-                app.traffic = tui::data::traffic_from(&store, app.traffic_of.as_ref().unwrap());
-                app.go(Workspace::Traffic);
-                println!();
-                println!("── {} {}", Workspace::Traffic.title(), "─".repeat(52));
-                println!("{}", render(&app));
-            }
-            None => {
-                println!();
-                println!("── fleet · traffic ── no work on this database has any traffic yet");
-            }
-        }
-    }
-
     // The fleet with a repository opened, which is the screen the tree exists
     // for: a plain render shows every project shut, and shut projects say
     // nothing about whether the roster inside them is right.
@@ -302,7 +270,7 @@ async fn load(jod: &Arc<Jod>, filter: Option<String>) -> anyhow::Result<App> {
     // full catalog in it — the one claim the example exists to make, failing on
     // the one box a reader would check it against.
     app.projects = tui::data::projects(jod);
-    let tree = tui::data::forest(jod, app.tree.show_closed);
+    let tree = tui::data::forest(jod);
     app.forest = tree.nodes;
     app.closed_works = tree.closed;
     app.work_of = tree.works;
