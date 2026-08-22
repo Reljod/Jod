@@ -1350,6 +1350,46 @@ impl Store {
             .is_some())
     }
 
+    /// Move everything addressed to the main chat onto its delivery queue, and
+    /// say how many messages moved.
+    ///
+    /// The sweep form of what [`crate::ticker::Ticker::tick_mail`] does for the
+    /// main chat one waiting address at a time, lifted out of the tick so that a
+    /// process which *is* the main chat can drain its own mail without a daemon.
+    ///
+    /// `jod tui` is that process, and the distinction is not academic. The
+    /// console renders the chat from entries it holds in memory and never reads
+    /// them back, so a turn the daemon takes against the same conversation in
+    /// another process lands in the store and is never drawn in front of the
+    /// person who asked the question. The delegated run reports back, the
+    /// database records it, and the screen shows nothing — which is exactly the
+    /// failure this exists to end. Whoever holds the chat has to take the turn.
+    ///
+    /// Returns zero, and does nothing, when there is no main chat, when it has
+    /// never run and so has no session to resume, or when nothing is waiting.
+    /// Those are the same three refusals [`Self::main_chat_is_resumable`] and
+    /// the tick already make, for the same reasons.
+    pub fn collect_main_chat_mail(&self) -> Result<usize> {
+        let Some(conversation) = self.pinned_conversation()? else {
+            return Ok(0);
+        };
+        if !self.main_chat_is_resumable()? {
+            return Ok(0);
+        }
+        let mut moved = 0;
+        for held in self.mail_waiting()? {
+            // Asked of the row rather than of the name, the same way the tick
+            // asks it: a teammate somebody called `main` before the name was
+            // reserved must keep receiving its own mail.
+            if !self.is_main_chat_member(held.scope, &held.team, &held.member.name)? {
+                continue;
+            }
+            moved +=
+                self.hand_mail_to_conversation(&held.team, &held.member.name, &conversation)?;
+        }
+        Ok(moved)
+    }
+
     /// Open a two-party bus between a delegated run and the main chat.
     ///
     /// `delegate` starts a run that belongs to no work and therefore to no
@@ -3452,6 +3492,69 @@ mod tests {
             .map(|a| a.name)
             .collect();
         assert_eq!(names, vec![MAIN.to_string()]);
+    }
+
+    /// The measured failure this drain exists for: Reljod asked the chat for
+    /// the weather, it delegated the lookup, the run answered, and nothing
+    /// appeared on his screen. The message was on the bus, correctly addressed,
+    /// and the only thing that moves it lived inside a daemon tick that was not
+    /// running. A console holding the chat has to be able to do this itself.
+    #[test]
+    fn the_chat_can_collect_what_a_delegated_run_reported() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "manila-weather", HarnessKind::ClaudeCode)
+            .unwrap();
+        s.post(&Post::new(Scope::Team, "run-1", "manila-weather", "it is 30C and cloudy").to(MAIN))
+            .unwrap();
+
+        assert_eq!(s.collect_main_chat_mail().unwrap(), 1);
+
+        let injection = s
+            .plan_injection(&main, false)
+            .unwrap()
+            .expect("the chat must have a turn waiting");
+        assert!(
+            injection.prompt.contains("it is 30C and cloudy"),
+            "{}",
+            injection.prompt
+        );
+        assert!(
+            s.team_unread("run-1", MAIN).unwrap().is_empty(),
+            "the message was queued and left on the bus as well, so it will be delivered twice"
+        );
+    }
+
+    /// Draining twice must not say the same thing twice. The bus and the queue
+    /// settle in one transaction precisely so a second pass finds nothing.
+    #[test]
+    fn collecting_twice_delivers_the_report_once() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        s.post(&Post::new(Scope::Team, "run-1", "reporter", "the answer is 42").to(MAIN))
+            .unwrap();
+
+        assert_eq!(s.collect_main_chat_mail().unwrap(), 1);
+        assert_eq!(s.collect_main_chat_mail().unwrap(), 0);
+        assert_eq!(s.pending_for(&main).unwrap().len(), 1);
+    }
+
+    /// The same refusal the tick makes. A pinned chat that has never run has no
+    /// session to resume, and an orchestrator answered into a fresh context
+    /// would reply having forgotten what it delegated. Holding is not dropping:
+    /// the message stays on the bus, visible.
+    #[test]
+    fn a_chat_that_has_never_run_collects_nothing() {
+        let s = Store::in_memory().unwrap();
+        let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        s.post(&Post::new(Scope::Team, "run-1", "reporter", "done").to(MAIN))
+            .unwrap();
+
+        assert_eq!(s.collect_main_chat_mail().unwrap(), 0);
+        assert_eq!(s.team_unread("run-1", MAIN).unwrap().len(), 1);
+        assert!(s.pending_for(&main).unwrap().is_empty());
     }
 
     /// No main chat means no address, and an address that leads nowhere is
