@@ -6819,7 +6819,7 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.goals = data::goals(jod);
     app.hooks = data::hooks(jod);
     app.activity = data::activity(jod);
-    app.board = data::tasks(jod, app.team.as_deref());
+    app.board = data::tasks(jod, app.team.as_deref(), app.now_ms);
     // The forest, and then the cursor onto a row that still exists — the tree
     // reshapes on every tick as runs finish, which is the whole reason the
     // selection is an id.
@@ -9976,12 +9976,14 @@ mod tests {
                 title: "port the parser".into(),
                 owner: None,
                 status: "open".into(),
+                created_at_ms: 0,
             },
             jod_core::team::TeamTask {
                 id: "t2".into(),
                 title: "write the docs".into(),
                 owner: None,
                 status: "done".into(),
+                created_at_ms: 0,
             },
         ];
         // The cursor is an id, so it has to be placed once the rows exist —
@@ -10061,6 +10063,7 @@ mod tests {
                 title: "x".into(),
                 owner: None,
                 status: "open".into(),
+                created_at_ms: 0,
             })
             .collect()
     }
@@ -10939,6 +10942,7 @@ mod tests {
             title: "Port the parser to the new AST".into(),
             owner: None,
             status: "open".into(),
+            created_at_ms: 0,
         }];
         app.go(Workspace::Tasks);
         app

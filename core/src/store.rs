@@ -2872,8 +2872,8 @@ impl Store {
     pub fn team_tasks(&self, team: &str) -> Result<Vec<TeamTask>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(title, id), owner, status FROM tasks
-              WHERE team = ?1 ORDER BY rowid",
+            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0)
+               FROM tasks WHERE team = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(params![team], |r| {
             Ok(TeamTask {
@@ -2881,6 +2881,7 @@ impl Store {
                 title: r.get(1)?,
                 owner: r.get(2)?,
                 status: r.get(3)?,
+                created_at_ms: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

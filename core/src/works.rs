@@ -1222,8 +1222,8 @@ impl Store {
     pub fn work_tasks(&self, work_id: &str) -> Result<Vec<crate::team::TeamTask>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(title, id), owner, status FROM tasks
-              WHERE work_id = ?1 ORDER BY created_at_ms, id",
+            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0)
+               FROM tasks WHERE work_id = ?1 ORDER BY created_at_ms, id",
         )?;
         let rows = stmt.query_map(params![work_id], |r| {
             Ok(crate::team::TeamTask {
@@ -1231,6 +1231,7 @@ impl Store {
                 title: r.get(1)?,
                 owner: r.get(2)?,
                 status: r.get(3)?,
+                created_at_ms: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

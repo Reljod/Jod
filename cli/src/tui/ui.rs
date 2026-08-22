@@ -5253,8 +5253,14 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
             ));
         }
         if show_age {
+            // A dash rather than `0s` when nothing recorded when this task was
+            // put on the board. `0s` reads as "just now", which is a claim
+            // about a moment that never happened.
             spans.push(Span::styled(
-                super::app::short_duration(t.age_ms),
+                match t.age_ms {
+                    0 => "—".to_string(),
+                    age => super::app::short_duration(age),
+                },
                 fg(MUTED),
             ));
         }
@@ -6597,6 +6603,7 @@ mod tests {
             title: title.into(),
             owner: owner.map(str::to_string),
             status: status.into(),
+            created_at_ms: 0,
         }
     }
 
@@ -12146,6 +12153,56 @@ mod tests {
         assert!(
             wide.contains("nothing remembered yet — /remember writes one"),
             "nothing is cut when nothing needs to be:\n{wide}"
+        );
+    }
+
+    /// The board says how old a task is, and says nothing when it cannot.
+    ///
+    /// `age_ms` was hard-coded to zero in both converters, so every row read
+    /// `0s` — "just now" — about tasks that had been sitting there for hours.
+    /// The rule this repo already states for the pinned chat's row applies
+    /// here: a row with no age has none, and `0s` is a claim that something
+    /// just happened.
+    #[test]
+    fn the_board_ages_a_task_and_admits_when_it_cannot() {
+        use jod_core::team::TeamTask;
+
+        let mut a = app();
+        a.now_ms = 10_000_000;
+        a.tasks = vec![
+            TeamTask {
+                id: "t-old".into(),
+                title: "port the parser".into(),
+                owner: None,
+                status: "open".into(),
+                created_at_ms: a.now_ms - 3_600_000,
+            },
+            TeamTask {
+                id: "t-undated".into(),
+                title: "written by an older build".into(),
+                owner: None,
+                status: "open".into(),
+                created_at_ms: 0,
+            },
+        ];
+        a.go(Workspace::Tasks);
+        a.reconcile();
+
+        let frame = rendered(&a, 170, 30);
+        let row = |needle: &str| {
+            frame
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("expected a row for {needle}:\n{frame}"))
+                .to_string()
+        };
+        let old_row = row("port the parser");
+        assert!(old_row.contains("1h"), "an hour old reads as an hour:\n{old_row}");
+        assert!(!old_row.contains("0s"), "and never as just now:\n{old_row}");
+        let undated = row("written by an older build");
+        assert!(
+            undated.contains('\u{2014}'),
+            "no timestamp is a dash, not a zero:\n{undated}"
         );
     }
 

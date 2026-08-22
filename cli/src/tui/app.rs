@@ -1038,7 +1038,12 @@ pub fn one_line(s: &str, max: usize) -> String {
 /// The screen wants a run, a runnable check and a blocked-by pair that
 /// `TeamTask` does not carry yet, so those come back empty and the screen says
 /// so — rather than the board being invisible until the store catches up.
-fn task_row_from(task: &TeamTask) -> TaskRow {
+/// `now_ms` so the age is real. It used to be hard-coded to zero, so every task
+/// the store handed over read `0s` — "just now" — however long it had been on
+/// the board. The rule this repo already states for the pinned chat's row
+/// applies here too: a row with no age has none, and `0s` is a claim that
+/// something just happened.
+fn task_row_from(task: &TeamTask, now_ms: i64) -> TaskRow {
     let state = if task.is_done() {
         TaskState::Done
     } else if task.is_claimed() {
@@ -1052,7 +1057,13 @@ fn task_row_from(task: &TeamTask) -> TaskRow {
         owner: task.owner.clone(),
         state,
         run: None,
-        age_ms: 0,
+        // Zero stands for "no age recorded", which the renderer prints as a
+        // dash. A task written by an older build has no timestamp, and
+        // inventing one would be the fault this is fixing, backwards.
+        age_ms: match task.created_at_ms {
+            0 => 0,
+            at => now_ms.saturating_sub(at).max(0),
+        },
         what: task.title.clone(),
         check: String::new(),
         blocked_by: Vec::new(),
@@ -2348,7 +2359,10 @@ impl App {
     /// promoting tasks to a screen never *removes* the board that exists today.
     pub fn task_rows(&self) -> Vec<TaskRow> {
         let source: Vec<TaskRow> = if self.board.is_empty() {
-            self.tasks.iter().map(task_row_from).collect()
+            self.tasks
+                .iter()
+                .map(|t| task_row_from(t, self.now_ms))
+                .collect()
         } else {
             self.board.clone()
         };

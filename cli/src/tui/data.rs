@@ -1309,7 +1309,7 @@ fn activity_from(store: &Store) -> Vec<ActivityItem> {
 /// run doing the task, the task's age (there is no created-at), its runnable
 /// check, and the blocked-by/blocks pair. Each shows as empty rather than as a
 /// guess.
-pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
+pub fn tasks(jod: &Arc<Jod>, team: Option<&str>, now_ms: i64) -> Vec<TaskRow> {
     let Some(store) = jod.store() else {
         return Vec::new();
     };
@@ -1320,7 +1320,7 @@ pub fn tasks(jod: &Arc<Jod>, team: Option<&str>) -> Vec<TaskRow> {
     teams
         .iter()
         .flat_map(|t| store.team_tasks(t).unwrap_or_default())
-        .map(task_row)
+        .map(|t| task_row(t, now_ms))
         .collect()
 }
 
@@ -1643,7 +1643,10 @@ pub fn candidates(roots: &[Root]) -> Vec<Arc<Vec<String>>> {
         .collect()
 }
 
-fn task_row(t: TeamTask) -> TaskRow {
+/// `now_ms` so the age column is real. It was hard-coded to zero here and in
+/// `App::task_row_from`, so every task on the board read `0s` — "just now" —
+/// however long it had been sitting there.
+fn task_row(t: TeamTask, now_ms: i64) -> TaskRow {
     TaskRow {
         state: match t.status.as_str() {
             "done" => TaskState::Done,
@@ -1654,7 +1657,13 @@ fn task_row(t: TeamTask) -> TaskRow {
         },
         owner: t.owner,
         run: None,
-        age_ms: 0,
+        // Zero means "no age recorded" and the renderer prints a dash for it.
+        // A task written before the column existed has no timestamp, and
+        // inventing one would be this fault backwards.
+        age_ms: match t.created_at_ms {
+            0 => 0,
+            at => now_ms.saturating_sub(at).max(0),
+        },
         what: t.title.clone(),
         check: String::new(),
         blocked_by: Vec::new(),

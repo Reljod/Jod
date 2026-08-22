@@ -130,6 +130,15 @@ pub struct TeamTask {
     #[serde(default)]
     pub owner: Option<String>,
     pub status: String,
+    /// When it was put on the board.
+    ///
+    /// Carried because the board draws an age column and had nothing to fill
+    /// it from, so every row read `0s` — "just now" — about tasks that were
+    /// hours old. `serde(default)` so a payload written by an older build
+    /// deserialises to zero, which the renderer treats as "no age" rather than
+    /// as this instant.
+    #[serde(default)]
+    pub created_at_ms: i64,
 }
 
 impl TeamTask {
@@ -2134,6 +2143,7 @@ mod tests {
             title: "port the parser".into(),
             owner: None,
             status: "open".into(),
+            created_at_ms: 0,
         };
         assert!(!t.is_claimed());
         assert!(!t.is_done());
