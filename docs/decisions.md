@@ -4343,3 +4343,18 @@ The window is not rare. A doorman takes tens of seconds and main compacts every
 few minutes, so a message being judged when a compaction lands is ordinary
 rather than a corner case. `0033` moves the rows already stranded; the fork
 carries them from now on.
+
+**A tool that stops a run reads the runs back first.** An MCP server is a fresh
+process that has started nothing, so its map of running agents is empty and
+`kill_agent` refuses a run that is plainly alive. `stop_agent` had always called
+`rehydrate` first; `interrupt_main` was written without it and was therefore
+strictly worse than the tool beside it, recovering nothing where its sibling
+recovered anything inside the window. Pinned as parity between the two rather
+than as one tool's rule, so the next verb that stops a run inherits the
+question.
+
+Rehydrating is not sufficient and was never meant to be. It loads the most
+recent rows, and the main chat is the oldest thing on the box — every new run
+pushes it further down — so the one run a doorman ever wants to stop is the one
+most likely to have fallen out of the window. What closes that is `kill_agent`
+falling back to the stored process group, which landed separately.

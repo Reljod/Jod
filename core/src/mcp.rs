@@ -2876,6 +2876,23 @@ impl Server {
                 ))
             })?;
 
+        // **The same rehydrate `stop_agent` does, for the same reason.** This
+        // server is a fresh process that has started nothing, so its map of
+        // running agents is empty and `kill_agent` would refuse a run that is
+        // plainly alive. Omitting it made this tool strictly worse than its
+        // sibling: `stop_agent` recovers a run inside the window and this
+        // recovered none at all.
+        //
+        // It is not sufficient on its own and is not meant to be. `rehydrate`
+        // loads the most recent rows and the main chat is the oldest thing on
+        // the box, so the one run a doorman ever wants to stop is the one most
+        // likely to have fallen out of the window. What closes that is
+        // `kill_agent`'s fallback to the stored process group; this is what
+        // gets the in-memory path right when the run is in reach.
+        self.jod
+            .rehydrate(REHYDRATE)
+            .await
+            .map_err(|e| ToolError::Refused(format!("could not read the runs: {e}")))?;
         self.jod
             .kill_agent(&run_id)
             .await
@@ -8310,6 +8327,44 @@ mod tests {
                 "the call has to reach the run lookup, which is what proves it was \
                  not stopped at the identity gate: {said}"
             );
+        }
+
+        /// Both ways of stopping a run read the database back first.
+        ///
+        /// **Asserted against the source, because the property is the presence
+        /// of a call rather than an outcome.** Proving it by behaviour needs a
+        /// live run in a second process, which is exactly the setup that hid
+        /// the bug: an MCP server is a fresh process that has started nothing,
+        /// so its map of running agents is empty and `kill_agent` refuses a run
+        /// that is plainly alive.
+        ///
+        /// `stop_agent` had this and `interrupt_main` did not, which made the
+        /// newer tool strictly worse than the one it sits beside — and the
+        /// difference is invisible in every test that uses one server, because
+        /// there the map is populated. Pinned as parity rather than as one
+        /// tool's rule, so the next verb that stops a run inherits the question.
+        #[test]
+        fn every_tool_that_stops_a_run_reads_the_runs_back_first() {
+            let source = include_str!("mcp.rs");
+            for tool in ["stop_agent", "interrupt_main"] {
+                let at = source
+                    .find(&format!("async fn {tool}(&self"))
+                    .unwrap_or_else(|| panic!("`{tool}` is in this file"));
+                let body = &source[at..];
+                let end = body.find("\n    }\n").map(|n| n + 1).unwrap_or(body.len());
+                let body = &body[..end];
+                let rehydrates = body.find("rehydrate(");
+                let kills = body.find("kill_agent(");
+                assert!(
+                    rehydrates.is_some(),
+                    "`{tool}` stops a run without reading the runs back, so it can only \
+                     stop what this process started — which is never the main chat"
+                );
+                assert!(
+                    rehydrates < kills,
+                    "`{tool}` reads the runs back after stopping, which is too late"
+                );
+            }
         }
 
         /// A stop with nothing said is a turn that ends and reads as a crash.
