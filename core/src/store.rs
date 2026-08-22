@@ -2109,7 +2109,7 @@ impl Store {
                 continue;
             }
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute_batch(sql)?;
+            apply_migration(&tx, sql)?;
             tx.execute(
                 "INSERT INTO migrations (name, applied_at_ms) VALUES (?1, ?2)",
                 params![name, now_ms()],
@@ -4827,6 +4827,98 @@ impl Store {
     }
 }
 
+/// Run one migration, skipping any statement whose object is already there.
+///
+/// The ledger keys on the migration's name, and a name is only stable once the
+/// migration has merged. Two branches number their migrations in parallel, the
+/// second one to merge gets renumbered, and both of them get edited while they
+/// are open — so anyone who ran a branch build has a database carrying an
+/// earlier name and an earlier *shape* of a migration that main now spells
+/// differently. On the next run the migration counts as pending, the batch
+/// replays from the top, and the first `ADD COLUMN` of a column that is already
+/// there takes the whole open down with `duplicate column name`.
+///
+/// So statements are applied one at a time and the ones SQLite says are already
+/// satisfied are passed over, which lets the rest of the migration — the half
+/// that was added after the branch build ran — apply and finish. The schema
+/// converges on what the merged migration describes instead of stopping at the
+/// first object it happens to share with the older one.
+///
+/// Only `CREATE` and `ADD COLUMN` are ever skipped this way, because they are
+/// the only statements that fail with these messages. An `INSERT` or an
+/// `UPDATE` that a migration uses to backfill still fails the whole thing,
+/// which is what it should do.
+fn apply_migration(tx: &rusqlite::Transaction, sql: &str) -> Result<()> {
+    for statement in statements(sql) {
+        match tx.execute_batch(statement) {
+            Ok(()) => {}
+            Err(err) if already_there(&err) => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Cut a migration into the statements it is made of.
+///
+/// A semicolon is only a boundary if what precedes it is a finished statement,
+/// which is not something scanning for `;` can tell on its own: these
+/// migrations are more comment than SQL, and a `CREATE TRIGGER` carries
+/// semicolons inside its body. So each candidate is handed to SQLite's own
+/// parser, which knows about comments, string literals and trigger bodies
+/// because it is the thing that will run the result.
+///
+/// Anything after the final semicolon is kept rather than dropped. Every
+/// migration here ends in one, so in practice that is trailing whitespace and a
+/// comment or two, and running those is a no-op — but a statement written one
+/// day without its semicolon has to fail loudly instead of being skipped.
+fn statements(sql: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (at, _) in sql.match_indices(';') {
+        let candidate = &sql[start..=at];
+        if complete(candidate) {
+            out.push(candidate);
+            start = at + 1;
+        }
+    }
+    let rest = &sql[start..];
+    if !rest.trim().is_empty() {
+        out.push(rest);
+    }
+    out
+}
+
+/// Whether SQLite reads this text as one complete statement.
+fn complete(sql: &str) -> bool {
+    let Ok(text) = std::ffi::CString::new(sql) else {
+        return false;
+    };
+    // SAFETY: `sqlite3_complete` reads the NUL-terminated string it is handed
+    // and nothing else, and `text` outlives the call.
+    unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) != 0 }
+}
+
+/// Whether SQLite is refusing a statement because what it creates exists.
+///
+/// Matched on the message rather than the code: SQLite returns a plain
+/// `SQLITE_ERROR` for every one of these, so the message is the only thing that
+/// tells `duplicate column name: paths` apart from a migration with a typo in
+/// it. `already exists` covers a table, an index, a view and a trigger.
+///
+/// Both error shapes, because SQLite decides all of this while it is parsing
+/// rather than while it is running: a failure to prepare arrives as
+/// `SqlInputError`, and the same complaint from anywhere else as
+/// `SqliteFailure`.
+fn already_there(err: &rusqlite::Error) -> bool {
+    let message = match err {
+        rusqlite::Error::SqlInputError { msg, .. } => msg.as_str(),
+        rusqlite::Error::SqliteFailure(_, Some(msg)) => msg.as_str(),
+        _ => return false,
+    };
+    message.contains("duplicate column name") || message.contains("already exists")
+}
+
 /// Where the scratch lane's two windows are stored.
 ///
 /// Named here so the screen that edits them and the sweeps that obey them are
@@ -5960,6 +6052,72 @@ mod tests {
         // And the new columns work on the migrated table.
         store.set_run_process("done", 111, 111).unwrap();
         assert_eq!(store.run("done").unwrap().unwrap().pgid, Some(111));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The state a branch build leaves behind, and the crash it used to cause.
+    ///
+    /// `0031_a_task_owns_its_files` was open as a pull request while it was
+    /// being written. A build from that branch applied the two statements it
+    /// had at the time — `tasks.paths` and `lease_sharers` — and wrote its own
+    /// name into the ledger. By the time it merged it had grown two more
+    /// columns and been renumbered, so the merged binary saw a migration it had
+    /// no record of, replayed it from the top, and died on `duplicate column
+    /// name: paths` before it could reach the two columns that really were
+    /// missing. Every command that opens the database failed, including `tui`.
+    ///
+    /// Rewound here rather than hand-built, so the fixture is the real schema
+    /// and not one this test invented.
+    #[test]
+    fn a_migration_half_applied_under_an_older_name_finishes_on_the_next_open() {
+        let dir = std::env::temp_dir().join(format!("jod-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jod.db");
+        drop(Store::open(&path).unwrap());
+
+        // Put the database back into the shape the branch build left it in: the
+        // two objects that migration had when it was still open, under the name
+        // and number it had then, and nothing of what it grew afterwards.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM migrations WHERE name = '0031_a_task_owns_its_files';
+                 INSERT INTO migrations (name, applied_at_ms)
+                   VALUES ('0029_a_task_owns_its_files', 0);
+                 ALTER TABLE conversations DROP COLUMN task_id;
+                 ALTER TABLE leases DROP COLUMN auto_pr_asked_at_ms;",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).expect("a half-applied migration must not fail the open");
+
+        let conn = store.conn.lock().unwrap();
+        for (table, column) in [
+            ("conversations", "task_id"),
+            ("leases", "auto_pr_asked_at_ms"),
+            ("tasks", "paths"),
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    params![table, column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{table}.{column} is missing from the schema");
+        }
+        let recorded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE name = '0031_a_task_owns_its_files'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1, "the migration must be recorded under its merged name");
+        drop(conn);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
