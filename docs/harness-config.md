@@ -52,12 +52,16 @@ Tab can move down from it and never up.
 
 The mode you choose is **inherited by everything the chat delegates**. It
 reaches the orchestrator, becomes its MCP server's `--max-permission`, and
-`open_work` opens each background session at that ceiling unless it asks for
-less. Every one of those three used to be a constant, and together they were a
+`delegate`, `open_work` and `ask_manager` all start their session at that
+ceiling. Every one of those used to be a constant, and together they were a
 lie: the console said `auto`, work two levels down ran in `accept_edits`, and a
 background session refused `git init` in a directory it had been told to
-create. `delegate` still takes an explicit mode, so an agent may ask for less
-for a child of its own.
+create.
+
+None of those three tools takes a mode any more. While they did, the ceiling
+meant a model could only ask for *less* — which sounds harmless and is how a
+chat in `auto` ended up with a one-shot weather lookup stopped on a card asking
+to run `curl`. The only mode a run can be in is the one on the status bar.
 
 ## Standing permission
 
