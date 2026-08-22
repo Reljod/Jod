@@ -1,5 +1,29 @@
 # SPEC — main answers again, and anything running can be interrupted
 
+> **Shipped.** Kept because it is the only written record of the harness survey
+> that settled the question — what Claude Code, Codex and OpenCode actually do
+> about a blocked input box, and what that cost argument implies. The decision
+> itself lives in `docs/decisions.md`, under *Main answers again, and the
+> assistant guards the door instead*, which is where the reasoning is supposed
+> to live. Nothing below is outstanding work.
+>
+> Two things were built differently from what E2 and E3 describe, and both are
+> worth knowing before reading them as the code:
+>
+> - **The console starts a doorman too, not only the tick.** E2.S4 puts the
+>   spawn in `Ticker::tick_deliveries` alone. The daemon ticks once a minute,
+>   which is right for a card answered while nobody was watching and useless for
+>   a correction typed to stop a turn going the wrong way — so the terminal
+>   starts one on the keypress as well. Both claim the rows first, so only one
+>   ever runs.
+> - **The console drains the queue at the end of a turn too.** Same reason, same
+>   guard: both callers go through `plan_injection`, which only speaks about a
+>   conversation that is not busy.
+>
+> One thing was added that the spec does not mention: the assistant is the first
+> role with a built-in default — AGY on `gpt-oss-120b-medium` — rather than
+> inheriting whatever the caller was paying for.
+
 Main used to answer a simple question itself. #229 took that away, because
 main's turn is what holds the input box shut and a chat you cannot type into is
 the one failure this chat cannot have. The fix was a new layer: main hands every

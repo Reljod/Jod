@@ -4192,3 +4192,58 @@ object it happens to share with the older one. Only `CREATE` and `ADD COLUMN`
 are ever skipped, since they are the only statements that fail this way; a
 backfilling `INSERT` or `UPDATE` still takes the whole migration down, which is
 what it should do.
+
+## Main answers again, and the assistant guards the door instead
+
+The entry above — *Main hands every instruction to an assistant and answers
+nothing itself* — is left standing because it is the honest record of what was
+believed at the time, and the diagnosis in it was right. What was wrong was the
+cure.
+
+A blocked input box is a problem in the terminal. It was solved with a model: an
+extra layer, on every instruction, whose entire job was to stop main from having
+to think while the box was shut. Nothing else solves it that way. In Claude
+Code, Codex and OpenCode the agent you type at both answers and delegates, and
+typing while it works is handled where the typing happens — the message is
+queued, and there is a key that interrupts. Anthropic's own guidance on
+multi-agent systems prices the extra hop at three to ten times the tokens and
+says to split work only where context can genuinely be isolated. Routing an
+instruction isolates nothing: the second layer needs everything the first one
+had.
+
+So the branch is back with main, `ask_manager` and `delegate` are no longer
+refused to it, and `ask_assistant` is gone as a tool. The block is broken
+instead of avoided, in three parts:
+
+- **What you type into a busy chat goes into the store**, as a `Kind::Human`
+  row in `pending_deliveries`, rather than into a `Vec<String>` only the
+  terminal could see. That queue already existed and already had a variant
+  meaning "Reljod, typing into a running session"; nothing had ever written one.
+  Now the console, the daemon and anything else that grows a way in all fill the
+  same queue, and a message survives the terminal being closed.
+- **An assistant reads it.** `plan_injection` used to answer "speak" or "not
+  yet", and a turn in flight was always "not yet". It has a third answer now,
+  and the layer that made every routing decision has exactly one job: read what
+  was typed, read what the turn in flight is doing, and say whether the message
+  can wait. That is a job main structurally cannot do, because main is the thing
+  that is busy. It runs on AGY's `gpt-oss-120b-medium` by default, which is the
+  first built-in any role has had — the decision is small, it happens every time
+  somebody types into a busy chat, and paying frontier prices for it is the
+  thing the roles table was built to stop.
+- **Escape stops the turn in front of you, and `Shift-Esc` stops everything.**
+  Both keep every conversation: the run dies, the harness session survives, and
+  each chat carries on the moment somebody says what to do instead.
+
+**An interrupt is a kill and a resume, not a splice, and that is a real loss.**
+`delivery.rs` rests on a prompt being assembled once at spawn, and `proc.rs`
+closes the harness's stdin deliberately, so there is no way to put a sentence
+into a turn that is already running. Stopping it and delivering the message as
+the next turn is what is left. Whatever the stopped turn had not written down is
+gone. True mid-turn steering, the way Codex does it, would mean holding stdin
+open and would work on one of the three harnesses; if it is ever wanted it is
+its own spec.
+
+**The doorman holds when it cannot tell, and the brief says why rather than just
+saying so.** The two mistakes are different sizes. A message wrongly held costs
+a wait that ends by itself when the turn finishes. A message wrongly acted on
+throws away a turn Reljod asked for, and nothing brings it back.
