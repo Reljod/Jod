@@ -2564,21 +2564,300 @@ async fn main_chat(
     wait_for_orchestrator(jod, &agent.id).await
 }
 
+/// How many of the run's own last words `jod main --wait` keeps to explain a
+/// failure with.
+///
+/// The same idea as the supervisor's `TAIL_LINES`, and for the same reason: the
+/// sentence that says what went wrong is nearly always the last thing printed,
+/// and a harness that failed after a page of output should not push that
+/// sentence off the screen with the page.
+const REASON_LINES: usize = 20;
+
+/// How long to keep re-reading the run's row before giving up on a verdict.
+///
+/// The supervisor writes the `Finished` event and then, on the very next
+/// statement, the run's status. This process learns about the event by polling
+/// the database, so a status that still says `running` means the read landed
+/// between those two writes rather than that the run is still going. Half a
+/// second of re-reading costs nothing on a path that has already ended and is
+/// the difference between calling a deliberate stop a stop and calling it a
+/// success.
+const STATUS_SETTLE: std::time::Duration = std::time::Duration::from_millis(25);
+const STATUS_TRIES: u32 = 20;
+
+/// How long the run may say nothing before this command checks that it is still
+/// there, and how many of those quiet rounds a dead run has to survive before
+/// the wait gives up on it.
+///
+/// A second longer than `runner::follow`'s own grace, deliberately: that is the
+/// task feeding this stream, and giving up before it does would cut off a
+/// supervisor's last events while they were still being read out of the
+/// database.
+const QUIET_BEFORE_ASKING: std::time::Duration = std::time::Duration::from_millis(500);
+const QUIET_ROUNDS: u32 = 4;
+
+/// How a run that `jod main --wait` was waiting for ended.
+///
+/// These are the endings this command can actually observe, and they are
+/// deliberately four rather than one. The bug behind them is that every one of
+/// them used to be reported the same way — nothing printed, exit 0 — so a
+/// failed turn, a stopped turn and an answered turn were indistinguishable both
+/// to a person at the terminal and to anything blocking on the exit code.
+#[derive(Debug, PartialEq)]
+enum Ending {
+    /// The orchestrator answered. The live view above has already printed it,
+    /// so there is nothing left to say.
+    Answered,
+    /// The run failed. `reason` is what the run itself said, in the order it
+    /// said it, and is empty when the run recorded nothing at all.
+    Failed { code: i32, reason: Vec<String> },
+    /// Somebody stopped the run before it answered — `jod kill`, the console's
+    /// stop key, or a signal to its process group. Not a crash, and it must not
+    /// be worded as one.
+    Stopped,
+    /// The run did not end; this command stopped hearing about it. The service
+    /// dropped the event stream, so there is no verdict to report either way.
+    LostTheRun,
+}
+
 /// Follow an orchestrator run to its end, for `jod main --wait`.
+///
+/// Prints the run's live output on stdout as it arrives, then says on stderr
+/// how the run ended and exits with a code that matches. Only an answered run
+/// exits 0.
 async fn wait_for_orchestrator(jod: &Jod, run_id: &str) -> Result<()> {
+    let ending = follow_orchestrator(jod, run_id).await;
+    let (said, code) = report_ending(&ending, run_id);
+    for line in said {
+        eprintln!("{line}");
+    }
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// Watch the run go by, and say how it ended.
+///
+/// Separated from the printing so the decision — which ending, which exit code,
+/// which sentence — is a value this function returns rather than something only
+/// a terminal can observe.
+async fn follow_orchestrator(jod: &Jod, run_id: &str) -> Ending {
+    use tokio::sync::broadcast::error::RecvError;
+
     let mut events = jod.subscribe();
-    while let Ok(envelope) = events.recv().await {
+    let mut reason: Vec<String> = Vec::new();
+    let mut quiet_and_gone = 0u32;
+    loop {
+        let envelope = tokio::select! {
+            got = events.recv() => match got {
+                Ok(e) => e,
+                // The service dropped the sender. Nothing more is coming, and
+                // the run has not ended as far as this process ever saw.
+                Err(RecvError::Closed) => return Ending::LostTheRun,
+                // Falling behind is not an ending. This used to end the wait —
+                // and therefore the command, silently and with exit 0 — which
+                // is the same fault as the one below by a different route.
+                Err(RecvError::Lagged(n)) => {
+                    eprintln!("dropped {n} events — this view fell behind the run");
+                    continue;
+                }
+            },
+            // Nothing has arrived for a while, so ask the run itself whether it
+            // is still there. Waiting on the event stream alone is not enough:
+            // the sender belongs to this process's service rather than to the
+            // run, so it never closes, and a run whose supervisor was killed
+            // before it could write anything left this command blocking for
+            // ever. That is worse than the exit 0 this whole change is about —
+            // a script that hangs never gets to be wrong.
+            _ = tokio::time::sleep(QUIET_BEFORE_ASKING) => {
+                match still_going(jod, run_id).await {
+                    Some(true) | None => quiet_and_gone = 0,
+                    Some(false) => {
+                        quiet_and_gone += 1;
+                        if quiet_and_gone >= QUIET_ROUNDS {
+                            let said = std::mem::take(&mut reason);
+                            return ending_of_a_vanished_run(jod, run_id, said).await;
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+        quiet_and_gone = 0;
         if envelope.agent_id != run_id {
             continue;
         }
-        if matches!(envelope.event, jod_core::AgentEvent::Finished { .. }) {
-            break;
+        note_reason(&mut reason, &envelope.event);
+        if let jod_core::AgentEvent::Finished {
+            is_error,
+            exit_code,
+            text,
+            ..
+        } = &envelope.event
+        {
+            return ending_of(jod, run_id, *is_error, *exit_code, text.as_deref(), reason).await;
         }
         if let Some(line) = live_line(&envelope.event) {
             println!("{line}");
         }
     }
-    Ok(())
+}
+
+/// Classify a run that has just emitted its `Finished` event.
+///
+/// The event alone cannot tell a run that was stopped on purpose from one that
+/// ended by itself: a signalled harness has no exit code and sets no error
+/// flag, so its `Finished` is identical to a clean one. Only the supervisor saw
+/// the signal, and only the run's row carries what it saw — which is why this
+/// asks the store before it decides.
+async fn ending_of(
+    jod: &Jod,
+    run_id: &str,
+    is_error: bool,
+    exit_code: Option<i32>,
+    text: Option<&str>,
+    mut reason: Vec<String>,
+) -> Ending {
+    if recorded_status(jod, run_id).await == Some(jod_core::service::AgentStatus::Killed) {
+        return Ending::Stopped;
+    }
+    // The same rule `jod run` exits by, deliberately rather than a second
+    // convention: a run flagged as an error is non-zero whatever its harness
+    // claimed, and a harness's own non-zero code passes through as it stands.
+    let code = render::exit_status(is_error, exit_code);
+    if code == 0 {
+        return Ending::Answered;
+    }
+    // The final answer is the last fallback rather than the first choice. A
+    // harness that failed usually says why in prose the adapter could not
+    // classify, and that prose is the specific message; `text` is whatever the
+    // model last managed to say, which on a failed run is often nothing to do
+    // with the failure.
+    if reason.is_empty() {
+        if let Some(text) = text.map(str::trim).filter(|t| !t.is_empty()) {
+            reason.push(text.to_string());
+        }
+    }
+    Ending::Failed { code, reason }
+}
+
+/// Keep one more of the run's own last words, if this event carries any.
+///
+/// Both kinds are kept and neither is preferred, because which one holds the
+/// useful sentence depends on the harness. `Error` is what Jod concluded — that
+/// a harness could not authenticate, that a session was lost. `Raw` is the
+/// harness talking: it is the line that named the rejected model and listed
+/// every model AGY accepts, and it reached the database and went no further.
+fn note_reason(reason: &mut Vec<String>, event: &jod_core::AgentEvent) {
+    let said = match event {
+        jod_core::AgentEvent::Error { message } => message.trim(),
+        jod_core::AgentEvent::Raw { line } => line.trim(),
+        _ => return,
+    };
+    if said.is_empty() {
+        return;
+    }
+    reason.push(said.to_string());
+    if reason.len() > REASON_LINES {
+        reason.remove(0);
+    }
+}
+
+/// Classify a run whose process group is gone and which never sent a
+/// `Finished` event this command could see.
+///
+/// The row is asked before giving up, because the supervisor may have written
+/// its verdict and died before this process read the event that goes with it.
+/// A recorded verdict is a real answer and is used as one; only a run that left
+/// no verdict anywhere is reported as lost.
+async fn ending_of_a_vanished_run(jod: &Jod, run_id: &str, reason: Vec<String>) -> Ending {
+    use jod_core::service::AgentStatus;
+
+    match recorded_status(jod, run_id).await {
+        Some(AgentStatus::Killed) => Ending::Stopped,
+        Some(AgentStatus::Completed) => Ending::Answered,
+        // No exit code to pass on: the event that would have carried it is the
+        // one that never arrived.
+        Some(AgentStatus::Failed) => Ending::Failed { code: 1, reason },
+        Some(AgentStatus::Running) | None => Ending::LostTheRun,
+    }
+}
+
+/// Whether the run's process group is still there.
+///
+/// `None` means the question could not be asked — no store, no row, or a run
+/// that has not been given a process group yet, which is the ordinary state for
+/// the moment between the launch and the supervisor recording its pid. A caller
+/// must treat that as "no news", never as "gone".
+async fn still_going(jod: &Jod, run_id: &str) -> Option<bool> {
+    let store = jod.store()?;
+    let pgid = store.run(run_id).ok().flatten()?.pgid?;
+    Some(jod_core::proc::group_alive(pgid))
+}
+
+/// The status the supervisor recorded for this run, once it has settled.
+///
+/// `None` means no verdict was readable — no store, no row, or a row still
+/// saying `running` after [`STATUS_TRIES`] reads. A caller must treat that as
+/// "not known to have been stopped" rather than as any particular ending.
+async fn recorded_status(jod: &Jod, run_id: &str) -> Option<jod_core::service::AgentStatus> {
+    use jod_core::service::AgentStatus;
+
+    let store = jod.store()?;
+    for _ in 0..STATUS_TRIES {
+        match store
+            .run(run_id)
+            .ok()
+            .flatten()
+            .and_then(|row| AgentStatus::parse(&row.status))
+        {
+            Some(AgentStatus::Running) | None => {}
+            settled => return settled,
+        }
+        tokio::time::sleep(STATUS_SETTLE).await;
+    }
+    None
+}
+
+/// What to say on stderr about an ending, and what to exit with.
+///
+/// Pure, so the whole table of endings is testable without a running
+/// orchestrator — which is the part that was wrong and the part that is easiest
+/// to get wrong again.
+fn report_ending(ending: &Ending, run_id: &str) -> (Vec<String>, i32) {
+    let short = short_id(run_id);
+    match ending {
+        Ending::Answered => (Vec::new(), 0),
+        Ending::Failed { code, reason } if reason.is_empty() => (
+            vec![
+                "the run failed, and it recorded no reason for it.".into(),
+                format!("`jod watch {short}` shows everything the run did say."),
+            ],
+            *code,
+        ),
+        Ending::Failed { code, reason } => {
+            let mut said = vec!["the run failed. This is what it said:".to_string()];
+            said.extend(reason.iter().cloned());
+            (said, *code)
+        }
+        Ending::Stopped => (
+            vec![
+                "the run was stopped before it answered.".into(),
+                format!("`jod watch {short}` shows how far it got."),
+            ],
+            1,
+        ),
+        Ending::LostTheRun => (
+            vec![
+                "this command stopped receiving the run's events before the run ended, so \
+                 there is no answer and no failure to report."
+                    .into(),
+                format!("the run may still be going — `jod watch {short}` picks it up."),
+            ],
+            1,
+        ),
+    }
 }
 
 /// One event as the line `jod main --wait` shows for it, or `None` for the ones
@@ -5398,6 +5677,143 @@ mod tests {
             }),
             None,
         );
+    }
+
+    /// Finding X8: a failed `jod main --wait` printed nothing and exited 0, so
+    /// a person read it as success and every script blocking on it did too.
+    ///
+    /// The reason has to arrive verbatim. The message that was being thrown
+    /// away named the rejected model and listed what the harness would have
+    /// accepted, and a summary of that would have cost the reader the one thing
+    /// that told them what to type next.
+    #[test]
+    fn a_failed_run_exits_non_zero_and_repeats_the_reason_verbatim() {
+        let rejected = "model gemini-3.7-flash-medium is not recognized as a known model";
+        let (said, code) = report_ending(
+            &Ending::Failed {
+                code: 1,
+                reason: vec![rejected.into()],
+            },
+            "7e45d73b-64fa",
+        );
+        assert_eq!(code, 1, "a failed run must not exit 0");
+        assert!(said.iter().any(|line| line == rejected), "{said:?}");
+    }
+
+    /// A harness's own exit code passes through, exactly as `jod run` passes it
+    /// through. The two commands wait on the same kind of run and must not
+    /// answer the same question differently.
+    #[test]
+    fn a_failure_keeps_the_harness_exit_code() {
+        let (_, code) = report_ending(
+            &Ending::Failed {
+                code: 3,
+                reason: vec!["it went wrong".into()],
+            },
+            "abc12345",
+        );
+        assert_eq!(code, 3);
+    }
+
+    /// Silence is not acceptable for a run that failed with nothing recorded
+    /// either. "Failed, and no reason was written down" is honest, and it tells
+    /// the reader the next place to look.
+    #[test]
+    fn a_failure_with_no_recorded_reason_still_says_it_failed() {
+        let (said, code) = report_ending(
+            &Ending::Failed {
+                code: 1,
+                reason: Vec::new(),
+            },
+            "abc12345deadbeef",
+        );
+        assert_ne!(code, 0);
+        let all = said.join("\n");
+        assert!(all.contains("failed"), "{all:?}");
+        assert!(all.contains("no reason"), "{all:?}");
+        assert!(all.contains("jod watch abc12345"), "{all:?}");
+    }
+
+    /// A run somebody stopped on purpose is not a crash, and must not be
+    /// worded as one — but it did not answer either, so it cannot exit 0.
+    #[test]
+    fn a_stopped_run_is_reported_as_stopped_rather_than_as_a_failure() {
+        let (said, code) = report_ending(&Ending::Stopped, "abc12345deadbeef");
+        assert_ne!(code, 0, "the caller did not get an answer");
+        let all = said.join("\n");
+        assert!(all.contains("stopped"), "{all:?}");
+        assert!(!all.contains("failed"), "a deliberate stop is not a failure: {all:?}");
+    }
+
+    /// Losing the event stream is its own ending: the run did not fail and did
+    /// not answer, this process simply stopped hearing about it. Saying "the
+    /// run failed" there would be a claim nobody checked.
+    #[test]
+    fn losing_the_stream_says_so_instead_of_guessing() {
+        let (said, code) = report_ending(&Ending::LostTheRun, "abc12345deadbeef");
+        assert_ne!(code, 0);
+        let all = said.join("\n");
+        assert!(all.contains("may still be going"), "{all:?}");
+        assert!(!all.contains("failed"), "{all:?}");
+    }
+
+    /// The one ending that exits 0, and the only one that prints nothing: the
+    /// answer is already on stdout, put there by the live view.
+    #[test]
+    fn an_answered_run_exits_zero_and_adds_nothing() {
+        assert_eq!(report_ending(&Ending::Answered, "abc12345"), (Vec::new(), 0));
+    }
+
+    /// Both kinds of last word count. The message that mattered in X8 arrived
+    /// as `Raw` — the harness's own prose, which no adapter could classify —
+    /// and a reason built only from `Error` events would have been empty.
+    #[test]
+    fn the_reason_keeps_the_harnesss_own_words_and_jods() {
+        use jod_core::AgentEvent;
+        let mut reason = Vec::new();
+        note_reason(
+            &mut reason,
+            &AgentEvent::Raw {
+                line: "  invalid model selection  ".into(),
+            },
+        );
+        note_reason(
+            &mut reason,
+            &AgentEvent::Error {
+                message: "AGY could not authenticate".into(),
+            },
+        );
+        // Blank lines and events that are not the run talking are left out.
+        note_reason(&mut reason, &AgentEvent::Raw { line: "   ".into() });
+        note_reason(
+            &mut reason,
+            &AgentEvent::Message {
+                text: "an answer".into(),
+            },
+        );
+        assert_eq!(
+            reason,
+            vec!["invalid model selection", "AGY could not authenticate"]
+        );
+    }
+
+    /// A chatty harness must not push the sentence that explains the failure
+    /// off the end. The tail keeps the last lines, which is where that sentence
+    /// is.
+    #[test]
+    fn the_reason_keeps_the_last_lines_not_the_first() {
+        use jod_core::AgentEvent;
+        let mut reason = Vec::new();
+        for i in 0..REASON_LINES * 2 {
+            note_reason(
+                &mut reason,
+                &AgentEvent::Raw {
+                    line: format!("line {i}"),
+                },
+            );
+        }
+        assert_eq!(reason.len(), REASON_LINES);
+        assert_eq!(reason.last().map(String::as_str), Some("line 39"));
     }
 
     // ---- the rail, the roots, the secrets and the works ----
