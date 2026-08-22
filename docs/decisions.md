@@ -3711,3 +3711,28 @@ it already reports the transcript's viewport, and the key handler clamps to
 that. Deriving it a second time in the handler would be a second copy of the
 arithmetic that decides the pane exists at all — it disappears below 90 columns,
 and `⇥` has to know that or it offers a stop nobody can see.
+
+## A guard that only runs on one kernel is not a guard
+
+`sweep_targets.sh` deletes build directories, and two of the three things
+stopping it from deleting a live one were Linux-only. `find -printf '%T@'` is a
+GNU extension, so on macOS the idle check read every directory as epoch 0 —
+older than any cutoff, whatever its real age. The busy check walked `/proc`,
+which macOS does not have, so no directory was ever busy. Both failures went the
+same way: toward deleting more. On a Mac, `--apply` would have taken the
+`target/` of a build in progress, which is the exact outcome the script's own
+header calls the expensive one.
+
+CI runs Linux, so CI was green throughout, and the local test failures that did
+show up were read as host quirks and left alone. That reading was reasonable and
+wrong: the test was right and the script was not portable. A test that fails only
+on the machine the tool is actually used on is the most valuable failure there
+is, and filing it under "green in CI" is what kept the guard switched off.
+
+Both halves now pick their dialect at startup. The `stat` probe asks with the
+GNU flag rather than the BSD one, because only that direction gives a clean
+answer — BSD `stat` has no `-c` and exits non-zero, while GNU `stat -f` means
+`--file-system` and would happily return a mount point where an epoch stamp
+belongs. Paths are compared in their resolved spelling on both sides, since the
+kernel reports `/private/var/…` for a cwd under `/var` and no string match
+reconciles the two.

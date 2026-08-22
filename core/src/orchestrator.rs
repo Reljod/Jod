@@ -2733,7 +2733,19 @@ mod tests {
 
             let conversation = s.conversation(&manager).unwrap().unwrap();
             assert_eq!(conversation.title, "tetris");
-            assert_eq!(conversation.cwd, dir, "a manager sits in its own checkout");
+            // Compared against the path the catalogue stored, not against the
+            // string handed to `catalogued_at`. `projects::normalise`
+            // canonicalises on the way in, on purpose, so that one directory has
+            // one spelling; on macOS `/tmp` is a symlink and the stored path
+            // comes back as `/private/tmp/…`. Asserting against the raw string
+            // was really asserting that no symlink was involved, which is a fact
+            // about the host and not about managers. This still bites: a manager
+            // pointed at any other checkout fails it exactly as before.
+            assert_eq!(
+                conversation.cwd,
+                project.path.to_string_lossy(),
+                "a manager sits in its own checkout"
+            );
             assert_eq!(
                 s.current_project(&manager).unwrap().map(|p| p.id),
                 Some(project.id),
