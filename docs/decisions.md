@@ -3805,3 +3805,45 @@ question would be worse than no quick answer.
 each other, so the renderer, the cursor and the digit all resolve against one
 order — `rail::order` — and a digit read against the query's order would answer
 a different card from the one it is printed beside.
+
+## Every signal that a card exists keyed on it having stopped something
+
+The rail had three ways to reach a reader who was not looking at it: the red
+mark on the header band, the red badge on the status row, and opening itself
+unprompted the first time in a session. All three asked the same question —
+`c.blocking && c.is_open()` — so all three were silent about a card that
+blocked nothing.
+
+That is most cards. `blocking` means the agent said it cannot proceed past this
+one, which an agent only says when it has genuinely stopped; a question it can
+carry on past, a decision recorded for later, a choice offered while the work
+continues all raise ordinary open cards. Those had no signal at all. The only
+way to find one was to press `Ctrl-N` and look, which means the cards you found
+were the ones you already suspected were there — and a rail you have to guess
+the contents of is a rail you stop opening.
+
+So the count of open, non-blocking cards gets a mark of its own in both places,
+in cyan beside the red one: `◆ 3 cards`. Its own badge rather than a larger
+number on the existing one, because "a run has stopped" and "somebody asked you
+something" are different news and prompt different urgency, and merging them
+would make the red badge fire for things that are not red. The two counts are
+disjoint, so `1 waiting on you · 3 cards` is four cards. The key is printed once
+per row rather than once per badge — the same chord answers both, and the badges
+are dropped from the quiet end, so whichever survives a narrow terminal is the
+one still carrying it.
+
+The second half of the change is which list gets counted. All three signals read
+`App::cards`, which is *the rail's view* — narrowed by the stack, the kind filter
+and the search box. So typing in the rail's filter emptied the list the header
+band and the status row were counting, and the one moment the reader was looking
+through the rail was the moment the rest of the screen stopped telling them what
+was in it. A blocker arriving during a search was announced to nobody.
+
+`App::open_cards` is now a second query — `RailState::open_query`, the same
+indexed read with the view thrown away and only the scope kept — and it is what
+the badges, the auto-open and the announcement all count. The scope stays
+because a rail narrowed to one conversation was narrowed on purpose, and the
+badges should follow it; the stack, the kind and the search go, because none of
+them is consent to be told nothing. It is capped like the rail's own query, so
+past fifty the count says `50+` rather than a number the screen cannot stand
+behind.

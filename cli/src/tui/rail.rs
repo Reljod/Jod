@@ -210,14 +210,7 @@ impl RailState {
     /// A filter that is open but empty is not a search — it hides nothing,
     /// exactly as `/` does on every list screen.
     pub fn query(&self, conversation_id: Option<String>) -> Query {
-        // Exactly one of the two is ever set. Both together would be a filter
-        // that says "in this subtree, and also only this one conversation",
-        // which is the subtree scope silently doing nothing.
-        let (conversation_id, subtree_of) = if self.cascade {
-            (None, conversation_id)
-        } else {
-            (conversation_id, None)
-        };
+        let (conversation_id, subtree_of) = self.scope(conversation_id);
         Query {
             conversation_id,
             subtree_of,
@@ -232,6 +225,52 @@ impl RailState {
                 .cloned(),
             sort: self.sort_now(),
             limit: Some(LIMIT),
+        }
+    }
+
+    /// Every open card in scope, whatever the rail is currently set to show.
+    ///
+    /// A second query rather than a count taken off [`RailState::query`]'s
+    /// result, because those two answer different questions and only one of
+    /// them belongs outside the rail. `query` is *the view*: it narrows to a
+    /// stack, a kind and a search, all of which are things the reader chose. The
+    /// header band and the status row are not the view — they are the standing
+    /// answer to "is anything waiting for me", and that answer must not change
+    /// because somebody typed into the rail's filter box or flipped to the
+    /// answered stack. Before this, it did: the blocker badge went out with the
+    /// cards it was counting, so the one moment the reader was looking through
+    /// the rail was the one moment the rest of the screen stopped telling them
+    /// what was in it.
+    ///
+    /// The scope is the exception, and deliberately so — a rail narrowed to one
+    /// conversation is narrowed on purpose and the badge follows it, which is
+    /// the same rule `rail_header` prints `subtree`/`here` for.
+    pub fn open_query(&self, conversation_id: Option<String>) -> Query {
+        let (conversation_id, subtree_of) = self.scope(conversation_id);
+        Query {
+            conversation_id,
+            subtree_of,
+            work_id: None,
+            kind: None,
+            status: Some(Status::Open),
+            blocking_only: false,
+            text: None,
+            sort: Sort::default(),
+            limit: Some(LIMIT),
+        }
+    }
+
+    /// Which conversations a query covers: this one, or this one and everything
+    /// under it.
+    ///
+    /// Exactly one of the two is ever set. Both together would be a filter that
+    /// says "in this subtree, and also only this one conversation", which is the
+    /// subtree scope silently doing nothing.
+    fn scope(&self, conversation_id: Option<String>) -> (Option<String>, Option<String>) {
+        if self.cascade {
+            (None, conversation_id)
+        } else {
+            (conversation_id, None)
         }
     }
 
@@ -1088,6 +1127,33 @@ mod tests {
         let narrow = rail.query(Some("conv".into()));
         assert_eq!(narrow.conversation_id.as_deref(), Some("conv"));
         assert_eq!(narrow.subtree_of, None);
+    }
+
+    /// What the badges outside the rail count. It drops every part of the view
+    /// the reader chose — the stack, the kind and the search — and keeps the
+    /// scope, which is the one narrowing the badges are meant to follow.
+    #[test]
+    fn the_open_query_ignores_the_view_and_keeps_the_scope() {
+        let mut rail = RailState::default();
+        rail.filter = Some("sqlite".into());
+        rail.kind = 1;
+        rail.stack = 1;
+        assert_eq!(
+            rail.query(Some("conv".into())).status,
+            Some(Status::Answered),
+            "the rail itself is on the answered stack"
+        );
+
+        let open = rail.open_query(Some("conv".into()));
+        assert_eq!(open.status, Some(Status::Open), "always the open ones");
+        assert_eq!(open.text, None, "a search box is not consent to be told nothing");
+        assert_eq!(open.kind, None, "and neither is a kind filter");
+        assert_eq!(open.subtree_of.as_deref(), Some("conv"), "the scope stays");
+
+        rail.cascade = false;
+        let here = rail.open_query(Some("conv".into()));
+        assert_eq!(here.conversation_id.as_deref(), Some("conv"));
+        assert_eq!(here.subtree_of, None);
     }
 
     /// The text filter has to reach the store, or it is not full-text search —

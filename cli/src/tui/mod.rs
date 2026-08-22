@@ -7049,6 +7049,11 @@ fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
     // work whose name is not known yet — which is once per work, not once per
     // refresh, and the refresh runs on every keystroke of the filter box.
     data::learn_work_titles(jod, &app.cards, &mut app.work_titles);
+    // Two reads rather than one, and they answer different questions — see
+    // [`rail::RailState::open_query`]. The second is the same indexed read
+    // narrowed to one status with no text match on it, so it costs less than
+    // the rail's own, and it is what the header band and the status row count.
+    app.open_cards = data::cards(jod, &app.rail.open_query(app.conversation.clone()));
     app.reconcile_rail();
     // The rail opens itself once per session — a column that appears on its own
     // without explanation reads as a rendering fault, so that is said out loud
@@ -7056,8 +7061,12 @@ fn refresh_rail(jod: &Arc<Jod>, app: &mut App) {
     // the blocker count rises, because the second blocker of a session is worth
     // exactly as much as the first, and it goes out as an `Alert` so it does
     // not arrive looking like the compaction notice above it.
-    let opened = app.rail.auto_open(&app.cards);
-    if let Some(said) = app.rail.announce(&app.cards, opened) {
+    //
+    // Both read the unfiltered list, for the reason the badges do: a blocker
+    // that arrives while the reader is searching the rail is exactly as
+    // blocking, and a filter box is not consent to be told nothing.
+    let opened = app.rail.auto_open(&app.open_cards);
+    if let Some(said) = app.rail.announce(&app.open_cards, opened) {
         app.push(Entry::Alert(said));
     }
 }
