@@ -2521,6 +2521,33 @@ straight through. The test asserts both halves, because a fix that removed the
 floor would trade a chat that runs too much for a chat that silently runs
 nothing.
 
+## Asking for less is still choosing, and the mode was never the model's to choose
+
+The fourth link in the chain above, found the same way: the console said `auto`
+and a background run stopped on a card asking to run `curl`. The wiring was by
+then correct all the way to the orchestrator — it really did come up in
+`bypass`, and its MCP server really did carry `--max-permission bypass`. Then
+the orchestrator called `delegate` for a weather lookup and passed
+`"permission": "accept_edits"` of its own accord. `accept_edits` auto-approves
+file edits and nothing else, so the first `Bash` call raised a card and the
+errand sat there.
+
+Nothing refused anything. The ceiling capped a *raise*, and asking for less had
+always been treated as harmless — the caller's own business, needing nobody's
+approval. That is true when the caller is Reljod pressing Tab. It is not true
+when the caller is a model, because a model has no information the ceiling does
+not already carry: it was being careful with somebody else's decision, in a
+direction that looks responsible and costs the operator a blocking card on a
+one-line errand.
+
+So `delegate` and `open_work` no longer take a mode at all, which is how
+`ask_manager` had worked from the start. `Server::child_permission` returns the
+ceiling and there is nothing to override it, so a child cannot climb — by
+construction rather than by a check — and cannot be talked down either. A
+description saying "leaving it out is almost always right" was already in front
+of the model that did this; a request is not a boundary, so the parameter is
+gone rather than better worded.
+
 ## `ask` meant deny, and a mode nobody can answer is not a mode
 
 Under `claude -p` there is no one to put a permission prompt to. `ask` and

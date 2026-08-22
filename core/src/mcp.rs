@@ -150,7 +150,6 @@ fn strings(description: &str) -> Value {
 
 const HARNESS_IDS: [&str; 3] = ["claude_code", "open_code", "agy"];
 const IMPORTANCE_IDS: [&str; 3] = ["low", "normal", "high"];
-const PERMISSION_IDS: [&str; 3] = ["ask", "accept_edits", "bypass"];
 const ACCESS_IDS: [&str; 3] = ["read_only", "delegate", "orchestrate"];
 
 /// Every tool this server knows, whatever the caller may use.
@@ -215,10 +214,9 @@ pub fn catalogue() -> Vec<Tool> {
                     "name": text("A short name, shown in listings. Defaults to the prompt's first words."),
                     "cwd": text("Working directory for the agent."),
                     "model": text("Model override, in the harness's own spelling."),
-                    "permission": one_of(
-                        "How much the agent may do unattended. Capped at this server's ceiling. Default ask.",
-                        &PERMISSION_IDS,
-                    ),
+                    // No `permission`. The mode a child runs in is the
+                    // operator's answer, not this model's — see
+                    // [`Server::child_permission`], where the reasoning lives.
                     "tools": one_of(
                         "How much of Jod the new agent may reach. Capped at your own. Default read_only.",
                         &ACCESS_IDS,
@@ -694,12 +692,8 @@ pub fn catalogue() -> Vec<Tool> {
                     ),
                     "harness": one_of("Which harness runs the first session. Default claude_code.", &HARNESS_IDS),
                     "model": text("Model override, in the harness's own spelling."),
-                    "permission": one_of(
-                        "How much the first session may do unattended. Capped at this server's \
-                         ceiling. Defaults to that ceiling — the mode the operator chose here — \
-                         so leaving it out is the right answer almost always.",
-                        &PERMISSION_IDS,
-                    ),
+                    // No `permission`, for the reason `delegate` has none —
+                    // [`Server::child_permission`].
                     "tools": one_of(
                         "How much of Jod the first session may reach. Capped at your own. \
                          Default delegate, so it can talk to its siblings and start its own.",
@@ -1282,7 +1276,7 @@ impl Server {
                 .ok_or_else(|| ToolError::BadParams(format!("unknown harness `{h}`")))?,
             None => HarnessKind::ClaudeCode,
         };
-        let permission = self.requested_permission(args)?;
+        let permission = self.child_permission();
         let tools = self.child_access(args)?;
         let cwd = opt_str(args, "cwd").map(PathBuf::from).unwrap_or_else(default_cwd);
 
@@ -1590,42 +1584,26 @@ impl Server {
         Ok(format!("stopped {run_id}"))
     }
 
-    /// The permission `delegate` may use, refusing anything above the ceiling.
+    /// The mode a run started from here gets: the operator's, always.
     ///
-    /// `delegate` starts an agent on a bare prompt with no board behind it, so
-    /// it defaults to the most cautious thing that still runs. `open_work`
-    /// defaults differently — see [`Server::permission_arg`] — because a work
-    /// is the operator's own instruction being carried out, not an errand an
-    /// agent invented.
-    fn requested_permission(&self, args: &Value) -> Result<PermissionPolicy, ToolError> {
-        self.permission_arg(args, PermissionPolicy::Ask)
-    }
-
-    /// A `permission` argument, capped at the ceiling, falling back to
-    /// `fallback` when the caller said nothing.
+    /// **Not an argument, and that is the whole of it.** `delegate` and
+    /// `open_work` both used to take a `permission`, and the ceiling capped it,
+    /// so the only thing a model could do with it was ask for *less*. That
+    /// sounds harmless and is the last link in the chain that made the mode on
+    /// the status bar a lie: a console in `auto` asked for the weather, the
+    /// orchestrator volunteered `"permission": "accept_edits"` for the one-shot
+    /// it started, and the one-shot stopped on a card asking to run `curl`.
+    /// Nobody had chosen that. The model had no information the ceiling did not
+    /// already carry — it was being careful with somebody else's decision.
     ///
-    /// One function rather than two copies of the cap, because the two callers
-    /// disagree only about the fallback and a second copy of a *ceiling* check
-    /// is the copy that eventually forgets to check.
-    fn permission_arg(
-        &self,
-        args: &Value,
-        fallback: PermissionPolicy,
-    ) -> Result<PermissionPolicy, ToolError> {
-        let requested = match opt_str(args, "permission") {
-            Some(p) => parse_permission(&p)
-                .ok_or_else(|| ToolError::BadParams(format!("unknown permission `{p}`")))?,
-            None => fallback,
-        };
-        if !permits(self.max_permission, requested) {
-            return Err(ToolError::Refused(format!(
-                "permission `{}` exceeds this server's ceiling of `{}`; \
-                 raise max_permission locally to allow it",
-                permission_id(requested),
-                permission_id(self.max_permission)
-            )));
-        }
-        Ok(requested)
+    /// The ceiling arrives from the run that owns this server — see
+    /// [`crate::mcp_config::server_args`] — so it *is* the operator's answer,
+    /// already capped by whatever the parent holds. Inheriting it carries `auto`
+    /// all the way down and still stops a server started deliberately low from
+    /// handing out more than it has. `ask_manager` has worked this way from the
+    /// start; these two now agree with it.
+    fn child_permission(&self) -> PermissionPolicy {
+        self.max_permission
     }
 
     /// How much of Jod a spawned agent may reach.
@@ -2778,13 +2756,11 @@ impl Server {
         // The mode on the status bar never reached the process doing the work,
         // and the run reported the refusals as its own failures.
         //
-        // The ceiling *is* the operator's answer. It arrives from the run that
-        // owns this server — see [`crate::mcp_config::server_args`] — so
-        // inheriting it carries `auto` down to the child and still stops a
-        // server started deliberately low from handing out more than it holds.
-        // An explicit argument overrides it, capped the same way `delegate`'s
-        // is, so a caller may ask for *less* without asking anybody.
-        let permission = self.permission_arg(args, self.max_permission)?;
+        // The ceiling *is* the operator's answer, and there is no argument left
+        // that can talk it down — see [`Server::child_permission`]. The override
+        // this used to accept was how "a caller may ask for less without asking
+        // anybody" turned into a model quietly choosing the mode.
+        let permission = self.child_permission();
         let mut opening = crate::orchestrator::Opening::new(instruction, checkout)
             .on(harness)
             .with_permission(permission)
@@ -3612,13 +3588,6 @@ struct AgentView<'a> {
     free: bool,
 }
 
-/// The spelling `parse_permission` reads back. Delegated rather than repeated:
-/// this used to be a second copy of the same match, which is one edit away from
-/// a mode that can be set and not named.
-fn permission_id(p: PermissionPolicy) -> &'static str {
-    p.as_str()
-}
-
 /// Where a schedule runs when nobody said. The server's own directory, which is
 /// the daemon's — falling back to the home directory rather than failing, since
 /// a deleted cwd should not stop a schedule being armed.
@@ -4401,41 +4370,42 @@ mod tests {
         assert_eq!(error_code(&answer), INVALID_PARAMS);
     }
 
+    /// **Regression: the console said `auto` and the errand asked to run `curl`.**
+    ///
+    /// A one-shot delegated from a chat in `auto` came up in `accept_edits`,
+    /// which auto-approves file edits and nothing else, so the first `Bash` call
+    /// raised a card and the run sat there waiting. Nothing had been capped: the
+    /// orchestrator passed `"permission": "accept_edits"` itself, being careful
+    /// with a decision that was not its own.
     #[tokio::test]
-    async fn delegate_cannot_ask_for_a_permission_above_the_ceiling() {
-        let store = Arc::new(Store::in_memory().unwrap());
-        let server = Server::new(Jod::with_store(store))
-            .with_access(ToolAccess::Orchestrate)
-            .with_max_permission(PermissionPolicy::AcceptEdits);
-        let answer = call(
-            &server,
-            "delegate",
-            json!({ "prompt": "rewrite everything", "permission": "bypass" }),
-        )
-        .await;
-        assert!(is_error_result(&answer), "bypass was not refused: {answer}");
-        assert!(said(&answer).contains("ceiling"), "{}", said(&answer));
+    async fn a_delegated_child_runs_in_the_mode_the_operator_chose() {
+        for ceiling in PermissionPolicy::ALL {
+            let server = Server::new(Jod::with_store(Arc::new(Store::in_memory().unwrap())))
+                .with_access(ToolAccess::Orchestrate)
+                .with_max_permission(ceiling);
+            assert_eq!(
+                server.child_permission(),
+                ceiling,
+                "a run delegated under a {ceiling:?} console did not inherit it"
+            );
+        }
     }
 
+    /// The class, closed rather than discouraged. A description saying "leaving
+    /// it out is almost always right" is a request, and the model that started
+    /// this had one in front of it.
     #[tokio::test]
-    async fn delegate_accepts_a_permission_at_the_ceiling() {
-        // It gets as far as needing a supervisor, which is past the cap and is
-        // the only thing this asserts — the refusal must not be about permission.
-        let store = Arc::new(Store::in_memory().unwrap());
-        let server = Server::new(Jod::with_store(store))
-            .with_access(ToolAccess::Orchestrate)
-            .with_max_permission(PermissionPolicy::AcceptEdits);
-        let answer = call(
-            &server,
-            "delegate",
-            json!({ "prompt": "tidy the imports", "permission": "accept_edits" }),
-        )
-        .await;
-        assert!(
-            !said(&answer).contains("ceiling"),
-            "a permission at the ceiling was refused: {}",
-            said(&answer)
-        );
+    async fn no_tool_that_starts_a_run_lets_the_model_name_a_mode() {
+        for tool in catalogue() {
+            if !matches!(tool.name, "delegate" | "open_work") {
+                continue;
+            }
+            assert!(
+                tool.schema["properties"].get("permission").is_none(),
+                "`{}` offers the model a permission to choose",
+                tool.name
+            );
+        }
     }
 
     /// The catalog is what a model resolves an unnamed instruction against, so
@@ -4631,34 +4601,27 @@ mod tests {
                 .with_access(ToolAccess::Orchestrate)
                 .with_max_permission(ceiling);
             assert_eq!(
-                server.permission_arg(&json!({}), ceiling).unwrap(),
+                server.child_permission(),
                 ceiling,
                 "a work opened under a {ceiling:?} console did not inherit it"
             );
         }
     }
 
-    /// Inheriting must not become a way to climb: the argument is still capped,
-    /// and asking for *less* than the console holds is nobody's business but
-    /// the caller's.
+    /// Inheriting is not a way to climb either, and now by construction: the
+    /// value handed to a child is the ceiling itself, so there is nothing to
+    /// cap and nothing that can exceed it.
     #[tokio::test]
-    async fn an_opened_work_may_ask_for_less_than_the_console_holds_but_never_more() {
-        let server = Server::new(Jod::with_store(Arc::new(Store::in_memory().unwrap())))
-            .with_access(ToolAccess::Orchestrate)
-            .with_max_permission(PermissionPolicy::AcceptEdits);
-        assert_eq!(
-            server
-                .permission_arg(&json!({ "permission": "plan" }), PermissionPolicy::AcceptEdits)
-                .unwrap(),
-            PermissionPolicy::Plan,
-            "asking for less was refused"
-        );
-        assert!(
-            server
-                .permission_arg(&json!({ "permission": "bypass" }), PermissionPolicy::AcceptEdits)
-                .is_err(),
-            "a work climbed above the console's ceiling"
-        );
+    async fn a_child_never_holds_more_than_the_console_that_started_it() {
+        for ceiling in PermissionPolicy::ALL {
+            let server = Server::new(Jod::with_store(Arc::new(Store::in_memory().unwrap())))
+                .with_access(ToolAccess::Orchestrate)
+                .with_max_permission(ceiling);
+            assert!(
+                permits(ceiling, server.child_permission()),
+                "a {ceiling:?} console handed out more than it holds"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4690,17 +4653,6 @@ mod tests {
         assert!(permits(PermissionPolicy::AcceptEdits, PermissionPolicy::AcceptEdits));
         assert!(!permits(PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass));
         assert!(!permits(PermissionPolicy::Ask, PermissionPolicy::AcceptEdits));
-    }
-
-    #[tokio::test]
-    async fn an_unknown_permission_spelling_is_refused_rather_than_guessed() {
-        let answer = call(
-            &server(ToolAccess::Orchestrate),
-            "delegate",
-            json!({ "prompt": "go", "permission": "yolo" }),
-        )
-        .await;
-        assert_eq!(error_code(&answer), INVALID_PARAMS);
     }
 
     #[tokio::test]
@@ -5164,9 +5116,6 @@ mod tests {
     async fn every_harness_the_delegate_schema_offers_is_one_jod_can_parse() {
         for id in HARNESS_IDS {
             assert!(parse_harness(id).is_some(), "{id} is offered but not understood");
-        }
-        for id in PERMISSION_IDS {
-            assert!(parse_permission(id).is_some(), "{id} is offered but not understood");
         }
         for id in ACCESS_IDS {
             assert!(parse_access(id).is_some(), "{id} is offered but not understood");
