@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Thirty-seven changes, each with a test that fails without it. Driven by running the
+Thirty-seven changes, each with a test that fails without it — the branch's `fix:` and `feat:` commits, so the number is countable rather than remembered. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
