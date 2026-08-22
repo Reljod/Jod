@@ -3991,12 +3991,16 @@ that started this said `21 messages in the live window` and `2 queued` while
 nothing was actually wrong.
 
 The fix is not a faster decision, it is moving the decision. Main now calls
-`ask_assistant` and returns, so its turn is one tool call. The assistant is a
+`ask_assistant` and returns, so its turn is one tool call. The assistant was a
 fresh conversation per instruction, never resumed, running on a small model —
-and *fresh* is the load-bearing word. A standing assistant would serialise the
-same way main did and the block would simply move down a layer. Several
-assistants run at once, so instruction two waits on instruction one's hand-off
-rather than on its work.
+and *fresh* was the load-bearing word, because a standing assistant would
+serialise the same way main did and the block would simply move down a layer.
+That half has since been reversed: the assistant is one standing session, and an
+instruction arriving mid-turn is queued rather than blocked on. See "The
+assistant is one standing session, interrupted rather than replaced" below.
+What has not changed is the part this entry is about — main's turn is one tool
+call, and instruction two waits on instruction one's hand-off rather than on its
+work.
 
 Main answering nothing at all is deliberate. The branch that decides whether to
 answer or delegate now exists in exactly one place, on a cheap model, instead of
@@ -4192,3 +4196,63 @@ object it happens to share with the older one. Only `CREATE` and `ADD COLUMN`
 are ever skipped, since they are the only statements that fail this way; a
 backfilling `INSERT` or `UPDATE` still takes the whole migration down, which is
 what it should do.
+
+## The assistant is one standing session, interrupted rather than replaced
+
+This reverses the previous decision, which the code called A1: the assistant was
+a fresh conversation per instruction, never resumed, and *fresh* was the
+load-bearing word. The argument was serialisation. A standing assistant would
+make instruction two wait behind instruction one, and the console's block would
+have moved down a layer instead of going away — the very failure that put the
+assistant there in the first place.
+
+The argument was right about the danger and wrong about the only way out of it.
+It assumed the choice was between starting a second assistant and waiting for
+the first, and there is a third thing to do with an instruction that arrives
+mid-turn: queue it and hand it to the assistant at the start of its next turn.
+That queue already existed, in `core/src/delivery.rs`, doing exactly this for
+card answers, and its own module header calls batching a feature rather than a
+compromise — an agent that reads everything that changed in one go answers more
+coherently than one woken ten times with a line each. So `hand_to_assistant`
+returns just as fast as it did before. Nothing waits; what changed is where the
+instruction goes when the assistant is busy.
+
+What the per-instruction design cost was memory, and memory is most of what a
+routing layer needs. An assistant that is thrown away every turn cannot answer
+"no, the other one". It cannot notice that the thing Reljod is asking about now
+is the thing it handed to a manager two minutes ago. It re-reads the project
+catalog from scratch on every sentence and has no way of knowing which of two
+plausible repositories the conversation has actually been about. Every one of
+those is the kind of mistake that produces no error — an instruction lands in
+the wrong manager and reads as perfectly ordinary there.
+
+Three things follow, and they are the parts that would have been quietly wrong:
+
+- **The thread must not be swept.** It was marked `ephemeral`, which put it in
+  the scratch lane, and every query in that lane archives a conversation once
+  its latest run completes and deletes it once it has been archived long enough.
+  A standing conversation in that lane is a conversation that forgets on a timer.
+  It is no longer marked; what the assistant *starts* still is.
+- **It has to compact itself.** A standing conversation grows until the harness
+  refuses it, and nobody is watching this one the way the console watches main.
+  So it is measured against the same two clocks main is — size, and a day of
+  Reljod's silence — and when it is due, `hand_to_assistant` starts the
+  summariser and queues the instruction behind it. The compaction opens a fresh
+  conversation, so the pointer to the assistant, its parent edge, its origin, its
+  open cards and its queue all have to move onto the continuation. They now do,
+  for every carried-forward thread rather than only for main.
+- **It needed a way to answer.** Every bus tool derives sender identity from the
+  run and refuses one that belongs to no addressing scope, and the assistant's
+  conversation belongs to no work — so `send_message` and `reply` answered `run
+  … is not a member of any team or work`, and its only route home was a card. A
+  card is a row on Reljod's rail, which is right for work handed on and wrong for
+  an *answer*: the "answer directly" branch of the assistant's brief exists so
+  that "what time is it in Manila" comes straight back, and it went into a
+  transcript nobody opens. It gets the same two-party return channel `delegate`
+  opens for the runs it starts.
+
+The assistant is also a row on the fleet now, under `jod`, where the manager row
+sits one level down. Its runs live in its own conversation, so the `jod` row's
+runs never included them and the layer was invisible: main said it had passed an
+instruction on, and the screen showed one idle row for as long as the decision
+took.

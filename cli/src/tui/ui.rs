@@ -4261,6 +4261,7 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) -> Preview {
                 "kind",
                 match node.kind {
                     jod_core::tree::NodeKind::Main => "jod",
+                    jod_core::tree::NodeKind::Assistant => "assistant",
                     jod_core::tree::NodeKind::Project => "project",
                     jod_core::tree::NodeKind::Manager => "manager",
                     jod_core::tree::NodeKind::Work => "work",
@@ -4345,6 +4346,10 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) -> Preview {
     let verbs = match app.selected_node().map(|node| node.kind) {
         Some(jod_core::tree::NodeKind::Session) => " ⏎ enter · s stop · r resume · f fork ",
         Some(jod_core::tree::NodeKind::Manager) => " ⏎ enter ",
+        // The same one verb a manager's row answers, because it is the same
+        // kind of row: a standing conversation you go into to read what it has
+        // been deciding.
+        Some(jod_core::tree::NodeKind::Assistant) => " ⏎ enter ",
         _ => "",
     };
     preview_pane(f, app, area, lines, " node ", verbs, MUTED)

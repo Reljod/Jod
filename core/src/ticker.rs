@@ -2153,9 +2153,30 @@ impl Ticker {
             // Resolved before the resume, and passed into it: a session id is
             // only valid on the harness that minted it, and this is the harness
             // the spawn below uses.
-            let Resume::Session(session_id) = store.resume_for(&conversation_id, harness)? else {
-                report.held += 1;
-                continue;
+            //
+            // **No session is not always "hold it".** A conversation that has
+            // just been compacted has no session by construction — that is what
+            // compaction *is*, a fresh session seeded from a summary — so a
+            // queue on one would be held on every tick for ever, and the answer
+            // it carries would never arrive. Those threads have their record on
+            // them, and `Store::handoff_text` is the way to put it in front of a
+            // session that has never seen it.
+            //
+            // A conversation that has simply never run is the other no-session
+            // case and it still holds, which is why the summary has to be there
+            // rather than merely absent-of-session: waking a thread that has
+            // said nothing would start a context with nothing in it, which is
+            // the failure `crate::team::wake_order` refuses by name.
+            let resume = store.resume_for(&conversation_id, harness)?;
+            let carried = match resume {
+                Resume::Session(_) => None,
+                _ => match store.handoff_text(&conversation_id) {
+                    Ok(text) if !text.trim().is_empty() => Some(text),
+                    _ => {
+                        report.held += 1;
+                        continue;
+                    }
+                },
             };
 
             let mut req = SpawnRequest {
@@ -2164,14 +2185,21 @@ impl Ticker {
                     &conversation_id[..conversation_id.len().min(8)]
                 ),
                 harness,
-                prompt: injection.prompt.clone(),
+                // The record first, then what is being said into it — the same
+                // order every other spawn in Jod uses, because a model reading
+                // a transcript before it knows what it is reading it for is
+                // reading it twice.
+                prompt: match &carried {
+                    Some(record) => format!("{record}\n\n{}", injection.prompt),
+                    None => injection.prompt.clone(),
+                },
                 // The session's framing arrived with the turn that started it
                 // and is already in the conversation being resumed.
                 system: None,
                 cwd: std::path::PathBuf::from(&conversation.cwd),
                 model: None,
                 permission: PermissionPolicy::default(),
-                resume: Resume::Session(session_id),
+                resume,
                 // Enough of Jod to act on what it has just been told. An agent
                 // handed a decision it may not carry out is a turn spent
                 // saying so — the same reasoning that gives a woken teammate
@@ -6019,6 +6047,47 @@ mod tests {
                 State::Queued,
                 "held, not marked delivered to a turn that never happened"
             );
+        }
+
+        /// A conversation that has just been compacted is spoken to, seeded
+        /// with the summary it was compacted into.
+        ///
+        /// **The queue would otherwise be held for ever.** Compaction opens a
+        /// fresh conversation with no harness session — that is what compaction
+        /// *is* — so the no-session branch above caught it on every tick, and
+        /// the answer, or the instruction, was never delivered. It is not an
+        /// edge case: main compacts itself when its context fills, and the
+        /// assistant is a standing thread that does the same.
+        ///
+        /// The difference from the test above is the one that decides it. A
+        /// conversation that has never run has nothing to carry, so waking it
+        /// would start an empty context; a compacted one has its whole record on
+        /// it as the summary, and `Store::handoff_text` is the way to put that
+        /// in front of a session that has never seen it.
+        #[tokio::test]
+        async fn a_compacted_conversation_is_spoken_to_with_its_summary_carried_in() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            run_in(&store, &conversation, "run-1", "completed");
+            let carried = store
+                .continue_as_new(&conversation, "we settled on SQLite", "full")
+                .unwrap()
+                .conversation;
+            assert_eq!(
+                carried.session_id, None,
+                "the premise: no session to resume"
+            );
+            answered_card(&store, &carried.id, "shall I use SQLite?");
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(report.claimed, 1, "the queue was read");
+            assert_eq!(
+                report.held, 0,
+                "a compacted thread is not a thread that has never run — held \
+                 here, the answer waits for a session that is never coming"
+            );
+            assert_eq!(report.started + report.failed, 1);
         }
 
         /// A failed spawn must leave the answer queued. Marking it delivered to

@@ -141,6 +141,18 @@ pub enum Action {
     /// the pinned row. Carries the conversation id, which the tree row already
     /// holds — a project id here would make this look it up again.
     EnterManager(String),
+    /// Put the chat box into the assistant's standing conversation.
+    ///
+    /// `⏎` on the assistant's row in the fleet — the same movement
+    /// [`Action::EnterManager`] makes one level down, and its own verb rather
+    /// than a reuse of that one because of what the handler has to *say*.
+    /// `EnterManager` names the conversation after the project that owns it,
+    /// and the assistant belongs to no project, so it would announce "already
+    /// in that manager" about a row that is not one.
+    ///
+    /// Carries the conversation id, like every other `Enter…` here, because
+    /// that is what the row holds — see [`jod_core::tree::NodeId::assistant`].
+    EnterAssistant(String),
     /// Put the chat box into an engineer's own conversation, and follow it.
     ///
     /// `⏎` on an agent's row in the fleet. It used to be
@@ -1617,6 +1629,18 @@ async fn perform(
                     .map(|p| format!("{}'s manager", p.name))
                     .unwrap_or_else(|| "that manager".to_string());
                 enter_conversation(&store, app, thread, &conversation, &what, false);
+            }
+        },
+        Action::EnterAssistant(conversation) => match jod.store() {
+            None => app.push(Entry::Notice(format!(
+                "{NO_STORE} — there is no assistant to go into"
+            ))),
+            // Named plainly, because there is only ever one of them. A manager
+            // is named after its repository since there is a manager per
+            // project; the assistant is the layer, so "the assistant" is the
+            // whole of its identity.
+            Some(store) => {
+                enter_conversation(&store, app, thread, &conversation, "the assistant", false)
             }
         },
         Action::EnterSession(conversation) => match jod.store() {
@@ -4956,6 +4980,9 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                     jod_core::tree::NodeKind::Manager => {
                         Some(Action::EnterManager(node.id.id.clone()))
                     }
+                    jod_core::tree::NodeKind::Assistant => {
+                        Some(Action::EnterAssistant(node.id.id.clone()))
+                    }
                     jod_core::tree::NodeKind::Session if !node.has_children => {
                         Some(Action::EnterSession(node.id.id.clone()))
                     }
@@ -5111,6 +5138,13 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                 // bind to — the same movement `⏎` on the pinned row makes.
                 jod_core::tree::NodeKind::Manager => {
                     handled(Some(Action::EnterManager(node.id.id)))
+                }
+                // The same movement one level up. The assistant's row is a
+                // standing conversation holding runs, exactly as a manager's
+                // is, so `⏎` on it goes into the conversation rather than
+                // toggling a heading that has nothing to fold.
+                jod_core::tree::NodeKind::Assistant => {
+                    handled(Some(Action::EnterAssistant(node.id.id)))
                 }
                 // Jod's row *is* the pinned row, so it makes the movement the
                 // pinned row already makes rather than binding by id.
@@ -5343,6 +5377,7 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
                 jod_core::tree::NodeKind::Project => "a project",
                 jod_core::tree::NodeKind::Work => "a work",
                 jod_core::tree::NodeKind::Manager => "a manager's chat",
+                jod_core::tree::NodeKind::Assistant => "the assistant's chat",
                 _ => "a session with nothing running on it",
             };
             app.push(Entry::Notice(format!(
@@ -13070,6 +13105,72 @@ mod tests {
         for key in [KeyCode::Enter, KeyCode::Right] {
             let mut app = on_the_tree(crate::tui::fleet::main_id());
             assert_eq!(press(&mut app, key), Some(Action::EnterMain), "{key:?}");
+        }
+    }
+
+    /// `⏎` and `→` on the assistant's row go into the assistant's conversation.
+    ///
+    /// The same movement a manager's row makes one level down. The row is a
+    /// standing conversation holding runs, so it has something to open and
+    /// nothing to fold: without an arm of its own the key would fall through to
+    /// `expand_or_descend`, which on a row with no children is a printed key
+    /// that does nothing — and this is the row every instruction Reljod types
+    /// actually lands on, so it is the one row on the fleet worth being able to
+    /// read.
+    #[test]
+    fn enter_on_the_assistants_row_goes_into_its_conversation() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+        for key in [KeyCode::Enter, KeyCode::Right] {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            let main = crate::tui::fleet::main_id();
+            let assistant = NodeId::assistant("conv-assistant");
+            app.forest = vec![
+                Node {
+                    id: main.clone(),
+                    parent: None,
+                    kind: NodeKind::Main,
+                    depth: 0,
+                    label: "jod".into(),
+                    summary: String::new(),
+                    running: false,
+                    status: None,
+                    stalled_for_ms: None,
+                    cards: 0,
+                    blocked: 0,
+                    stalled: 0,
+                    colour: "cyan".into(),
+                    branch: None,
+                    worktree: None,
+                    expanded: true,
+                    has_children: true,
+                },
+                Node {
+                    id: assistant.clone(),
+                    parent: Some(main),
+                    kind: NodeKind::Assistant,
+                    depth: 1,
+                    label: "assistant".into(),
+                    summary: String::new(),
+                    running: true,
+                    status: None,
+                    stalled_for_ms: None,
+                    cards: 0,
+                    blocked: 0,
+                    stalled: 0,
+                    colour: "cyan".into(),
+                    branch: None,
+                    worktree: None,
+                    expanded: true,
+                    has_children: false,
+                },
+            ];
+            app.go(Workspace::Fleet);
+            app.tree.selected = Some(assistant);
+            assert_eq!(
+                press(&mut app, key),
+                Some(Action::EnterAssistant("conv-assistant".into())),
+                "{key:?}"
+            );
         }
     }
 

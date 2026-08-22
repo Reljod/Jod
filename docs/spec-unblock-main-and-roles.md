@@ -131,6 +131,13 @@ cheap and the current behaviour is a coin flip.
 
 ## A1. The assistant conversation is fresh every time
 
+> **Reversed.** The assistant is one standing conversation now, interrupted by
+> new instructions rather than replaced by them. The serialisation argument
+> below was answered rather than dropped — see
+> `docs/decisions.md`, "The assistant is one standing session". This section is
+> left as written because the rest of the spec refers back to it and because it
+> is the record of what was built first.
+
 A manager is a *standing* conversation, resumed for each instruction, because a
 manager's value is the project context it accumulates. An assistant is the
 opposite: **a fresh, ephemeral run per instruction, with no memory of its own.**
@@ -301,7 +308,10 @@ reuse candidates — which it does, because they are the same list.
 ## B1. Two columns on `conversations`
 
 - `ephemeral INTEGER NOT NULL DEFAULT 0` — this conversation is scratch. Set on
-  assistant conversations and on anything `delegate` starts.
+  anything `delegate` starts. It was set on the assistant's conversation too,
+  which was right while there was one per instruction; the standing assistant is
+  deliberately not in this lane, because every query in it archives and then
+  deletes what it finds.
 - `held INTEGER NOT NULL DEFAULT 0` — Reljod asked for this one to stay. Never
   auto-archived, never swept.
 - `archived_at_ms INTEGER` — when it left the fleet. Null means it has not.
@@ -543,10 +553,14 @@ absent key means the default.
 **Epic A**
 
 1. `ask_assistant` creates a conversation with `origin = 'assistant'`,
-   `ephemeral = 1` and `parent_conversation_id` set to main.
+   `ephemeral = 1` and `parent_conversation_id` set to main. *(Reversed in
+   part: the standing assistant is deliberately not `ephemeral`. See A1.)*
 2. Two `ask_assistant` calls make two different conversations. This is the
    regression guard on "fresh every time" — a standing assistant would return
-   the same id and reintroduce the block.
+   the same id and reintroduce the block. *(Reversed. Two calls now reach the
+   same conversation, and what stops the block is the delivery queue rather
+   than a second conversation. The check that replaced it is
+   `an_instruction_to_a_busy_assistant_is_queued_for_its_next_turn`.)*
 3. `ask_assistant` returns before the assistant run has produced any event.
 4. `ask_manager` called by main's run is refused, and the refusal names
    `ask_assistant`.
