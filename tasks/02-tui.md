@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Thirty-one changes, each with a test that fails without it. Driven by running the
+Thirty-four changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -493,6 +493,48 @@ Check: press `←` then `Esc` in a manager and assert what `app.conversation`
 holds, whichever answer is chosen.
 
 ---
+
+## What an independent sweep of the fixed build found
+
+A second agent, given the twelve claims and told to be adversarial, drove the
+console on its own socket and store against a seeded fleet — five projects, six
+works, sixteen runs, two same-named `web` repositories — at six terminal sizes
+with live resizing between them. **All twelve did what they claimed.** Nothing
+panicked or froze.
+
+It also found one regression, and it was mine, in the most fitting place
+available: the collapsed projects line added in this pass read `— Ctr` at every
+width, dropping the keystroke the sentence exists to name — in the same pass
+that added "ellipsise rather than clip" for the empty states two panes over.
+`cut` alone did not save it; the sentence was thirty-five characters in a
+thirty-two column panel, so it ellipsised the keystroke away regardless. The box
+title already says "none set", so the line now carries the two facts the title
+cannot: `▸ 5 catalogued · Ctrl-P`.
+
+Two pre-existing faults it verified against `main` are fixed here as well.
+
+- **The `/` palette painted over the right-hand rail** at every width wide
+  enough for the rail to exist and too narrow for the chat to cover the palette
+  — about ninety-four to a hundred and fifty columns. Its width was measured off
+  the whole frame minus the box's left edge, which is not "the room to the right
+  of the input box" when something sits beside the chat.
+- **The fleet filter's count contradicted the screen**, reporting `0 match`
+  beside four visibly matching rows. It counted `row_ids(Fleet)` — the flat
+  *agent* list plus a sentinel — while the pane drew tree nodes.
+
+Two more it verified are left open, and one is a gap rather than a break: the
+`Ctrl-P` panel takes a fixed thirty-two columns with no minimum-width guard and
+crushes the chat below seventy, where the rail proper moves itself below instead
+(T2's family); and the fleet does not carry the same-name disambiguation the
+projects panel gained, so two `web` projects are two bare `▪ web` rows.
+
+**The fix that nearly went in wrong is worth the paragraph.** Bounding the
+palette by the *composer* stops it covering the rail and re-cuts the longest
+description at two hundred columns — the exact fault a previous author removed a
+fixed 72-column cap to fix, held by a test named for it. It failed on the first
+run. The honest bound was neither the frame nor the composer but the chat
+column: the whole width when nothing is beside it, the chat's share when
+something is.
 
 ## What a daemon left running found
 
