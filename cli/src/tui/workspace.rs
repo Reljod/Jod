@@ -129,7 +129,11 @@ impl Workspace {
             Memory | MemoryGraph => "memory",
             Schedules => "schedules",
             Goals => "goals",
-            Hooks => "hooks",
+            // `webhooks`, matching the screen's own title. The menu called them
+            // `hooks` and the screen they open calls them `webhooks`, which is
+            // one thing under two names on two lines a keypress apart. Still
+            // one word, which is all this column asks.
+            Hooks => "webhooks",
             Tasks => "tasks",
             Activity => "activity",
             Team => "team",
