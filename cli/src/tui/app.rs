@@ -485,6 +485,11 @@ pub struct App {
     pub cursor: usize,
     /// How many lines the view is scrolled up from the bottom. 0 = following.
     pub scroll: usize,
+    /// The setting whose line is at the bottom of the transcript, and where it
+    /// sits — set only by [`App::push_setting`], and cleared by anything else
+    /// that lands in the transcript. `None` means there is nothing a setting
+    /// may overwrite. See that method for why the run has to be consecutive.
+    pub last_setting: Option<(&'static str, usize)>,
     pub harness: HarnessKind,
     /// The model to *ask* for, or `None` for whatever the harness picks itself.
     /// Only `/model` and the `-m` flag set this.
@@ -1370,6 +1375,7 @@ impl App {
             input: String::new(),
             cursor: 0,
             scroll: 0,
+            last_setting: None,
             harness,
             model,
             reported_model: None,
@@ -2302,6 +2308,10 @@ impl App {
                 return;
             }
         }
+        // Anything else reaching the transcript ends the run of setting lines,
+        // so the next one is written under it rather than over whatever now
+        // sits above it.
+        self.last_setting = None;
         self.transcript.push(entry);
         // New output pulls the view back to the bottom only if it was already
         // there. Scrolling up to read something must not be undone by an agent
@@ -2310,6 +2320,53 @@ impl App {
             return;
         }
         self.scroll += 1;
+    }
+
+    /// Say what one setting is now, overwriting the same setting's last line
+    /// when that line is still the bottom of the transcript.
+    ///
+    /// Cycling the permission mode is one decision arrived at, not four events
+    /// worth reading. Tab four times and the chat used to carry `mode: plan`,
+    /// `mode: ask`, `mode: edits`, `mode: auto` — four amber bullets of which
+    /// three are already wrong, pushing the conversation off the screen to say
+    /// nothing. Only the last one is a fact about anything.
+    ///
+    /// Only a *consecutive* run collapses. A mode set before you said
+    /// something and changed again after is two facts about two different
+    /// turns, and the first still explains what the harness was allowed to do
+    /// in between, so it stays where it is.
+    pub fn push_setting(&mut self, setting: &'static str, said: String) {
+        if self.workspace == Workspace::Chat && self.tail_of(setting) {
+            if let Some(entry) = self.transcript.last_mut() {
+                *entry = Entry::Notice(said);
+            }
+            return;
+        }
+        let before = self.transcript.len();
+        self.push(Entry::Notice(said));
+        // There is nothing to overwrite when the line went somewhere else:
+        // `push` diverts a notice raised off the chat screen to a flash over
+        // the screen you are actually on.
+        if self.transcript.len() == before + 1 {
+            self.last_setting = Some((setting, before));
+        }
+    }
+
+    /// Whether this setting's own line is the last entry in the transcript.
+    ///
+    /// The index is checked rather than trusted: `push` clears the record, but
+    /// the transcript is also cleared outright by `/new` and by opening
+    /// another conversation, and an index that is no longer the last entry
+    /// must never be overwritten.
+    fn tail_of(&self, setting: &'static str) -> bool {
+        match self.last_setting {
+            Some((named, at)) => {
+                named == setting
+                    && at + 1 == self.transcript.len()
+                    && matches!(self.transcript.last(), Some(Entry::Notice(_)))
+            }
+            None => false,
+        }
     }
 
     /// Say one line over the current screen rather than in the conversation.
@@ -3989,6 +4046,67 @@ mod tests {
         a.push(Entry::Notice("roots: /srv/jod".into()));
         assert_eq!(a.transcript, vec![Entry::Notice("roots: /srv/jod".into())]);
         assert!(a.flash.is_none());
+    }
+
+    /// Tab through all four modes and the chat carries the mode you landed on,
+    /// once. This is the whole point: three of those four lines were wrong the
+    /// moment the next press happened.
+    #[test]
+    fn cycling_one_setting_leaves_one_line() {
+        let mut a = app();
+        for mode in ["plan", "ask", "edits", "auto"] {
+            a.push_setting("mode", format!("mode: {mode}"));
+        }
+        assert_eq!(a.transcript, vec![Entry::Notice("mode: auto".into())]);
+    }
+
+    /// Two settings are two facts, and the second must not eat the first.
+    #[test]
+    fn another_setting_does_not_overwrite_the_one_above_it() {
+        let mut a = app();
+        a.push_setting("mode", "mode: plan".into());
+        a.push_setting("model", "model: haiku".into());
+        assert_eq!(
+            a.transcript,
+            vec![
+                Entry::Notice("mode: plan".into()),
+                Entry::Notice("model: haiku".into()),
+            ]
+        );
+    }
+
+    /// Only a consecutive run collapses. A mode set before a turn and changed
+    /// after it explains what the harness was allowed to do in between, so the
+    /// first line stays where it is.
+    #[test]
+    fn a_setting_changed_around_a_turn_keeps_both_lines() {
+        let mut a = app();
+        a.push_setting("mode", "mode: plan".into());
+        a.push(Entry::You("port the parser".into()));
+        a.push_setting("mode", "mode: auto".into());
+        assert_eq!(
+            a.transcript,
+            vec![
+                Entry::Notice("mode: plan".into()),
+                Entry::You("port the parser".into()),
+                Entry::Notice("mode: auto".into()),
+            ]
+        );
+    }
+
+    /// A setting named off the chat screen flashes, exactly as any other notice
+    /// does — and leaves nothing behind that a later one could overwrite.
+    #[test]
+    fn a_setting_named_off_the_chat_screen_touches_no_transcript_line() {
+        let mut a = app();
+        a.push_setting("mode", "mode: plan".into());
+        a.go(Workspace::Fleet);
+        a.push_setting("mode", "mode: auto".into());
+        assert_eq!(a.transcript, vec![Entry::Notice("mode: plan".into())]);
+        assert_eq!(
+            a.flash.expect("a flash").lines,
+            vec!["mode: auto".to_string()]
+        );
     }
 
     /// Only Jod's own voice moves. A harness that answers while the cursor is
