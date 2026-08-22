@@ -4310,3 +4310,20 @@ built-in default was applied a column at a time, so a `roles` row moving the
 assistant to Claude Code still handed it AGY's model — a whole spawn wasted on
 "there's an issue with the selected model". The built-in is a pair now: the
 model half only applies on its own harness.
+
+**A review ends when the run doing it ends.** The first version of this shipped
+a claim with no release: `finish_review` had three callers and all three covered
+a doorman that never *started*. A doorman that started and then ended — held,
+crashed, or recorded `failed` by AGY, which marks a run that used tools as
+failed even when it succeeded — left its rows in `reviewing`, where
+`pending_for` cannot see them. The console went on saying an assistant was
+reading a message that was gone. An explorer session found it by typing "STOP -
+urgent, forget the essay" into a busy chat and watching it never arrive.
+
+The rule needs no timeout and no guess at what the verdict was, because by the
+time the run is over the doorman has already done whatever it decided: an
+interrupt is a tool call it made, a hold is one it decided not to make. So the
+sweep asks one question — is the run that claimed this still running — and puts
+back everything where the answer is no. A row with no reviewer recorded goes
+back too: releasing early costs a verdict being ignored and the message arriving
+when the turn ends, and not releasing costs the message.

@@ -2413,7 +2413,7 @@ async fn judge_now(jod: &Jod, app: &mut App, conversation: &str) {
         let _ = store.finish_review(&ids);
         return;
     };
-    if let Err(e) = jod_core::orchestrator::start_doorman(
+    match jod_core::orchestrator::start_doorman(
         jod,
         conversation,
         &items,
@@ -2422,10 +2422,17 @@ async fn judge_now(jod: &Jod, app: &mut App, conversation: &str) {
     )
     .await
     {
-        let _ = store.finish_review(&ids);
-        app.push(Entry::Notice(format!(
-            "nobody could be started to read that, so it waits for this turn to end: {e}"
-        )));
+        // Whose review this is, so `release_stale_reviews` can end it when the
+        // run does.
+        Ok(started) => {
+            let _ = store.record_reviewer(&ids, &started.run_id);
+        }
+        Err(e) => {
+            let _ = store.finish_review(&ids);
+            app.push(Entry::Notice(format!(
+                "nobody could be started to read that, so it waits for this turn to end: {e}"
+            )));
+        }
     }
 }
 
@@ -2450,6 +2457,19 @@ async fn judge_now(jod: &Jod, app: &mut App, conversation: &str) {
 fn take_queued(jod: &Jod, app: &mut App, thread: &Thread) -> Option<String> {
     let store = jod.store()?;
     let conversation = current_conversation(store, app, thread)?;
+    // **The console sweeps as well as the tick, and on this box it is usually
+    // the only thing that does.** `jod daemon` is what starts a doorman on a
+    // timer, and it is not always running — so a message whose doorman ended
+    // without a verdict would sit out of the queue until somebody happened to
+    // start the daemon. This runs at the end of every turn, which is exactly
+    // when a stranded message would otherwise be about to be missed again.
+    if let Ok(n) = store.release_stale_reviews() {
+        if n > 0 {
+            app.push(Entry::Notice(format!(
+                "{n} queued message(s) nobody was reading any more — going in now"
+            )));
+        }
+    }
     let injection = store
         .plan_injection(&conversation, false)
         .ok()?

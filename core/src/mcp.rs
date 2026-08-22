@@ -2895,6 +2895,25 @@ impl Server {
             eprintln!("[jod] stopped `{run_id}` but could not say why in the chat: {e}");
         }
 
+        // **Back in the queue, here, rather than on the sweep that would catch
+        // it anyway.** The whole point of stopping the turn is that the message
+        // goes in *now*, and the sweep runs on the tick — so leaving it to that
+        // would trade a turn's wait for up to a minute's, on the one path where
+        // Reljod is watching and has just said the word "urgent".
+        //
+        // `pending_for` cannot see a `reviewing` row, so without this the
+        // conversation is idle, the queue looks empty, and the message that
+        // caused the interrupt is the one thing that does not arrive.
+        let reviewing: Vec<i64> = store
+            .under_review_for(&target)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        if let Err(e) = store.finish_review(&reviewing) {
+            eprintln!("[jod] stopped `{run_id}` but could not requeue what was read: {e}");
+        }
+
         as_json(&json!({
             "stopped": run_id,
             "note": "the turn is over and the conversation is intact. What Reljod typed is \

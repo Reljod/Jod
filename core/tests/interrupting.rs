@@ -59,6 +59,24 @@ fn turn_in_flight(store: &Store, conversation: &str, run_id: &str, asked: &str) 
     store.append_prompt(conversation, run_id, asked).unwrap();
 }
 
+/// The run reading a queued message, in whatever state it has reached.
+fn doorman(store: &Store, run_id: &str, status: &str) {
+    store
+        .save_run(&StoredRun {
+            id: run_id.into(),
+            name: format!("doorman {run_id}"),
+            harness: "agy".into(),
+            status: status.into(),
+            cwd: "/tmp".into(),
+            session_id: None,
+            pid: None,
+            pgid: None,
+            created_at_ms: 0,
+            summary: serde_json::Value::Null,
+        })
+        .unwrap();
+}
+
 /// The turn ends. Nothing else about the conversation changes.
 fn turn_ends(store: &Store, run_id: &str) {
     let mut run = store.run(run_id).unwrap().expect("the run is there");
@@ -180,6 +198,86 @@ fn stopping_the_turn_is_the_whole_of_what_an_interrupt_has_to_do() {
         .expect("nothing is in flight, so the message goes in as the next turn");
     assert!(injection.prompt.contains("no — the other repo"));
     assert_eq!(injection.items[0].state, State::Queued);
+}
+
+/// The bug that made the assistant tier worse than not having one, end to end.
+///
+/// Observed rather than imagined: "STOP - urgent, forget the essay" was typed
+/// into a busy main chat, a doorman started and judged it correctly, its run
+/// ended without a clean verdict, and the message stayed in `reviewing` with no
+/// `run_id` for ever. The console said "an assistant is reading it" and
+/// "doorman failed" at the same time, an explicit Escape did not shake it
+/// loose, and ten minutes later the status bar still read `1 queued`.
+///
+/// The whole of the fix is that a review ends when the run doing it ends. This
+/// walks that across processes, because the sweep and the doorman are not in
+/// the same one.
+#[test]
+fn a_message_survives_a_doorman_that_ends_without_a_verdict() {
+    let scratch = Scratch::new("stranded");
+    let conversation = {
+        let store = scratch.open();
+        let conversation = store.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        turn_in_flight(&store, &conversation, "run-main", "write the essay");
+        let queued = store
+            .enqueue_delivery(
+                &conversation,
+                Kind::Human,
+                "typed",
+                "STOP - urgent, forget the essay, is the lab project on a branch?",
+            )
+            .unwrap();
+
+        // A doorman takes it and starts reading.
+        store.claim_for_review(&[queued.id]).unwrap();
+        doorman(&store, "run-doorman", "running");
+        store.record_reviewer(&[queued.id], "run-doorman").unwrap();
+        assert!(
+            store.pending_for(&conversation).unwrap().is_empty(),
+            "while it is being read it is out of the queue, which is the point"
+        );
+        conversation
+    };
+
+    // The doorman ends without delivering and without deferring. `failed` is
+    // the state actually observed, and it may not even mean the run went wrong
+    // — AGY records a run that used tools as failed even when it succeeded.
+    // Nothing here depends on knowing which it was.
+    {
+        let store = scratch.open();
+        doorman(&store, "run-doorman", "failed");
+    }
+
+    // A fresh process sweeps, and the message is back.
+    {
+        let store = scratch.open();
+        assert_eq!(store.release_stale_reviews().unwrap(), 1);
+        assert_eq!(store.under_review_for(&conversation).unwrap().len(), 0);
+        let waiting = store.pending_for(&conversation).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(
+            waiting[0].reviewed_at_ms.is_some(),
+            "read once: it must not buy a second doorman on the next tick"
+        );
+        assert_eq!(
+            store.plan_injection(&conversation, true).unwrap(),
+            Plan::Hold,
+            "and it does not"
+        );
+    }
+
+    // The turn ends and it goes in, which is all it ever needed to do.
+    {
+        let store = scratch.open();
+        turn_ends(&store, "run-main");
+        let busy = store.conversation_is_busy(&conversation).unwrap();
+        let injection = store
+            .plan_injection(&conversation, busy)
+            .unwrap()
+            .speak()
+            .expect("the message Reljod typed arrives");
+        assert!(injection.prompt.contains("STOP - urgent"));
+    }
 }
 
 /// A message left `reviewing` by an assistant that died is not a lost message.

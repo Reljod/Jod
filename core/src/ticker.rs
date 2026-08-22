@@ -2118,6 +2118,18 @@ impl Ticker {
         let Some(store) = self.jod.store().cloned() else {
             return Ok(TickReport::default());
         };
+        // **First, before anything is planned.** A message whose doorman has
+        // stopped reading it is a message nothing is doing anything about, and
+        // it is invisible to `conversations_awaiting_delivery` until it is put
+        // back — so this has to run before the list is taken, or a stranded
+        // message waits another whole tick to be noticed.
+        match store.release_stale_reviews() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[jod/tick] put {n} message(s) back that nobody was reading"),
+            // Not fatal, on the same reasoning as the rest of this file. A sweep
+            // that cannot run is a reason to get on with the tick.
+            Err(e) => eprintln!("[jod/tick] could not put back what nobody is reading: {e}"),
+        }
         let waiting = store.conversations_awaiting_delivery()?;
         // Read once for the whole sweep, so the question "is this the main
         // chat" is answered from one value rather than re-resolved per
@@ -2296,6 +2308,13 @@ impl Ticker {
         {
             Ok(started) => {
                 report.judged += 1;
+                // Whose review this is, so the sweep above can end it when the
+                // run does. Best effort: a row that never gets stamped is
+                // released on the next sweep rather than held, which is the
+                // safe direction.
+                if let Err(e) = store.record_reviewer(&ids, &started.run_id) {
+                    eprintln!("[jod/tick] could not record which run is reading a message: {e}");
+                }
                 eprintln!(
                     "[jod/tick] started {} to read {} message(s) queued behind {}",
                     &started.run_id[..started.run_id.len().min(8)],
@@ -6011,6 +6030,60 @@ mod tests {
                     NewMessage::new(Role::Assistant, "working").from_run(id),
                 )
                 .unwrap();
+        }
+
+        /// The tick puts back a message whose doorman has stopped reading it,
+        /// and it does so *before* it plans anything.
+        ///
+        /// The ordering is the half that is easy to get wrong and impossible to
+        /// see: a `reviewing` row is invisible to
+        /// `conversations_awaiting_delivery`, so a sweep placed after that list
+        /// is taken would recover the message and then not deliver it until the
+        /// tick after — a minute later, on the one path where Reljod has just
+        /// typed the word "urgent".
+        #[tokio::test]
+        async fn a_tick_puts_back_a_message_nobody_is_reading_and_then_delivers_it() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            let queued = store
+                .enqueue_delivery(&conversation, Kind::Human, "typed", "STOP - urgent")
+                .unwrap();
+            store.claim_for_review(&[queued.id]).unwrap();
+            // A doorman that started, ended, and said nothing either way.
+            run_in(&store, &conversation, "doorman-1", "failed");
+            store.record_reviewer(&[queued.id], "doorman-1").unwrap();
+            assert!(store.pending_for(&conversation).unwrap().is_empty());
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(
+                report.claimed, 1,
+                "the sweep runs first, so this tick sees the message rather than the next one"
+            );
+            assert_eq!(
+                report.started + report.failed,
+                1,
+                "and it is delivered on the same pass"
+            );
+            assert_eq!(store.under_review_for(&conversation).unwrap().len(), 0);
+        }
+
+        /// And a doorman that is genuinely still reading keeps what it claimed.
+        #[tokio::test]
+        async fn a_tick_leaves_a_message_alone_while_its_doorman_is_still_reading() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let conversation = session(&store);
+            let queued = store
+                .enqueue_delivery(&conversation, Kind::Human, "typed", "one moment")
+                .unwrap();
+            store.claim_for_review(&[queued.id]).unwrap();
+            run_in(&store, &conversation, "doorman-1", "running");
+            store.record_reviewer(&[queued.id], "doorman-1").unwrap();
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+
+            assert_eq!(report.claimed, 0, "nothing is waiting: it is being read");
+            assert_eq!(store.under_review_for(&conversation).unwrap().len(), 1);
         }
 
         #[tokio::test]

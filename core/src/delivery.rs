@@ -697,10 +697,17 @@ impl Store {
     ///
     /// Every path out of a review comes back through here — a doorman that held,
     /// a doorman that interrupted, and a doorman that died without saying
-    /// anything. That last one is why this is not folded into the two verdicts:
-    /// a row left `reviewing` by a crashed run would be invisible to
-    /// [`Store::pending_for`] for ever, and Reljod's message would be lost in a
-    /// state nothing sweeps.
+    /// anything.
+    ///
+    /// **The third case is not hypothetical and it was not covered.** This
+    /// comment used to claim it was, and the code did not: every caller was a
+    /// path where the *spawn* failed, so a doorman that started and then ended
+    /// — held, crashed, or interrupted — left its rows in `Reviewing` for ever.
+    /// [`Store::pending_for`] cannot see them, so the message was gone while the
+    /// console went on saying an assistant was reading it. Found by an explorer
+    /// session typing "STOP - urgent, forget the essay" into a busy chat and
+    /// watching it never arrive. [`Store::release_stale_reviews`] is what closes
+    /// it, and this is what it calls.
     pub fn finish_review(&self, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
@@ -722,6 +729,76 @@ impl Store {
             );
             tx.execute(&sql, params_from_iter(args))?;
             Ok(())
+        })
+    }
+
+    /// Say which run is doing the reading, so the sweep knows whose review it is.
+    ///
+    /// Written after the spawn, because the run id does not exist before it.
+    /// That leaves a gap — claimed, not yet stamped — and
+    /// [`Store::release_stale_reviews`] deliberately treats a row in that gap as
+    /// releasable. The two failure modes are not the same size: releasing early
+    /// means a doorman's verdict is ignored and the message is delivered
+    /// normally when the turn ends, and not releasing means the message is lost.
+    ///
+    /// Reuses `run_id` rather than adding a column. The column means "which run
+    /// last had this", and a doorman reading it is a run having it; delivery
+    /// overwrites it with the run that actually carried it.
+    pub fn record_reviewer(&self, ids: &[i64], run_id: &str) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.write(|tx| {
+            let placeholders = (3..3 + ids.len())
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut args: Vec<rusqlite::types::Value> = vec![
+                rusqlite::types::Value::Text(State::Reviewing.as_str().into()),
+                rusqlite::types::Value::Text(run_id.into()),
+            ];
+            args.extend(ids.iter().map(|id| rusqlite::types::Value::Integer(*id)));
+            let sql = format!(
+                "UPDATE pending_deliveries SET run_id = ?2
+                  WHERE state = ?1 AND id IN ({placeholders})"
+            );
+            tx.execute(&sql, params_from_iter(args))?;
+            Ok(())
+        })
+    }
+
+    /// Put back every message whose doorman has stopped reading it.
+    ///
+    /// **A review ends when the run doing it ends.** Whatever the doorman
+    /// decided, it has already done by the time its run is over: an interrupt is
+    /// a tool call it has made, and a hold is a tool call it has decided not to
+    /// make. Either way nobody is reading the message any more, so leaving it
+    /// out of the queue can only lose it.
+    ///
+    /// That rule needs no timeout and no guess about what the verdict was, which
+    /// is why it is this rule and not a stale-after-N-minutes one. It also does
+    /// not care *why* the run ended — held, crashed, killed, or recorded
+    /// `failed` by a harness that mislabels a successful run, which AGY
+    /// currently does. All four mean the same thing here.
+    ///
+    /// A row with no reviewer recorded is released too. Either the spawn never
+    /// happened or the process died between claiming and stamping, and in both
+    /// cases nothing is reading it.
+    ///
+    /// Returns how many it put back, so a tick can say so out loud.
+    pub fn release_stale_reviews(&self) -> Result<usize> {
+        let at = now_ms();
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE pending_deliveries
+                    SET state = 'queued', reviewed_at_ms = coalesce(reviewed_at_ms, ?1)
+                  WHERE state = 'reviewing'
+                    AND (run_id IS NULL
+                         OR NOT EXISTS (SELECT 1 FROM runs r
+                                         WHERE r.id = pending_deliveries.run_id
+                                           AND r.status = 'running'))",
+                params![at],
+            )?)
         })
     }
 
@@ -895,6 +972,25 @@ mod tests {
         s.new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
             .expect("conversation")
             .id
+    }
+
+    /// A run row in a given state, which is the whole of what
+    /// [`Store::release_stale_reviews`] reads to decide whether anybody is
+    /// still reading a message.
+    fn run_with_status(s: &Store, id: &str, status: &str) {
+        s.save_run(&crate::store::StoredRun {
+            id: id.into(),
+            name: format!("doorman {id}"),
+            harness: "agy".into(),
+            status: status.into(),
+            cwd: "/tmp".into(),
+            session_id: None,
+            pid: None,
+            pgid: None,
+            created_at_ms: 0,
+            summary: serde_json::Value::Null,
+        })
+        .expect("a run row");
     }
 
     /// A card raised and answered, which is the ordinary way something reaches
@@ -1082,6 +1178,119 @@ mod tests {
             panic!("three lines behind one turn are judged");
         };
         assert_eq!(items.len(), 3);
+    }
+
+    /// **A review ends when the run doing it ends**, whatever the verdict was
+    /// and whatever the harness recorded about how the run finished.
+    ///
+    /// The regression this pins is the one that made the whole assistant tier
+    /// worse than not having it: every release path was a *spawn failure*, so a
+    /// doorman that started and then ended — held, crashed, or recorded
+    /// `failed` by a harness that mislabels success — left the message in
+    /// `Reviewing`, where `pending_for` cannot see it. The console went on
+    /// saying an assistant was reading it and the message was gone.
+    #[test]
+    fn a_message_goes_back_in_the_queue_when_its_doorman_stops_reading_it() {
+        for ended_as in ["completed", "failed", "killed"] {
+            let s = store();
+            let c = conversation(&s);
+            let queued = s
+                .enqueue_delivery(&c, Kind::Human, "typed", "STOP — urgent")
+                .unwrap();
+            s.claim_for_review(&[queued.id]).unwrap();
+            run_with_status(&s, "doorman-1", "running");
+            s.record_reviewer(&[queued.id], "doorman-1").unwrap();
+
+            assert_eq!(
+                s.release_stale_reviews().unwrap(),
+                0,
+                "a doorman still reading it keeps it: {ended_as}"
+            );
+            assert!(s.pending_for(&c).unwrap().is_empty());
+
+            run_with_status(&s, "doorman-1", ended_as);
+            assert_eq!(s.release_stale_reviews().unwrap(), 1, "{ended_as}");
+
+            let back = s.pending_for(&c).unwrap();
+            assert_eq!(back.len(), 1, "{ended_as}");
+            assert!(
+                back[0].reviewed_at_ms.is_some(),
+                "read once and not read again: {ended_as}"
+            );
+            assert!(s
+                .plan_injection(&c, false)
+                .unwrap()
+                .speak()
+                .is_some_and(|i| i.prompt.contains("STOP — urgent")));
+        }
+    }
+
+    /// A stuck review must not stop the *next* message being read.
+    ///
+    /// Checked because it was reported as the worst part of the stranding bug —
+    /// one failure disabling the assistant for that chat for good, with the
+    /// counter going up and nothing ever reading any of it. It is not what this
+    /// code does: a claim is per row, not per conversation, so a message nobody
+    /// is reading any more does not hold the door shut on the ones behind it.
+    ///
+    /// Worth a test either way. The claim was plausible enough to be believed,
+    /// and "one failure and the tier is dead" and "one message is late" call for
+    /// very different fixes.
+    #[test]
+    fn a_message_stuck_under_review_does_not_stop_the_next_one_being_read() {
+        let s = store();
+        let c = conversation(&s);
+        let stuck = s.enqueue_delivery(&c, Kind::Human, "typed", "STOP - urgent").unwrap();
+        s.claim_for_review(&[stuck.id]).unwrap();
+        run_with_status(&s, "doorman-1", "failed");
+        s.record_reviewer(&[stuck.id], "doorman-1").unwrap();
+
+        // Two more typed behind it while the first is still stranded.
+        s.enqueue_delivery(&c, Kind::Human, "typed", "seriously, stop").unwrap();
+        s.enqueue_delivery(&c, Kind::Human, "typed", "are you listening").unwrap();
+
+        let Plan::Judge { items, .. } = s.plan_injection(&c, true).unwrap() else {
+            panic!("a stranded row must not hold the door shut on the ones behind it");
+        };
+        assert_eq!(items.len(), 2);
+
+        // And the sweep brings the stranded one back to join them.
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 3);
+    }
+
+    /// A row claimed by a process that died before it could say which run was
+    /// reading it. Nothing is reading it, so it goes back.
+    ///
+    /// Released rather than held, deliberately: releasing early costs a
+    /// doorman's verdict being ignored and the message arriving when the turn
+    /// ends, and holding costs the message.
+    #[test]
+    fn a_review_nobody_owns_is_not_a_review() {
+        let s = store();
+        let c = conversation(&s);
+        let queued = s
+            .enqueue_delivery(&c, Kind::Human, "typed", "still here")
+            .unwrap();
+        s.claim_for_review(&[queued.id]).unwrap();
+        assert!(s.under_review_for(&c).unwrap()[0].run_id.is_none());
+
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 1);
+    }
+
+    /// And a reviewer that was never a run at all — a row naming a run this
+    /// database has no record of — is not something to wait on for ever.
+    #[test]
+    fn a_reviewer_that_does_not_exist_releases_the_message() {
+        let s = store();
+        let c = conversation(&s);
+        let queued = s.enqueue_delivery(&c, Kind::Human, "typed", "hello").unwrap();
+        s.claim_for_review(&[queued.id]).unwrap();
+        s.record_reviewer(&[queued.id], "a-run-that-never-was").unwrap();
+
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 1);
     }
 
     /// A doorman that died without saying anything must not take the message
