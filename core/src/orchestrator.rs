@@ -642,6 +642,24 @@ pub async fn hand_to_manager(
 /// text below it. It is upstream of all of this: the manager still decides who
 /// is free before it decides what to give them, and the cap is counted from the
 /// same call.
+///
+/// **It ends by saying what to do when a card comes back.** The brief used to
+/// stop at "finish by raising a card", which describes half of a round trip and
+/// reads as the whole of one. Reljod answered a decision card asking for the
+/// work to be split between two engineers instead of one, and the manager did
+/// nothing: the engineer it had already started carried on, no second one was
+/// opened, and the rail showed the answer delivered. Nothing had failed. The
+/// manager had been told what to do up to the moment it raised the card and
+/// nothing about the turn that arrives afterwards, and an agent that has not
+/// been given a rule is an agent behaving reasonably in the absence of one.
+///
+/// So the last section names the verbs for undoing what an overrule invalidates
+/// — reaching a running engineer, stopping one, planning again — and it names
+/// only verbs a manager holds, which
+/// `every_tool_a_manager_is_told_to_use_is_one_a_manager_can_reach` keeps true.
+/// `send_message` is the one that was new: a manager is a member of every work
+/// it opens, under the reserved name [`crate::team::MANAGER`], which is what
+/// makes "tell the engineer" something it can actually do.
 pub fn manager_preamble(project: &str, max_engineers: usize) -> String {
     // Spelled once, because it is stated twice — as the budget and as the
     // reason not to spend it.
@@ -789,6 +807,11 @@ pub fn manager_preamble(project: &str, max_engineers: usize) -> String {
          - `delegate` for a one-shot that needs no board — a lookup, a check, \
            a script.\n\
          - `stop_agent` for something you started that should not be running.\n\
+         - `roster` and `send_message` to reach an engineer that is still \
+           running. Your engineers address you as `manager` and you address \
+           them by the names `roster` lists, and this is the only way to change \
+           what a live engineer is doing without killing the turn it is in. \
+           `read_messages` takes what they have sent you.\n\
          - `recall`, `related`, `remember` and `record_decision` for what this \
            project has learned. Memory is most of why a manager is worth \
            having: you are the one conversation that has seen every instruction \
@@ -800,6 +823,43 @@ pub fn manager_preamble(project: &str, max_engineers: usize) -> String {
          see is one nobody can correct. Where you handed a job out rather than \
          answering it, the card that says it is **finished** waits for the board \
          to be empty.\n\n\
+         **And a card he answers comes back to you as a turn.** This is the \
+         other half of raising one, and it is the half that costs something \
+         when it is ignored. You are resumed for it: an answer to one of your \
+         own cards arrives as `[answer to a card you raised]`, in this same \
+         transcript, whether or not the turn that raised the card is still \
+         running.\n\n\
+         Read what it says before you decide it changes nothing. An answer that \
+         agrees with what you chose is a turn you can close by carrying on. An \
+         answer that **overrules** you says so in as many words — it names the \
+         option you picked and the one Reljod put in its place — and that one \
+         is never a note. You already acted on the choice he has just replaced, \
+         so something is running that should not be, or something that should \
+         be running is not.\n\n\
+         **Reconcile it in that same turn, before anything else.** Saying you \
+         will is not doing it, and neither is answering in prose: nobody is \
+         reading this transcript, and the engineers do not know anything has \
+         changed. Work through it in this order:\n\
+         - `list_agents`, scoped to {project}, to see who is actually running \
+           under the old decision.\n\
+         - `send_message` to any engineer whose task the answer has changed, \
+           saying what changed and what to do instead. It reaches a running \
+           engineer as a turn of its own, at the end of the one it is in — you \
+           are on its roster as `manager`, and `roster` names the engineers you \
+           can write to.\n\
+         - `stop_agent` for an engineer whose whole task the answer has \
+           cancelled. A message is for redirecting one; stopping is for work \
+           that should not exist at all.\n\
+         - `plan_work` again when the answer changes the *breakdown* rather \
+           than one task — being told to split across two engineers instead of \
+           one is exactly that. Write the new tasks with the files each one \
+           owns, then `open_work` or `continue_agent` to staff the ones nobody \
+           holds. The cap above still applies and is still counted from \
+           `list_agents`.\n\
+         - `record_decision` once more, saying what you changed and what is \
+           running now. The first card said what you decided; this one says \
+           what his answer actually did, and without it he has no way to see \
+           whether being overruled reached anybody.\n\n\
          Then say the same one or two sentences as your reply."
     )
 }
@@ -2904,6 +2964,54 @@ mod tests {
                 "the placement `{placement}` is not offered to the manager: {said}"
             );
         }
+    }
+
+    /// The other half of the round trip, and the one Reljod's report was about.
+    ///
+    /// He answered a decision card asking for the work to be split between two
+    /// engineers instead of one, and the manager carried on with one engineer.
+    /// The brief stopped at "finish by raising a card", which describes half of
+    /// an exchange and reads like the whole of one: nothing told the manager
+    /// that an answer comes back, that an answer can *contradict* what it
+    /// already set in motion, or what to do about it when it does.
+    ///
+    /// So the words are pinned rather than left to survive the next edit of a
+    /// long preamble by luck. The verbs are checked as well as the prose,
+    /// because being told to reconcile and not being told what to reconcile
+    /// with is the same dead end.
+    #[test]
+    fn a_manager_is_told_what_to_do_when_an_answer_overrules_it() {
+        let said = manager_preamble("tetris", 3);
+        assert!(said.contains("[answer to a card you raised]"), "{said}");
+        assert!(
+            said.contains("overrules"),
+            "the manager is never told an answer can contradict it: {said}"
+        );
+        assert!(
+            said.contains("Reconcile it in that same turn"),
+            "the manager is told it will be contradicted and not told to act on it: {said}"
+        );
+        // The three ways an overrule is acted on: redirect a live engineer,
+        // stop one whose task is cancelled, and plan again when the breakdown
+        // itself changed. `every_tool_a_manager_is_told_to_use_is_one_a_manager_
+        // can_reach` keeps all three callable.
+        for verb in ["`send_message`", "`stop_agent`", "`plan_work`"] {
+            assert!(
+                said.contains(verb),
+                "{verb} is not offered for reconciling an overrule: {said}"
+            );
+        }
+        // The reserved name is the address, and it is spelled here because the
+        // manager has to know what its engineers call it before it writes to
+        // one. A brief naming some other word would send it hunting.
+        assert!(
+            said.contains(&format!("`{}`", crate::team::MANAGER)),
+            "the manager is not told the name it is on the bus under: {said}"
+        );
+        // Being overruled and being agreed with are two different turns, and a
+        // brief that only described the first would have a manager undoing work
+        // nobody objected to.
+        assert!(said.contains("agrees with what you chose"), "{said}");
     }
 
     /// **Check 37.** A preamble that says "a few at once" is one every manager

@@ -3153,12 +3153,14 @@ impl Store {
     /// pair, `member_in` looks a member up by it, and a run is named
     /// `<team>-<member>`, so neither half can be blank.
     ///
-    /// The two reserved names are refused here as well as in
+    /// The reserved names are refused here as well as in
     /// [`Store::join_scope`], and the gap between them was real: this is what
     /// `jod team join` calls, so until now a person could type
     /// `jod team join crew main` and put an agent on the roster under the
     /// orchestrator's address. Sender identity is derived from the run so that
     /// it cannot be claimed, and a name that can be claimed gives it all back.
+    /// `manager` is refused on the same rule and for the sharpest version of
+    /// the reason: an engineer reports its task to that address.
     pub fn join_team(
         &self,
         team: &str,
@@ -3176,6 +3178,11 @@ impl Store {
         if crate::team::is_main(name) {
             return Err(JodError::Invalid(format!(
                 "`{name}` is the main chat's name on the bus and cannot be joined as an agent"
+            )));
+        }
+        if crate::team::is_manager(name) {
+            return Err(JodError::Invalid(format!(
+                "`{name}` is a project manager's name on the bus and cannot be joined as an agent"
             )));
         }
         self.write(|tx| {
