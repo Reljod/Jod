@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Thirty-six changes, each with a test that fails without it. Driven by running the
+Thirty-seven changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -256,6 +256,20 @@ nobody presses.
 - **A missing argument was answered with a synopsis**, `usage: /heartbeat <id>
   [off]` — the only telegraphic refusal in a console where every other one is a
   sentence.
+
+**The screens nobody had driven.**
+
+- **The tasks board called every task new.** `age_ms` was hard-coded to zero in
+  both converters and `TeamTask` did not carry the timestamp at all, though the
+  `tasks` table has had one all along — so five works created over five hours
+  read `0s`, "just now", every one of them. It now reads `4h44m`, `5h06m`,
+  `5h18m`. A task with no recorded timestamp gets a dash rather than a
+  fabricated zero, which is the rule this repo already states for the pinned
+  chat's row: *"a chat nothing has been said to has no age, and `0s` would be a
+  claim that something just happened."*
+- **A question put to Reljod dropped off the rail at a compaction** — the fifth
+  face of the fault above, found by pressing `t` and `f` on the rail and
+  noticing an answered stack that should not have been empty.
 
 **The console.**
 
