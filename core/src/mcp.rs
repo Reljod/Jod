@@ -203,33 +203,35 @@ pub fn catalogue() -> Vec<Tool> {
             ),
         },
         Tool {
-            name: "ask_assistant",
+            name: "interrupt_main",
             description:
-                "Hand an instruction to a fresh assistant and come straight back. This is the \
-                 main chat's one verb: the assistant is the layer that decides whether the \
-                 instruction needs a repository, a one-shot agent, or nothing but an answer, \
-                 and it does that in a conversation nobody is typing into.\n\n\
-                 Returns as soon as the assistant's run has started, never when it has \
-                 finished, and never with the answer. The answer reaches you later as a card \
-                 on your rail. Do not wait for it and do not poll for it.\n\n\
-                 Pass Reljod's words through exactly as he said them. Do not summarise them, \
-                 do not rewrite them, and do not resolve which project he meant — the project \
-                 is already settled before your turn starts, and the assistant reads the same \
-                 words with the same context beside them.\n\n\
-                 Every call starts a new assistant. There is no standing one to reach, on \
-                 purpose: a standing assistant would make each instruction wait for the one \
-                 before it.",
-            // The line every tool that starts an agent sits on. The power an
-            // unattended run should hold least of is the power to create more
-            // unattended runs, and this creates one that can create more.
-            needs: ToolAccess::Delegate,
+                "Stop the turn a chat currently has in flight, so the message queued behind it \
+                 is delivered now instead of when that turn ends.\n\n\
+                 The assistant standing at the door is the only caller. It is handed one \
+                 message Reljod typed into a chat that was already working, and this is what \
+                 it calls when that message cannot wait — a stop, a correction, a \
+                 contradiction of the instruction in flight.\n\n\
+                 Stopping ends the run process and nothing else. The conversation and the \
+                 harness session both survive, so the queued message arrives as the very next \
+                 turn and the chat carries on from there. You do not deliver it yourself and \
+                 you must not try to answer it.\n\n\
+                 Whatever the stopped turn had not finished is lost. Hold instead of calling \
+                 this whenever you are unsure.",
+            // The floor, because the gate on this tool is *who is calling*
+            // rather than how much of Jod they hold: a doorman is spawned with
+            // the smallest toolbox anything gets, and needing more than that
+            // would mean handing it verbs it has no business holding just to
+            // reach the one it does.
+            needs: ToolAccess::ReadOnly,
             schema: obj(
                 json!({
-                    "instruction": text(
-                        "What Reljod asked for, in his own words, passed through unchanged."
+                    "run_id": text("The run to stop, as it was named in what you were handed."),
+                    "reason": text(
+                        "One sentence for Reljod, saying why his turn stopped. Written into \
+                         that chat's own transcript, so write it for him."
                     )
                 }),
-                &["instruction"],
+                &["run_id", "reason"],
             ),
         },
         Tool {
@@ -1312,7 +1314,7 @@ impl Server {
         }
         match name {
             "list_agents" => self.list_agents(args).await,
-            "ask_assistant" => self.ask_assistant(args).await,
+            "interrupt_main" => self.interrupt_main(args).await,
             "delegate" => self.delegate(args).await,
             "continue_agent" => self.continue_agent(args).await,
             "stop_agent" => self.stop_agent(args).await,
@@ -1688,11 +1690,9 @@ impl Server {
     /// and the only way to check any of it through `delegate` itself would be
     /// to launch a real model and read back what it was launched with.
     fn delegate_request(&self, args: &Value) -> Result<SpawnRequest, ToolError> {
-        // Main lost this one along with `ask_manager` and `open_work`. It kept
-        // `delegate` for as long as it was allowed to answer repo-less
-        // questions itself; now that branch belongs to the assistant, and so
-        // does the verb that serves it.
-        self.refuse_routing_from_main("delegate")?;
+        // Main holds this one. It lost it for a release, along with
+        // `ask_manager`, while an assistant made every routing decision; it has
+        // the branch back, so it has the verb that serves it back.
         let prompt = required_str(args, "prompt")?;
         if prompt.trim().is_empty() {
             return Err(ToolError::BadParams("`prompt` is empty".into()));
@@ -2816,103 +2816,113 @@ impl Server {
         )
     }
 
-    /// Hand one instruction to a brand new assistant, and return at once.
+    /// Stop the turn a conversation has in flight, on a doorman's say-so.
     ///
-    /// **The one thing this must never do is wait.** It is called inside main's
-    /// turn, and main's turn is the console: every millisecond spent here is a
-    /// millisecond Reljod cannot type into the box. So it starts the run and
-    /// returns its id, and the assistant's answer comes back later as a card.
+    /// **The assistant's one verb, and it is gated on who is calling rather
+    /// than on how much of Jod they hold.** A doorman is spawned at
+    /// [`ToolAccess::ReadOnly`] — the smallest toolbox anything gets — because
+    /// its whole job is to read one message and answer one question. Putting
+    /// this behind `Delegate` would have meant handing it the power to start
+    /// agents in order to reach the power to stop one.
     ///
-    /// A fresh conversation on every call, never a standing one. That is A1,
-    /// and it is the whole reason this design removes the block rather than
-    /// moving it: a standing assistant would serialise, so instruction two
-    /// would wait behind instruction one exactly as it waits behind main's turn
-    /// today.
+    /// So the check is [`Server::caller_is_assistant`], read off
+    /// `conversations.origin`, which is sender identity the caller cannot argue
+    /// with. Anything else is refused, including main itself: a chat that can
+    /// stop its own turn is a chat that can stop itself mid-sentence, and the
+    /// key for stopping a turn you are watching is Escape.
     ///
-    /// **An assistant may not ask for an assistant.** Nothing bounds that
-    /// recursion — an assistant that finds handing over easier than deciding
-    /// would produce another one, which would produce another — and there is
-    /// nothing it buys, because an assistant already holds every verb the one
-    /// it would start would hold. This is beyond what the spec asks for and it
-    /// is cheap; the refusal says which verb to use instead, since a rule that
-    /// only says no leaves the model guessing at what yes is.
-    async fn ask_assistant(&self, args: &Value) -> Result<String, ToolError> {
-        let instruction = required_str(args, "instruction")?;
-        if instruction.trim().is_empty() {
+    /// **This delivers nothing.** Killing the run leaves the conversation and
+    /// the harness session exactly where they were, so the queued message goes
+    /// in as the next turn through the path that already exists —
+    /// [`Store::plan_injection`] now says `Speak` about a conversation that is
+    /// no longer busy. The doorman writing the message on itself would be a
+    /// second delivery path, and the two would disagree the first time one of
+    /// them changed.
+    async fn interrupt_main(&self, args: &Value) -> Result<String, ToolError> {
+        let run_id = required_str(args, "run_id")?;
+        let reason = required_str(args, "reason")?;
+        if reason.trim().is_empty() {
             return Err(ToolError::BadParams(
-                "`instruction` is what the assistant is being asked to deal with, and an \
-                 empty one would start a run with nothing to act on"
+                "`reason` is what Reljod reads to find out why his turn stopped, and an \
+                 empty one would stop it with nothing said"
                     .into(),
             ));
         }
-        if let Ok(raiser) = self.raiser() {
-            if self.caller_is_assistant(&raiser) {
-                return Err(ToolError::Refused(
-                    "you are the assistant, so there is nobody below you to ask. Nothing \
-                     bounds a chain of assistants asking each other, and it buys nothing — \
-                     you already hold every tool one you started would hold. Decide it here: \
-                     `ask_manager` for anything touching a repository, `delegate` for a \
-                     one-shot that needs none, or answer it yourself."
-                        .into(),
-                ));
-            }
-        }
-
-        if !self.jod.supervisor_available() {
+        let raiser = self.raiser().map_err(|_| {
+            ToolError::Refused(
+                "Jod cannot tell which run is calling, so it cannot tell whether you are the \
+                 assistant standing at a door. Only a doorman may stop a turn."
+                    .into(),
+            )
+        })?;
+        if !self.caller_is_assistant(&raiser) {
             return Err(ToolError::Refused(
-                "`jod-run` is not installed on this machine, and it supervises every agent".into(),
+                "`interrupt_main` belongs to the assistant reading a queued message, and \
+                 nobody else. If you are watching a run that should stop, `stop_agent` is \
+                 the verb; if you are a chat that should stop, that is Reljod's Escape key \
+                 and not yours."
+                    .into(),
             ));
         }
 
-        // No `harness` argument, and no way to ask for one. The assistant is a
-        // layer rather than a one-off errand, so which harness and model run it
-        // is a standing setting — Epic C's `roles` row — and not something the
-        // model picks per call. Until that lands it is the default, which is
-        // what every other spawn here already does.
-        let assisted = crate::orchestrator::hand_to_assistant(
-            &self.jod,
-            &instruction,
-            HarnessKind::ClaudeCode,
-            default_cwd(),
-            self.max_permission,
-        )
-        .await
-        .map_err(|e| ToolError::Refused(format!("could not start an assistant: {e}")))?;
+        let store = self.store()?;
+        let target = store
+            .conversation_for_run(&run_id)
+            .map_err(|e| ToolError::Refused(format!("could not look up `{run_id}`: {e}")))?
+            .ok_or_else(|| {
+                ToolError::Refused(format!(
+                    "no run `{run_id}`, so there is nothing to stop. Use the run id exactly \
+                     as it was written in what you were handed."
+                ))
+            })?;
 
-        // Written down so main's own transcript shows what it did with the
-        // instruction. `link_child` is false: `hand_to_assistant` has already
-        // hung the new conversation under main, and re-parenting it here would
-        // do the same work twice with one more chance of getting it wrong.
-        self.record_handoff("ask_assistant", &assisted.run_id, false);
+        self.jod
+            .kill_agent(&run_id)
+            .await
+            .map_err(|e| ToolError::Refused(format!("could not stop `{run_id}`: {e}")))?;
+
+        // Into the transcript Reljod is actually reading, not this one. A turn
+        // that stops with no explanation reads as a crash, and the next thing
+        // he does is ask what happened — which is a question this sentence has
+        // already answered.
+        if let Err(e) = store.append_message(
+            &target,
+            crate::conversation::NewMessage::new(
+                crate::conversation::Role::System,
+                format!("[stopped by Jod's assistant] {}", reason.trim()),
+            ),
+        ) {
+            eprintln!("[jod] stopped `{run_id}` but could not say why in the chat: {e}");
+        }
 
         as_json(&json!({
-            "run_id": assisted.run_id,
-            "name": assisted.name,
-            "conversation_id": assisted.conversation_id,
-            "note": "running. It decides what happens to that instruction and raises a card on \
-                     your rail when it has. Do not wait for it and do not look for it: a card \
-                     arrives whether or not anybody is watching, and anything it starts \
-                     underneath it answers you by starting a turn of yours.",
+            "stopped": run_id,
+            "note": "the turn is over and the conversation is intact. What Reljod typed is \
+                     still queued and goes in as the next turn on its own — do not deliver \
+                     it, do not answer it, and do not start anything. Say your one sentence \
+                     and stop.",
         }))
     }
 
-    /// Refuse a routing call from the main chat, naming `ask_assistant`.
+    /// Refuse a call that belongs to a project's manager rather than to main.
     ///
-    /// **Main only delegates.** It hands the instruction to an assistant and
-    /// comes back; it does not route it, does not choose a project, and does
-    /// not answer it. So all three verbs that make something happen —
-    /// `ask_manager`, `delegate` and `open_work` — are refused here.
+    /// **Main routes and answers; it does not open work.** Deciding how a
+    /// repository's work is broken up, and how many engineers it is worth, is
+    /// the manager's job and needs the repository in front of it — which main
+    /// deliberately never has.
+    ///
+    /// This used to cover `ask_manager` and `delegate` as well, from the release
+    /// where main handed every instruction to an assistant and answered nothing.
+    /// That layer is gone: main decides again, so the two verbs it decides
+    /// *with* cannot be refused to it. `open_work` is the one that stayed, and
+    /// it is the one that was refused here before the assistant existed at all.
     ///
     /// This is enforcement rather than advice, and it has to be, because the
-    /// rule is one a helpful model talks itself past. The refusal that used to
-    /// live here covered `open_work` alone and named `ask_manager` as the way
-    /// forward, which was right while main still routed. It does not any more:
-    /// routing costs a model turn, main's turn is the console's, and a console
-    /// that thinks is a console Reljod cannot type into.
+    /// rule is one a helpful model talks itself past.
     ///
     /// Keyed on identity and never on access level, which is the only thing
     /// that works: [`ToolAccess`] is a ladder, so lowering main below
-    /// `Orchestrate` to take `delegate` away would take `schedule_create` and
+    /// `Orchestrate` to take a verb away would take `schedule_create` and
     /// `goal_create` with it, and those stay with main on purpose.
     ///
     /// A caller Jod cannot identify is not main. A run Jod did not start has no
@@ -2926,10 +2936,10 @@ impl Server {
             return Ok(());
         }
         Err(ToolError::Refused(format!(
-            "`{tool}` is not the main chat's to call. Everything Reljod says goes to \
-             `ask_assistant`, in his own words and in one call, and the assistant works out \
-             whether it needs a repository, an agent, or nothing but an answer. It reports \
-             onto your rail, so hand it over and come straight back."
+            "`{tool}` is not the main chat's to call. Hand the instruction to the project's \
+             manager with `ask_manager` instead: it owns the repository, it decides whether \
+             this is new work or something an agent of its own is already doing, and it \
+             raises a card that reaches your rail."
         )))
     }
 
@@ -2945,9 +2955,9 @@ impl Server {
     /// instruction at a repository nobody chose, and it reads as perfectly
     /// ordinary in the manager that receives it.
     async fn ask_manager(&self, args: &Value) -> Result<String, ToolError> {
-        // Main used to be the caller this tool was written for, and is now the
-        // one caller it refuses. Reaching a manager is the assistant's job.
-        self.refuse_routing_from_main("ask_manager")?;
+        // Main is the caller this tool was written for. It was refused here for
+        // one release, while every instruction went through an assistant, and
+        // lifting that refusal is most of what put the decision back.
         let wanted = required_str(args, "project")?;
         let instruction = required_str(args, "instruction")?;
         if instruction.trim().is_empty() {
@@ -5417,7 +5427,7 @@ mod tests {
     /// agree with any mistake made there, and the whole question is whether the
     /// line falls where the design says it does — reading is free and visible,
     /// delegating spends money now, scheduling spends it at 2am for ever.
-    const READ_ONLY_TOOLS: [&str; 17] = [
+    const READ_ONLY_TOOLS: [&str; 18] = [
         "list_agents",
         "schedule_list",
         "goal_list",
@@ -5453,18 +5463,20 @@ mod tests {
         // sent to read at `read_only` that cannot report is one whose work is
         // invisible.
         "complete_task",
+        // Stopping a turn *is* consequential — it throws away work — so this
+        // sitting at the floor wants explaining. The gate on it is identity
+        // rather than access: only a run whose conversation origin says
+        // `assistant` may call it, and a doorman is spawned with the smallest
+        // toolbox anything gets. Putting it a level up would mean handing a
+        // doorman the power to start agents in order to reach the power to
+        // stop one, which is the wrong trade in both directions.
+        "interrupt_main",
     ];
     // Writing to a peer spends a turn of theirs, which is money now — the same
     // line `delegate` sits on. What stops it running away is not the access
     // level but the bounds in `team`: depth, budget, and a deadline on a wait.
-    const DELEGATE_TOOLS: [&str; 18] = [
+    const DELEGATE_TOOLS: [&str; 17] = [
         "delegate",
-        // Starting an assistant starts an agent, and one holding this same
-        // level. Main runs at `Orchestrate`, which is above it, so main is
-        // shown it; nothing below `delegate` is, which is the point — an
-        // unattended run must not be able to start something that can start
-        // more unattended runs.
-        "ask_assistant",
         // Resuming a manager starts an agent, so it sits on the same line as
         // every other tool that does. It is main's usual verb, and main runs at
         // `Orchestrate`, which is above this.
@@ -7369,7 +7381,7 @@ mod tests {
         /// `ask_assistant` and the assistant decides whether a manager is what
         /// this needs.
         #[tokio::test]
-        async fn open_work_from_the_main_chat_is_refused_and_names_ask_assistant() {
+        async fn open_work_from_the_main_chat_is_refused_and_names_ask_manager() {
             let store = Arc::new(Store::in_memory().unwrap());
             let main = store
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
@@ -7388,7 +7400,12 @@ mod tests {
 
             assert!(is_error_result(&answer), "{answer}");
             let said = said(&answer);
-            assert!(said.contains("ask_assistant"), "{said}");
+            assert!(
+                said.contains("ask_manager"),
+                "the refusal has to say what yes looks like, or main spends a turn \
+                 guessing: {said}"
+            );
+            assert!(!said.contains("ask_assistant"), "a verb that no longer exists: {said}");
             assert!(said.contains("not the main chat's to call"), "{said}");
         }
 
@@ -7988,10 +8005,19 @@ mod tests {
             assert_eq!(after.permission, before.permission);
         }
 
-        /// Check 4. Main's own verb for a repository is gone, and the refusal
-        /// says which one replaced it.
+        /// Main's own verb for a repository is back, and this is the test that
+        /// used to say it was gone.
+        ///
+        /// It is inverted rather than deleted, because "main may reach a
+        /// manager" is the whole of what lifting the refusal means, and a rule
+        /// removed with no test in its place is a rule that quietly comes back.
+        ///
+        /// It asks for a project that does not exist, so the answer comes back
+        /// without starting a manager. What is asserted is *which* refusal
+        /// arrives: "no project called that" is proof the call reached the
+        /// lookup, which is as far as it can get without a repository on disk.
         #[tokio::test]
-        async fn ask_manager_from_mains_run_is_refused_and_names_ask_assistant() {
+        async fn ask_manager_from_mains_run_reaches_the_project_lookup() {
             let (store, _) = main_chat();
             let server = main_server(&store);
 
@@ -8002,25 +8028,23 @@ mod tests {
             )
             .await;
 
-            assert!(is_error_result(&answer), "{answer}");
             let said = said(&answer);
-            assert!(said.contains("`ask_assistant`"), "{said}");
-            assert!(said.contains("not the main chat's to call"), "{said}");
-            // Refused before the project is even looked up, so a main chat
-            // naming a project that exists gets the same answer as one naming a
-            // project that does not.
             assert!(
-                !said.contains("no project"),
-                "the identity refusal has to come first, or which refusal main \
-                 gets depends on whether it happened to name a real project: {said}"
+                !said.contains("not the main chat's to call"),
+                "main is still refused the verb it routes with: {said}"
+            );
+            assert!(
+                said.contains("no project"),
+                "the call has to reach the project lookup, which is the furthest it \
+                 goes without a repository on disk: {said}"
             );
         }
 
-        /// Check 5. The same rule, through the other verb. Two tests rather
-        /// than one because a refusal wired into `ask_manager` alone would pass
-        /// the test above while leaving main able to start an agent directly.
+        /// The same, through the other verb. Two tests rather than one because
+        /// a refusal left in `delegate` alone would pass the test above while
+        /// leaving main unable to start a one-shot.
         #[tokio::test]
-        async fn delegate_from_mains_run_is_refused_and_names_ask_assistant() {
+        async fn delegate_from_mains_run_is_not_refused_for_being_main() {
             let (store, _) = main_chat();
             let server = main_server(&store);
 
@@ -8031,10 +8055,11 @@ mod tests {
             )
             .await;
 
-            assert!(is_error_result(&answer), "{answer}");
             let said = said(&answer);
-            assert!(said.contains("`ask_assistant`"), "{said}");
-            assert!(said.contains("not the main chat's to call"), "{said}");
+            assert!(
+                !said.contains("not the main chat's to call"),
+                "main is still refused the verb it runs one-shots with: {said}"
+            );
         }
 
         /// Check 6. And the layer below is not caught by it.
@@ -8078,37 +8103,133 @@ mod tests {
             );
         }
 
-        /// An assistant may not ask for an assistant.
+        /// Stopping a turn belongs to the assistant standing at a door, and to
+        /// nobody else.
         ///
-        /// Beyond what the spec asks for, and cheap. Nothing bounds a chain of
-        /// assistants handing an instruction to each other — handing over is
-        /// always easier than deciding — and it buys nothing, because an
-        /// assistant already holds every tool the one it started would hold.
+        /// **The gate is identity, not access.** A doorman runs at
+        /// `ToolAccess::ReadOnly`, so every read-only agent in the fleet can
+        /// *see* this tool — which is the right trade, because putting it
+        /// behind `Delegate` would mean handing a doorman the power to start
+        /// agents in order to reach the power to stop one. What keeps it safe
+        /// is that the caller's conversation origin has to say `assistant`, and
+        /// that is written by `open_assistant_conversation` rather than by
+        /// anything the model can pass.
         #[tokio::test]
-        async fn an_assistant_may_not_ask_for_another_assistant() {
+        async fn interrupt_main_from_anything_but_an_assistant_is_refused() {
+            let (store, _) = main_chat();
+            let other = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &other, "run-other");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::ReadOnly)
+                .for_run("run-other");
+
+            let answer = call(
+                &server,
+                "interrupt_main",
+                json!({ "run_id": "run-main", "reason": "he changed his mind" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("belongs to the assistant"), "{said}");
+            // A refusal that only says no leaves the model guessing at what yes
+            // is, and the guess here would be to try again.
+            assert!(said.contains("`stop_agent`"), "{said}");
+        }
+
+        /// And main may not stop itself with it either.
+        ///
+        /// A chat that can end its own turn is a chat that can end itself
+        /// mid-sentence, and the key for stopping a turn you are watching is
+        /// Escape — which costs no model call at all.
+        #[tokio::test]
+        async fn interrupt_main_from_the_main_chat_is_refused() {
+            let (store, _) = main_chat();
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-main");
+
+            let answer = call(
+                &server,
+                "interrupt_main",
+                json!({ "run_id": "run-main", "reason": "stopping myself" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            assert!(said(&answer).contains("Escape key"), "{}", said(&answer));
+        }
+
+        /// An assistant gets past the identity gate, and is stopped by the run
+        /// id instead.
+        ///
+        /// The half that matters: a gate keyed on something broader than
+        /// identity would pass both tests above and leave a doorman unable to
+        /// do the only thing it exists for. Naming a run that does not exist is
+        /// as far as this can go without a supervisor, and *which* refusal
+        /// comes back is the proof.
+        #[tokio::test]
+        async fn interrupt_main_from_an_assistants_run_reaches_the_run_lookup() {
             let (store, _) = main_chat();
             let assistant = store
                 .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
                 .unwrap();
             run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
-                .with_access(ToolAccess::Delegate)
+                .with_access(ToolAccess::ReadOnly)
                 .for_run("run-assistant");
 
             let answer = call(
                 &server,
-                "ask_assistant",
-                json!({ "instruction": "work out what to do about this" }),
+                "interrupt_main",
+                json!({ "run_id": "run-that-never-was", "reason": "he changed his mind" }),
             )
             .await;
 
-            assert!(is_error_result(&answer), "{answer}");
             let said = said(&answer);
-            assert!(said.contains("nobody below you to ask"), "{said}");
-            // A refusal that only says no leaves the model guessing at what yes
-            // is, and the guess it would make here is to try again.
-            assert!(said.contains("`ask_manager`"), "{said}");
-            assert!(said.contains("`delegate`"), "{said}");
+            assert!(
+                !said.contains("belongs to the assistant"),
+                "the doorman is refused the one verb it exists to call: {said}"
+            );
+            assert!(
+                said.contains("no run `run-that-never-was`"),
+                "the call has to reach the run lookup, which is what proves it was \
+                 not stopped at the identity gate: {said}"
+            );
+        }
+
+        /// A stop with nothing said is a turn that ends and reads as a crash.
+        #[tokio::test]
+        async fn interrupt_main_refuses_to_stop_a_turn_without_saying_why() {
+            let (store, _) = main_chat();
+            let assistant = store
+                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &assistant, "run-assistant");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::ReadOnly)
+                .for_run("run-assistant");
+
+            let answer = call(
+                &server,
+                "interrupt_main",
+                json!({ "run_id": "run-main", "reason": "   " }),
+            )
+            .await;
+
+            // A bad argument rather than a refusal, so it comes back as a
+            // protocol error and not as a tool result.
+            assert_eq!(error_code(&answer), -32602, "{answer}");
+            assert!(
+                answer["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("why his turn stopped")),
+                "{answer}"
+            );
         }
 
         /// An assistant's `project_switch` reaches the main chat.

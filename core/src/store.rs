@@ -1851,6 +1851,30 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE leases ADD COLUMN auto_pr_asked_at_ms INTEGER;
     "#,
     ),
+    (
+    "0032_a_queued_message_is_judged_once",
+    r#"
+    -- When a doorman finished reading this queued message, or NULL if none
+    -- ever has.
+    --
+    -- A message typed into a chat that is already working now gets read by an
+    -- assistant, which decides whether it can wait for the turn to end or has
+    -- to stop it. The row leaves the queue while that is happening — state
+    -- `reviewing` — and comes back to `queued` with the verdict stamped here.
+    --
+    -- The stamp is what makes the reading happen once. Without it a message the
+    -- doorman decided could wait would be back in the queue by the next tick,
+    -- looking exactly like one nobody had read, and a fresh doorman would be
+    -- started on it every minute for as long as the turn it is waiting behind
+    -- ran — the same message, the same verdict, paid for again each time.
+    --
+    -- NULL for every existing row, which is true and not merely convenient:
+    -- nothing queued before this column existed was ever judged, and anything
+    -- still queued is waiting for a turn that ended long ago, so the first
+    -- delivery takes it whether it was read or not.
+    ALTER TABLE pending_deliveries ADD COLUMN reviewed_at_ms INTEGER;
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.

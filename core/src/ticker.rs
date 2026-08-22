@@ -57,6 +57,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, SpawnRequest};
 use crate::cards::{CardKind, Importance, NewCard, Source};
+use crate::delivery::Plan;
 use crate::heartbeat::{
     self, Beat, Heartbeat, Observed, Response, SweepReport, Verdict, Watching,
 };
@@ -616,6 +617,13 @@ pub struct TickReport {
     pub started: usize,
     pub held: usize,
     pub failed: usize,
+    /// Assistants started to read a message typed into a busy conversation.
+    ///
+    /// Counted apart from `started`, which means "something was delivered". A
+    /// doorman delivers nothing — it decides whether the delivery may happen
+    /// yet — and folding the two together would make a tick that only ever
+    /// judged look like a tick that spoke.
+    pub judged: usize,
 }
 
 impl Ticker {
@@ -2122,9 +2130,23 @@ impl Ticker {
 
         for conversation_id in waiting {
             let busy = store.conversation_is_busy(&conversation_id)?;
-            let Some(injection) = store.plan_injection(&conversation_id, busy)? else {
-                report.held += 1;
-                continue;
+            let injection = match store.plan_injection(&conversation_id, busy)? {
+                Plan::Speak(injection) => injection,
+                Plan::Hold => {
+                    report.held += 1;
+                    continue;
+                }
+                // Somebody typed into a conversation that is already working.
+                // Nobody has read it yet, and the conversation cannot read it
+                // itself — it is the thing that is busy — so an assistant is
+                // started on it. Held either way as far as this queue is
+                // concerned: nothing was delivered on this pass.
+                Plan::Judge { items, .. } => {
+                    report.held += 1;
+                    self.judge_queue(&store, &conversation_id, &items, &mut report)
+                        .await;
+                    continue;
+                }
             };
             // A queue outliving its conversation is not a state the schema
             // permits — the rows cascade with it — so this is held rather than
@@ -2210,6 +2232,90 @@ impl Ticker {
             }
         }
         Ok(report)
+    }
+
+    /// Start an assistant on a message typed into a conversation that is busy.
+    ///
+    /// **Claim first, spawn second, and never the other way round.** The claim
+    /// is one atomic move off `queued`, so two ticks racing — the daemon's and
+    /// a console that has just been typed into — cannot both pay for a model to
+    /// read the same message. A claim of nothing means somebody else got there,
+    /// and the answer is to do nothing at all.
+    ///
+    /// **Nothing here is fatal**, on the same reasoning as the rest of this
+    /// file: a doorman that cannot be started is a reason to leave the message
+    /// queued and get on with the tick, not a reason for the loop that runs
+    /// every schedule on this box to fail. A failed spawn puts the rows back
+    /// itself, so the message is delivered normally when the turn ends and the
+    /// worst case is that it waits, which is what it did before any of this
+    /// existed.
+    async fn judge_queue(
+        &self,
+        store: &Store,
+        conversation_id: &str,
+        items: &[crate::delivery::Pending],
+        report: &mut TickReport,
+    ) {
+        let ids: Vec<i64> = items.iter().map(|p| p.id).collect();
+        match store.claim_for_review(&ids) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[jod/tick] could not claim a queued message to judge it: {e}");
+                return;
+            }
+        }
+        // Read after the claim rather than before, so what the doorman is told
+        // about the turn is as new as the decision it is about to make.
+        let flight = match store.in_flight_turn(conversation_id) {
+            Ok(Some(flight)) => flight,
+            // The turn ended between `conversation_is_busy` and here. There is
+            // nothing left to interrupt, so the message goes back in the queue
+            // unjudged and the next tick simply delivers it.
+            Ok(None) => {
+                if let Err(e) = store.finish_review(&ids) {
+                    eprintln!("[jod/tick] could not requeue a message nobody judged: {e}");
+                }
+                return;
+            }
+            Err(e) => {
+                eprintln!("[jod/tick] could not read what the turn in flight is doing: {e}");
+                let _ = store.finish_review(&ids);
+                return;
+            }
+        };
+
+        match crate::orchestrator::start_doorman(
+            &self.jod,
+            conversation_id,
+            items,
+            &flight,
+            PermissionPolicy::default(),
+        )
+        .await
+        {
+            Ok(started) => {
+                report.judged += 1;
+                eprintln!(
+                    "[jod/tick] started {} to read {} message(s) queued behind {}",
+                    &started.run_id[..started.run_id.len().min(8)],
+                    items.len(),
+                    &flight.run_id[..flight.run_id.len().min(8)]
+                );
+            }
+            Err(e) => {
+                report.failed += 1;
+                // Back in the queue, stamped as read. Stamped rather than left
+                // fresh on purpose: a spawn that fails once will fail again on
+                // the next tick and every tick after it, and a queue that
+                // retries a failing spawn every minute for the length of a long
+                // turn is worse than one that quietly waits for the turn to end.
+                if let Err(e) = store.finish_review(&ids) {
+                    eprintln!("[jod/tick] could not requeue after a failed doorman: {e}");
+                }
+                eprintln!("[jod/tick] could not start a doorman for {conversation_id}: {e}");
+            }
+        }
     }
 
     /// Put back to `Ready` every member whose run has finished.
@@ -6363,7 +6469,7 @@ mod tests {
             );
             let injection = store
                 .plan_injection(&main, false)
-                .unwrap()
+                .unwrap().speak()
                 .expect("the orchestrator must have a turn waiting");
             assert!(
                 injection.prompt.contains("the answer is 42"),

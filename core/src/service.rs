@@ -17,9 +17,11 @@ use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
-use crate::harness::{Effort, HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess};
+use crate::harness::{
+    Effort, HarnessKind, PermissionPolicy, Resume, Role, SpawnRequest, ToolAccess,
+};
 use crate::heartbeat::{Heartbeat, Watching};
-use crate::store::{Store, StoredRun};
+use crate::store::{RoleRow, Store, StoredRun};
 use crate::workdir::Workdir;
 use crate::{paths, proc, recall, runner, workdir};
 
@@ -400,6 +402,26 @@ pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conve
     }
 }
 
+/// Which harness a role will really be spawned on, before anything is spawned.
+///
+/// [`apply_role`] answers this too, and answers it too late for a caller that
+/// has to open a conversation first: `conversations.harness` is written at that
+/// moment, and a spawn that switched harness afterwards would leave the row
+/// naming a program the run is not on. [`crate::orchestrator::start_doorman`] is
+/// the caller that cares.
+///
+/// `None` means nobody has said and the layer has no built-in, so the caller's
+/// own default stands.
+pub fn role_harness(store: &Store, role: Role) -> Option<HarnessKind> {
+    store
+        .role_get(role.as_str())
+        .ok()
+        .flatten()
+        .and_then(|row| row.harness)
+        .and_then(|named| HarnessKind::from_id(&named))
+        .or_else(|| role.default_harness())
+}
+
 /// Fill in from the spawn's `roles` row whatever nobody above it has named.
 ///
 /// The third of four rungs. Highest first: an argument in the tool call that
@@ -445,13 +467,26 @@ pub fn apply_role(store: &Store, req: &mut SpawnRequest) {
     };
     let row = match store.role_get(role.as_str()) {
         Ok(Some(row)) => row,
-        // No row, or no table worth the name. Both mean "inherit", which is the
-        // answer on every machine whose owner has never opened the panel.
-        Ok(None) => return,
+        // No row, or no table worth the name. Both mean "inherit" — for every
+        // layer but the assistant, whose built-in default is applied below.
+        Ok(None) => RoleRow::default(),
         Err(e) => {
             eprintln!("[jod] could not read the `{}` role: {e}", role.as_str());
-            return;
+            RoleRow::default()
         }
+    };
+    // The layer's own default, under anything the row said and over the
+    // harness's. Written into the row rather than applied separately so there
+    // is one set of rules below this line: a column the row filled is the
+    // column that wins, and this only ever fills an empty one.
+    let row = RoleRow {
+        harness: row
+            .harness
+            .or_else(|| role.default_harness().map(|k| k.id().to_string())),
+        model: row
+            .model
+            .or_else(|| role.default_model().map(str::to_string)),
+        ..row
     };
 
     // The harness first, because the two settings under it are read against
