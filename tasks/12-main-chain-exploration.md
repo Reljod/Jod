@@ -527,6 +527,90 @@ for it.
 
 ---
 
+## X10. "In this repo" lands in a different repo — three mechanisms name three directories, and none of them is the one you are standing in
+Status: **open** · Severity: critical · Owner: —
+
+Run from a scratch git repository at `…/tmp/lab`:
+
+```
+jod main --wait "In this repo, build a small Python command-line tool called
+                 'notes' … Please get it actually written and committed on a branch."
+```
+
+Main replied:
+
+> Handed this over to a new session in `tetris` to build the `notes` CLI tool,
+> add tests and a README, and commit everything on a branch.
+
+The work session was actually opened in **`/home/reljod/repo/Jod`** — the Jod
+source repository — and it then cut itself a worktree of Jod
+(`/home/reljod/.jod/worktrees/in-this-repo-build-a-small-pytho-3bfac775/Jod`) to
+build an unrelated notes tool in.
+
+So one instruction produced three different answers to "which repository is
+this", and the user's actual working directory was not any of them:
+
+| | Directory | Where it came from |
+|---|---|---|
+| Where I was | `…/tmp/lab` | the cwd `jod main` was run in; also main's own run cwd |
+| What main said | `/home/reljod/repo/tetris` | `conversations.current_project_id` — the catalog's only entry |
+| Where it went | `/home/reljod/repo/Jod` | `conversation_roots` position 0 |
+
+**The mechanism, read straight out of the store.** The pinned main conversation
+has `cwd = /home/reljod` and `current_project_id = tetris`. Its roots table has
+accumulated every directory it has ever been launched from, in order:
+
+```
+position 0  /home/reljod/repo/Jod                                  writable=0  origin=human
+position 1  /home/reljod/repo/Jod/.claude/worktrees/explorer-findings  writable=0  origin=human
+position 2  /home/reljod/.claude/jobs/2c2a92d5/tmp/proj3           writable=0  origin=human
+position 3  /home/reljod/.claude/jobs/2c2a92d5/tmp/lab             writable=0  origin=human
+```
+
+The work went to position 0 — **the first directory this main chat was ever
+launched in**, which on a long-lived main chat is an accident of history from
+weeks ago. The directory the instruction was actually given in is right there at
+position 3, freshly added by this very run, and is ignored.
+
+Meanwhile main's *narration* used `current_project_id`, a third mechanism again,
+which is why it said `tetris` — the catalog has exactly one entry and that is
+it.
+
+**Why this is critical rather than merely wrong.** The main chat is
+*permanent* — it is "the one conversation that is always there". Its root list
+only grows. So every delegation from it, for ever, is placed by a value fixed
+the first time it ran, and no amount of `cd`-ing anywhere changes it. The
+observed result was an agent cutting a worktree of Jod's own source tree to
+write a notes CLI into. It got as far as a clean checkout before the run ended;
+had it gone further it would have committed an unrelated tool onto a branch of
+this repository, which is the sort of thing that is noticed at review time and
+not before.
+
+It also means main *told the user something untrue* about where the work was
+going, without lying — it reported the field it had, and that field disagrees
+with the one placement used.
+
+**Fix shape is a decision.** The three candidates are genuinely different:
+place by the run's own cwd (most obviously what "in this repo" means, but a main
+chat's turns can come from anywhere and a background turn has no meaningful
+cwd); place by the most recently added root rather than the first (a one-word
+change, and it makes placement follow where you last were, but "last" is as
+arbitrary as "first" when two consoles are open); or resolve the project
+explicitly and refuse when it is ambiguous, which is slowest and the only one
+that cannot silently pick wrong. Whatever is chosen, main's narration and the
+placement must read the same field — that part is not a matter of taste.
+
+Check: from a git repository that is not the one the main chat was first
+launched in, ask main to make a change "in this repo". Green is a work session
+rooted in the repository you were standing in, and a reply that names it.
+
+**Related, seen in the same run:** main's own run is recorded `failed` while its
+last message is a complete and sensible answer and `jod main --wait` exited 0.
+That is X8 again, in a sharper form — here the run both succeeded in substance
+and is marked failed.
+
+---
+
 ## Checked and not a bug
 
 Recorded because both looked like findings and both cost real time to
