@@ -2207,33 +2207,60 @@ fn header_who(app: &App, room: usize) -> Vec<Span<'static>> {
 }
 
 /// Line three: what he is doing about it, in the colour the status bar gives
-/// the same fact — amber while a turn is running, quiet once it is not — and
-/// then, in red, what has stopped and is waiting on him.
+/// the same fact — amber while a turn is running, quiet once it is not — then
+/// in red what has stopped and is waiting on him, and then in cyan what has
+/// been asked and not yet read.
 ///
-/// The blocker is a span of its own rather than a fragment of
-/// [`App::activity`], for the two reasons that fragment never worked. It gets
-/// its own colour, so it stops reading like `ready`; and it is reserved before
-/// the activity is `cut`, so a narrow band drops what he is *doing* rather than
-/// what is stuck. Those are the right things to lose in that order: a run in
-/// flight finishes on its own and a blocked one does not.
+/// The two marks are spans of their own rather than fragments of
+/// [`App::activity`], for the two reasons that fragment never worked. They get
+/// their own colours, so they stop reading like `ready`; and they are reserved
+/// before the activity is `cut`, so a narrow band drops what he is *doing*
+/// rather than what is waiting. Those are the right things to lose in that
+/// order: a run in flight finishes on its own and a question does not.
+///
+/// The cards mark is the one this band was missing. A blocking card had three
+/// ways to reach a reader who was not looking at the rail — this line, the
+/// status row, and the rail opening itself — and an ordinary question had
+/// none, so the only way to find one was to press `Ctrl-N` on the chance that
+/// something was there.
 fn header_doing(app: &App, room: usize) -> Vec<Span<'static>> {
     let colour = if app.busy { WARN } else { MUTED };
-    let Some(waiting) = app.waiting_on_you() else {
+    // Beside the activity rather than out at the right margin: the lines of
+    // this band are a left-aligned block, and a mark floating at the far edge
+    // of line three reads as belonging to something else.
+    //
+    // Most important first, which is also the order they are dropped in from
+    // the other end — the same policy the status row's badges follow.
+    let mut marks: Vec<(String, Style)> = Vec::new();
+    if let Some(waiting) = app.waiting_on_you() {
+        marks.push((format!("  ▌ {waiting}"), bold(BAD)));
+    }
+    if let Some(cards) = app.cards_to_read() {
+        marks.push((format!("  ◆ {cards}"), fg(USER)));
+    }
+    let width = |marks: &[(String, Style)]| -> usize {
+        marks.iter().map(|(text, _)| columns(text)).sum()
+    };
+    if marks.is_empty() {
         return vec![Span::styled(cut(&app.activity(), room), fg(colour))];
+    }
+    while width(&marks) > room && marks.len() > 1 {
+        marks.pop();
+    }
+    let Some(left) = room.checked_sub(width(&marks)) else {
+        // Not even one mark fits. It is what stays — the status row below
+        // carries the same facts, but this is the line that is beside the lion
+        // on every screen.
+        let (text, style) = marks.remove(0);
+        return vec![Span::styled(cut(text.trim_start(), room), style)];
     };
-    let waiting = format!("  ▌ {waiting}");
-    // Beside the activity rather than out at the right margin: the three lines
-    // of this band are a left-aligned block, and a mark floating at the far
-    // edge of line three reads as belonging to something else. If even the
-    // blocker will not fit, it is what stays — the status row below carries the
-    // same fact, but this is the line that is beside the lion on every screen.
-    let Some(left) = room.checked_sub(waiting.chars().count()) else {
-        return vec![Span::styled(cut(waiting.trim_start(), room), bold(BAD))];
-    };
-    vec![
-        Span::styled(cut(&app.activity(), left), fg(colour)),
-        Span::styled(waiting, bold(BAD)),
-    ]
+    let mut spans = vec![Span::styled(cut(&app.activity(), left), fg(colour))];
+    spans.extend(
+        marks
+            .into_iter()
+            .map(|(text, style)| Span::styled(text, style)),
+    );
+    spans
 }
 
 /// Line four: where he is working — the directory `jod tui` was launched in,
@@ -2998,8 +3025,24 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // just learned they are the blocker should not then have to go and find out
     // how to answer. This is the fact the whole change is about — as a grey
     // fragment inside the left-hand run-on it was there, and nobody saw it.
-    if let Some(waiting) = app.waiting_on_you() {
+    let blocked = app.waiting_on_you();
+    if let Some(waiting) = &blocked {
         badges.push((format!("▌ {waiting} · Ctrl-N"), bold(BAD)));
+    }
+    // Third: cards that have been raised and not answered, and are not stopping
+    // anything. Quieter than the blocker badge because nothing is standing
+    // still over them, but present, which is the change — an agent that asks a
+    // question it can carry on past used to raise a card that nothing outside
+    // the rail counted, so it stayed unread until somebody opened the rail for
+    // an unrelated reason.
+    if let Some(cards) = app.cards_to_read() {
+        // The key once per row, not once per badge. Both badges are answered by
+        // the same chord and they sit side by side, so printing it twice spends
+        // nine of the scarcest columns on the screen repeating itself — and the
+        // badges are dropped from this end, so the one that survives is always
+        // the one still carrying it.
+        let key = if blocked.is_some() { "" } else { " · Ctrl-N" };
+        badges.push((format!("◆ {cards}{key}"), fg(USER)));
     }
     // The panel holds the context bar, but the panel is shut most of the time
     // and something about to happen unannounced is worse than advice nobody can
@@ -11598,6 +11641,13 @@ mod tests {
         a.cards = store
             .cards(&a.rail.query(a.conversation.clone()))
             .expect("the rail's query");
+        // Both lists, exactly as `refresh_rail` fills them: the rail's own view
+        // and the unfiltered open set the badges count. A fixture that filled
+        // only the first would make every badge test pass for the wrong reason
+        // — and disagree with the running program the moment a filter was on.
+        a.open_cards = store
+            .cards(&a.rail.open_query(a.conversation.clone()))
+            .expect("the open cards");
         a.reconcile_rail();
         a
     }
@@ -11625,6 +11675,138 @@ mod tests {
             frame.contains('▌'),
             "colour is never the only channel here: {frame}"
         );
+    }
+
+    /// The complaint this change answers: the only way to learn a card had been
+    /// raised was to open the rail and find it, so the cards you found were the
+    /// ones you already suspected were there.
+    ///
+    /// With the rail shut, which is its resting state — a card that blocks
+    /// nothing never triggers the auto-open, so this is the state it is
+    /// actually read in.
+    #[test]
+    fn a_question_that_blocks_nothing_reaches_the_screen_with_the_rail_shut() {
+        let (store, conversation) = crowded_store(3);
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.rail.shown = false;
+
+        let frame = rendered(&a, 120, 24);
+        assert!(
+            frame.contains("3 cards"),
+            "three questions were asked and nothing on screen said so: {frame}"
+        );
+        assert!(
+            frame.contains("Ctrl-N"),
+            "a reader who has just learned there is something to read must not \
+             then have to go and find out how: {frame}"
+        );
+        assert!(
+            frame.contains('◆'),
+            "colour is never the only channel here: {frame}"
+        );
+    }
+
+    /// The band beside the lion carries it too, not only the status row. The
+    /// row is one line at the bottom of a screen whose middle is scrolling, and
+    /// this is the line that stays put.
+    #[test]
+    fn the_header_band_says_how_many_cards_are_waiting_to_be_read() {
+        let (store, conversation) = crowded_store(2);
+        let a = rail_app(&store, &conversation, Default::default());
+
+        let line: String = header_doing(&a, 60)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(line.contains("◆ 2 cards"), "{line}");
+    }
+
+    /// Both badges at once, and the numbers do not overlap: one card has
+    /// stopped a run and two are merely waiting to be read, so the line says
+    /// one and two rather than one and three.
+    #[test]
+    fn the_two_card_badges_never_count_the_same_card_twice() {
+        let (store, conversation) = wordy_store();
+        for at in 0..2 {
+            store
+                .raise_card(NewCard {
+                    conversation_id: conversation.clone(),
+                    kind: Some(CardKind::Question),
+                    blocking: false,
+                    title: format!("question number {at}"),
+                    ..Default::default()
+                })
+                .expect("a card");
+        }
+        let a = rail_app(&store, &conversation, Default::default());
+
+        let line: String = header_doing(&a, 80)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(line.contains("1 waiting on you"), "{line}");
+        assert!(line.contains("◆ 2 cards"), "{line}");
+    }
+
+    /// Both badges are answered by the same chord, so the row prints it once.
+    /// `▌ 1 waiting on you · Ctrl-N · ◆ 3 cards · Ctrl-N` spends nine of the
+    /// scarcest columns on the screen saying the same thing twice.
+    #[test]
+    fn the_status_row_prints_the_rails_key_once_however_many_badges_it_has() {
+        let (store, conversation) = wordy_store();
+        store
+            .raise_card(NewCard {
+                conversation_id: conversation.clone(),
+                kind: Some(CardKind::Question),
+                blocking: false,
+                title: "which linter?".into(),
+                ..Default::default()
+            })
+            .expect("a card");
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.rail.shown = false;
+
+        let both = rendered(&a, 120, 24);
+        assert!(both.contains("waiting on you"), "{both}");
+        assert!(both.contains("1 card"), "{both}");
+        assert_eq!(both.matches("Ctrl-N").count(), 1, "{both}");
+    }
+
+    /// And the badge left standing is the one still carrying it. With nothing
+    /// blocked there is no red badge to hold the key, so the cards badge takes
+    /// it — otherwise the ordinary case, which is the whole reason this exists,
+    /// is the one that never says how to answer.
+    #[test]
+    fn the_cards_badge_carries_the_key_when_there_is_no_blocker_to_hold_it() {
+        let (store, conversation) = crowded_store(2);
+        let mut a = rail_app(&store, &conversation, Default::default());
+        a.rail.shown = false;
+
+        let frame = rendered(&a, 120, 24);
+        assert!(!frame.contains("waiting on you"), "nothing is blocked");
+        assert!(frame.contains("◆ 2 cards · Ctrl-N"), "{frame}");
+    }
+
+    /// The badges count the open cards, not the rail's view of them. Searching
+    /// the rail is not consent to be told nothing: before this, a filter that
+    /// matched no cards emptied the list the header band and the status row
+    /// were counting, so the one moment the reader was looking *through* the
+    /// rail was the moment the rest of the screen stopped mentioning it.
+    #[test]
+    fn a_rail_filter_cannot_hide_a_blocker_from_the_rest_of_the_screen() {
+        let (store, conversation) = wordy_store();
+        let a = rail_app(
+            &store,
+            &conversation,
+            RailState {
+                filter: Some("nothingmatchesthis".into()),
+                ..Default::default()
+            },
+        );
+        assert!(a.cards.is_empty(), "the rail's own list is filtered empty");
+
+        let frame = rendered(&a, 120, 24);
+        assert!(frame.contains("1 waiting on you"), "{frame}");
     }
 
     /// The badges used to be one string, dropped whole the moment the row got

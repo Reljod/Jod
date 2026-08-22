@@ -740,6 +740,15 @@ pub struct App {
     /// handful — the rail asks for fifty cards at most and they come from a few
     /// works.
     pub work_titles: HashMap<String, String>,
+    /// Every open card in the rail's scope, whatever the rail is set to show.
+    ///
+    /// The list the rest of the screen counts, kept apart from [`App::cards`]
+    /// for the reason [`RailState::open_query`] explains: the header band and
+    /// the status row answer "is anything waiting for me", and that answer may
+    /// not change because the reader typed in the rail's filter box. Capped at
+    /// [`rail::LIMIT`] like the rail's own query, so the count says `50+` past
+    /// that rather than a number it cannot stand behind.
+    pub open_cards: Vec<Card>,
     pub rail: RailState,
     /// The conversation's roots, in the user's own order. The first is the one
     /// an unqualified mention resolves against.
@@ -1422,6 +1431,7 @@ impl App {
             conversation: None,
             cards: Vec::new(),
             work_titles: HashMap::new(),
+            open_cards: Vec::new(),
             rail: RailState::default(),
             roots: Vec::new(),
             candidates: Vec::new(),
@@ -3626,9 +3636,13 @@ impl App {
     /// one that has a project's work queued behind it. Managers are recognised
     /// by their conversation, which is the only thing that makes a manager a
     /// manager — there is no manager record to consult.
+    ///
+    /// Counted off [`App::open_cards`] rather than the rail's own list, so a
+    /// reader searching the rail cannot filter the blocker badge off their own
+    /// screen.
     pub fn waiting_on_you(&self) -> Option<String> {
         let blocked: Vec<&Card> = self
-            .cards
+            .open_cards
             .iter()
             .filter(|c| c.blocking && c.is_open())
             .collect();
@@ -3645,6 +3659,44 @@ impl App {
             (m, n) if m == n => format!("{m} managers waiting on you"),
             (_, n) => format!("{n} waiting on you, one a manager"),
         })
+    }
+
+    /// The cards that have been raised and not answered, and are not stopping
+    /// anything — the ones with nobody standing still over them.
+    ///
+    /// A badge of their own, beside [`App::waiting_on_you`] rather than folded
+    /// into it, and this is the whole gap it fills: every signal the rail sends
+    /// to the rest of the screen used to key on `blocking`, so an agent that
+    /// asked a question it could carry on past raised a card nothing announced,
+    /// nothing opened the rail for, and no badge counted. The only way to learn
+    /// it existed was to press `Ctrl-N` and find it — which means the cards you
+    /// found were the ones you already suspected were there.
+    ///
+    /// The two counts do not overlap. A blocking card is in the red badge and
+    /// nowhere else, so `2 waiting on you · 3 cards` is five cards and never
+    /// three of them counted twice.
+    ///
+    /// `None` once there is nothing left to read, because a badge saying `0` is
+    /// a line of the row spent on the ordinary case.
+    pub fn cards_to_read(&self) -> Option<String> {
+        let n = self
+            .open_cards
+            .iter()
+            .filter(|c| !c.blocking && c.is_open())
+            .count();
+        if n == 0 {
+            return None;
+        }
+        // `open_cards` is capped, so past the cap the honest thing to print is
+        // that there are at least this many — a flat `50` would be a number the
+        // screen cannot stand behind.
+        let more = if self.open_cards.len() >= rail::LIMIT as usize {
+            "+"
+        } else {
+            ""
+        };
+        let noun = if n == 1 { "card" } else { "cards" };
+        Some(format!("{n}{more} {noun}"))
     }
 
     /// Whether this conversation is some project's manager.
@@ -3744,6 +3796,16 @@ mod tests {
             answered_at_ms: None,
             delivered_at_ms: None,
             dedupe_key: None,
+        }
+    }
+
+    /// A card that wants an answer without having stopped anything — the kind
+    /// nothing outside the rail used to count.
+    fn open_card(id: i64) -> Card {
+        Card {
+            id,
+            blocking: false,
+            ..blocking_card("c-1")
         }
     }
 
@@ -4049,7 +4111,7 @@ mod tests {
         let mut a = app();
         assert!(a.waiting_on_you().is_none(), "nothing is blocked yet");
 
-        a.cards = vec![blocking_card("c-1")];
+        a.open_cards = vec![blocking_card("c-1")];
         assert_eq!(a.waiting_on_you().as_deref(), Some("1 waiting on you"));
     }
 
@@ -4058,7 +4120,7 @@ mod tests {
     #[test]
     fn a_waiting_manager_is_named_rather_than_counted() {
         let mut a = app();
-        a.cards = vec![blocking_card("c-1")];
+        a.open_cards = vec![blocking_card("c-1")];
         a.forest = vec![manager_node("c-1")];
         assert_eq!(
             a.waiting_on_you().as_deref(),
@@ -4072,8 +4134,57 @@ mod tests {
         let mut a = app();
         let mut card = blocking_card("c-1");
         card.status = jod_core::cards::Status::Answered;
-        a.cards = vec![card];
+        a.open_cards = vec![card];
         assert!(a.waiting_on_you().is_none());
+    }
+
+    /// The gap this whole change is about. An agent that asks something it can
+    /// carry on past raises a card that blocks nothing, and every signal
+    /// outside the rail keyed on `blocking` — so the card sat unread until
+    /// somebody opened the rail for an unrelated reason.
+    #[test]
+    fn a_question_that_blocks_nothing_is_still_something_to_read() {
+        let mut a = app();
+        assert!(a.cards_to_read().is_none(), "nothing has been asked yet");
+
+        a.open_cards = vec![open_card(1)];
+        assert_eq!(a.cards_to_read().as_deref(), Some("1 card"));
+
+        a.open_cards.push(open_card(2));
+        assert_eq!(a.cards_to_read().as_deref(), Some("2 cards"));
+    }
+
+    /// The two badges are counted off the same list, so the one thing they must
+    /// never do is count the same card twice: `1 waiting on you · 2 cards` has
+    /// to mean three cards.
+    #[test]
+    fn a_blocking_card_is_counted_by_the_blocker_badge_and_not_again() {
+        let mut a = app();
+        a.open_cards = vec![blocking_card("c-1"), open_card(2), open_card(3)];
+        assert_eq!(a.waiting_on_you().as_deref(), Some("1 waiting on you"));
+        assert_eq!(a.cards_to_read().as_deref(), Some("2 cards"));
+    }
+
+    /// An answered card is not something to read, the same rule the blocker
+    /// badge follows — the rail's answered stack is where it is found again.
+    #[test]
+    fn an_answered_card_is_not_something_left_to_read() {
+        let mut a = app();
+        let mut card = open_card(1);
+        card.status = jod_core::cards::Status::Answered;
+        a.open_cards = vec![card];
+        assert!(a.cards_to_read().is_none());
+    }
+
+    /// The list is capped at [`rail::LIMIT`], so past the cap the count is a
+    /// floor and says so. A flat `50` would be a number the screen cannot stand
+    /// behind, which is the same reason the memory browser admits when it is
+    /// showing part of the graph.
+    #[test]
+    fn a_capped_count_says_it_is_a_floor() {
+        let mut a = app();
+        a.open_cards = (0..rail::LIMIT as i64).map(open_card).collect();
+        assert_eq!(a.cards_to_read().as_deref(), Some("50+ cards"));
     }
 
     /// The memory list holds the most-connected few hundred, so the count says
