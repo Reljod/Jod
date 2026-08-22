@@ -933,6 +933,32 @@ the question wrong for anything that outlives a turn. Whichever is chosen,
 `caller_is_main` being a single equality against a mutable pin is the thing to
 stop doing.
 
+**The blast radius, grepped rather than inferred, is exactly two call sites.**
+It was suggested that this widens to every gate that asks "is this main",
+including `interrupt_main`'s, and that is **not** so — checked on both branches
+before being written here. `caller_is_main` has two callers:
+
+- `core/src/mcp.rs:1730` — the refusal that stops `delegate` being used for work
+  inside a registered project;
+- `core/src/mcp.rs:2954` — `refuse_routing_from_main`, which gates `open_work`.
+
+Both are routing guards for repository work, which is what this finding already
+describes. `interrupt_main` is gated on `caller_is_assistant`, which reads
+`conversations.origin` rather than the pin:
+
+```rust
+matches!(
+    store.conversation_origin(&raiser.conversation_id),
+    Ok(Some(origin)) if origin == crate::orchestrator::ASSISTANT_ORIGIN
+)
+```
+
+Compaction forks *main*, not the doorman, so a doorman's origin is untouched and
+that gate does not fail open. Its own doc comment draws the distinction, calling
+origin "sender identity the caller cannot argue with" as against
+`caller_is_main`. Nobody should go hunting for a hole there or "fix" a gate that
+is already right.
+
 Worth noting for whoever takes it: all four `summarise to compact` runs are
 recorded `failed`, and X11 applies to them, so do not read those statuses as
 evidence that compaction is broken. At least one of them demonstrably worked —
@@ -1186,7 +1212,33 @@ it for ever.
 ---
 
 ## X16. Compaction carries queued deliveries across but not reviewing ones, so a message under judgement is orphaned
-Status: **open** · Severity: high · Owner: —
+Status: **fixed at the root — `7937698` on `feat/interruptible-main`, plus migration `0033`** · Severity: high · Owner: the #247 session
+
+**The fix is the narrow one this finding proposed.** The fork statement now
+carries `state IN ('queued', 'reviewing')`. The reasoning went into the comment:
+`delivered` must not move because it records where a message actually went, and
+that argument does not apply to a message still being judged — which is if
+anything *more* owed to the new thread than a queued one, because somebody typed
+it while the chat was working and is watching for the answer.
+
+**And delivery 12 came back.** Migration `0033` moves orphaned `reviewing` rows
+on the main chain onto the current main, restricted the same way `0027` is, with
+a test asserting a `reviewing` row on some other conversation is left alone. In
+the live store the row is no longer stranded, and it did not stop at `queued`:
+
+```
+12  2945d706  delivered  run=7855dc59-…  delivered_at_ms=1787428173972
+```
+
+It reached main about **thirty-nine minutes** after it was typed. Recovered, and
+late enough that "STOP, forget the essay" arrived long after the essay had been
+forgotten anyway — which is the honest measure of what this bug costs even when
+it is repaired.
+
+Worth keeping for whoever reads this later: `run_id` was `NULL` on that row, so
+the sweep in X15 would have released it onto the dead thread and no further.
+Both halves were needed. That is the strongest available argument that X15 and
+X16 were genuinely two bugs rather than one described twice.
 
 The other half of why delivery 12 in X15 could never be recovered, and it
 survives the fix for X15 unless that fix is written knowing about it.
@@ -1220,13 +1272,31 @@ So the two faults compound and each alone would have been survivable:
 2. Because it was sitting in `reviewing`, the next compaction skipped it and
    orphaned it onto an abandoned conversation.
 
-**Why this matters to the fix already written for X15.** That fix sweeps
-`reviewing` rows at the top of `tick_deliveries` and at turn end in the console,
-which is the right shape. But a sweep that asks about *the current main* will
-not find a row orphaned onto a previous one — `under_review_for` takes a
-conversation id, and after a compaction the orphan's id is a conversation
-nobody looks at again. The sweep has to either follow the `forked_from` chain
-or ask globally rather than per-conversation.
+**Correction — an earlier draft said the X15 sweep would miss an orphan, and
+that was wrong.** It claimed the sweep asks per conversation via
+`under_review_for` and so would not find a row orphaned onto a previous main.
+Checked against the branch rather than assumed: `Store::release_stale_reviews`
+(`core/src/delivery.rs:789` on `feat/interruptible-main`) takes **no**
+conversation id at all. It is one global statement:
+
+```sql
+UPDATE pending_deliveries
+   SET state = 'queued', reviewed_at_ms = coalesce(reviewed_at_ms, ?1)
+ WHERE state = 'reviewing'
+   AND (run_id IS NULL
+        OR NOT EXISTS (SELECT 1 FROM runs r
+                        WHERE r.id = pending_deliveries.run_id
+                          AND r.status = 'running'))
+```
+
+`under_review_for` is a reader used by `interrupt_main` and by tests, not by the
+sweep. So the sweep finds an orphan wherever it sits.
+
+**The point underneath it was right, and it is one step further along.**
+Releasing an orphan is not the same as delivering it. The row goes back to
+`queued` *on the dead conversation*, and `tick_deliveries` then dutifully
+injects it into a thread nobody is reading. Reljod still never sees it. So a
+sweep alone does not close this, which is why it had to be fixed at the fork.
 
 **And the window is not rare here.** A doorman takes tens of seconds to judge;
 compaction fires every ten minutes or so on `gemini-3.7-flash-medium` (X13). A
