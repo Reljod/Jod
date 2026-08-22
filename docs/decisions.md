@@ -3586,3 +3586,43 @@ pinned chat is in no group and a work with no project *is* the top row, so two
 of the three readers were being sent to a row they were already on or to one
 that does not exist. A refusal that describes where to go instead of naming what
 is there is a refusal the reader has to test to understand.
+
+## A panel that draws its own state does not also narrate it
+
+"A notice belongs to the screen that raised it" above sends feedback to the
+screen it happened on, and it decides which screen that is by asking
+`app.workspace`. A panel drawn *beside* the chat is a different screen the
+question cannot see. The rail is one: while it has the keyboard the workspace is
+still `Chat`, so its four settings keys fell straight through the divert and
+into the conversation.
+
+The result was the failure that rule was written to stop, one layer in. Cycling
+`f` to find the kind you wanted walked through decision, question, secret and
+back to any, and left four lines in the transcript saying so — beside a rail
+whose own header already read `f secret`. Pressing `S` twice to see the sorts
+left two more. None of it was the harness talking and none of it was still true
+by the time anyone scrolled back to it.
+
+So the rail's `S`, `t`, `f` and `c` say nothing at all, and neither does
+`Ctrl-T`. Silence rather than a flash, because the flash would be redundant
+too: the rail already prints every fact the notices printed, and prints it for
+as long as the setting holds rather than for four seconds. The stack and the
+scope ride the always-drawn header, and the sort and the kind ride the settings
+line, which is drawn whenever the rail is focused — the only time these keys do
+anything. The answer was always on screen; the notice was a second copy of it
+with a shorter life, filed somewhere it could not be compared against the first.
+
+`Ctrl-T` joins them for the reason `Ctrl-O` beside it was already silent. The
+two are one verb on different content — fold the reasoning away, fold the
+finished steps away — and the transcript growing or shrinking under the cursor
+is the answer either way. A line announcing that reasoning is now hidden is one
+more line of exactly the noise being hidden.
+
+The general rule this leaves: **feedback about a view never enters the
+conversation.** If the view draws its own state, say nothing. If it does not and
+the keypress happened off the chat screen, the flash still catches it. What
+stays in the transcript is what a reader would want to find there weeks later —
+the harness talking, and Jod's answers to questions that were actually typed.
+That is why `/thinking` still replies in words while `Ctrl-T` does not: a typed
+question deserves a reply, and a chord that visibly changes the screen has
+already given one.

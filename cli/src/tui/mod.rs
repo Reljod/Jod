@@ -3318,20 +3318,25 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.rail.editing_filter = true;
             None
         }
+        // The four settings keys say nothing, and that is deliberate. What the
+        // rail is showing is already written on the rail: the stack and the
+        // scope ride the always-drawn header, and the sort and the kind filter
+        // ride the settings line, which is drawn whenever the rail is focused —
+        // the only time any of these keys do anything. A notice would put a
+        // line in the conversation to report a fact standing two rows above it,
+        // and cycling a filter to find the right one would leave a paragraph of
+        // them behind. That is the clutter, not the answer to it. Same
+        // reasoning as `Ctrl-T` and `Ctrl-O` further down.
         KeyCode::Char('S') => {
-            let sort = app.rail.cycle_sort();
-            app.push(Entry::Notice(format!("rail sorted by {}", sort.as_str())));
+            app.rail.cycle_sort();
             None
         }
         KeyCode::Char('t') => {
-            let stack = app.rail.cycle_stack();
-            app.push(Entry::Notice(format!("rail showing {} cards", stack.as_str())));
+            app.rail.cycle_stack();
             None
         }
         KeyCode::Char('f') => {
-            let kind = app.rail.cycle_kind();
-            let what = kind.map(|k| k.as_str()).unwrap_or("every kind of");
-            app.push(Entry::Notice(format!("rail showing {what} card")));
+            app.rail.cycle_kind();
             None
         }
         // The subtree scope. Cascade is upward only, so this widens to "this
@@ -3339,14 +3344,6 @@ fn on_rail_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         // alone" — it can never show a parent's cards to a child.
         KeyCode::Char('c') => {
             app.rail.cascade = !app.rail.cascade;
-            app.push(Entry::Notice(
-                if app.rail.cascade {
-                    "rail showing this session and everything below it"
-                } else {
-                    "rail showing this session only"
-                }
-                .into(),
-            ));
             None
         }
         KeyCode::Char('?') => {
@@ -3672,12 +3669,13 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
             });
             handled(None)
         }
+        // Show the reasoning of every turn, or put it away. Silent, for the
+        // reason its neighbour below is silent: this key and `Ctrl-O` are the
+        // same verb on different content, and the transcript growing or
+        // shrinking under the cursor is the answer either way. `/thinking`
+        // still answers in words, because a typed question deserves a reply.
         KeyCode::Char('t') if either => {
             app.show_thinking = !app.show_thinking;
-            app.push(Entry::Notice(format!(
-                "thinking {}",
-                if app.show_thinking { "shown" } else { "hidden" }
-            )));
             handled(None)
         }
         // Unfold the steps of every turn already finished, and fold them away
@@ -14766,6 +14764,58 @@ mod tests {
         assert_ne!(asked.sort, jod_core::cards::Sort::default());
         assert!(asked.kind.is_some());
         assert_ne!(asked.status, Some(jod_core::cards::Status::Open));
+    }
+
+    /// The four settings keys change what the rail shows and say nothing.
+    ///
+    /// The rail already draws its own state — the stack and the scope on the
+    /// header, the sort and the kind filter on the settings line — so a notice
+    /// reports a fact standing two rows above it, and cycling a filter to find
+    /// the one you want leaves a paragraph of them in the conversation. Read
+    /// through `spoken` rather than the transcript alone, because the claim is
+    /// that nothing was said in either place, not that it went to the flash.
+    #[test]
+    fn the_rails_settings_keys_change_the_view_without_saying_a_word() {
+        let mut app = with_cards();
+        ctrl(&mut app, KeyCode::Char('n'));
+        let before = app.rail.query(Some("conv".into()));
+        let said = spoken(&app);
+
+        for key in ['S', 't', 'f', 'c'] {
+            press(&mut app, KeyCode::Char(key));
+        }
+
+        assert_ne!(
+            app.rail.query(Some("conv".into())),
+            before,
+            "the keys did not change the view, so the silence proves nothing"
+        );
+        assert!(!app.rail.cascade, "`c` did not narrow the scope");
+        assert_eq!(
+            spoken(&app),
+            said,
+            "a rail setting put a line in the conversation"
+        );
+    }
+
+    /// `Ctrl-T` folds the reasoning away, and is silent for the reason its
+    /// neighbour `Ctrl-O` is silent: the transcript growing or shrinking under
+    /// the cursor is the answer, so a line announcing it is one more line of
+    /// the noise being folded away.
+    #[test]
+    fn the_thinking_chord_folds_the_reasoning_without_saying_a_word() {
+        let mut app = with_cards();
+        let said = spoken(&app);
+        let before = app.show_thinking;
+
+        ctrl(&mut app, KeyCode::Char('t'));
+
+        assert_ne!(app.show_thinking, before, "the chord did not toggle");
+        assert_eq!(
+            spoken(&app),
+            said,
+            "a view toggle put a line in the conversation"
+        );
     }
 
     /// A `/` line being typed into owns the letters, or filtering for "stop"
