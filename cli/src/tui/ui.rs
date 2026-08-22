@@ -5391,6 +5391,9 @@ fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
 
     for (i, row) in rows.iter().enumerate() {
         let chosen = i == selected;
+        // What this row's own harness accepts, which is what says whether the
+        // other columns hold anything it will refuse.
+        let models = app.role_models(row.harness_kind());
         // The branch and the name share one column, so the tree keeps its shape
         // whatever a role is called.
         let name = format!("{}{}", row.branch, row.role.as_str());
@@ -5404,16 +5407,16 @@ fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
                 format!("{:<18}", cut(&name, 18)),
                 if chosen { bold(USER) } else { fg(AGENT) },
             ),
-            cell(row, RoleField::Harness, 12),
+            cell(row, RoleField::Harness, 12, &models),
         ];
         if show_model {
-            spans.push(cell(row, RoleField::Model, 16));
+            spans.push(cell(row, RoleField::Model, 16, &models));
         }
         if show_thinking {
-            spans.push(cell(row, RoleField::Thinking, 8));
+            spans.push(cell(row, RoleField::Thinking, 8, &models));
         }
         if show_permission {
-            spans.push(cell(row, RoleField::Permission, 8));
+            spans.push(cell(row, RoleField::Permission, 8, &models));
         }
         lines.push(Line::from(spans));
     }
@@ -5434,12 +5437,25 @@ fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
                 fg(MUTED),
             )));
         }
+        // What the row under the cursor holds that its harness will not take,
+        // spelled out. The red cell says *that* something is wrong; this says
+        // what happens because of it, which is the half a colour cannot carry.
+        for said in roles::objections(&row, &app.role_models(row.harness_kind())) {
+            lines.push(Line::from(Span::styled(format!("  {said}"), fg(BAD))));
+        }
     }
 
     if let Some(choosing) = &app.choosing {
         lines.push(Line::from(""));
         lines.push(rule(width));
-        lines.extend(chooser_lines(app, choosing));
+        // Whatever is left of the box once the table, its footnotes and the
+        // chooser's own title and key line have taken their rows. A list drawn
+        // past this is a list whose cursor can leave the screen.
+        let room = (area.height as usize)
+            .saturating_sub(2)
+            .saturating_sub(lines.len())
+            .saturating_sub(2);
+        lines.extend(chooser_lines(app, choosing, room));
     }
 
     f.render_widget(page(Workspace::Roles, app, lines, area.width), area);
@@ -5450,9 +5466,19 @@ fn draw_roles(f: &mut Frame, app: &App, area: Rect) {
 /// Muted when it inherits, so a screen of defaults reads as a screen of
 /// defaults at a glance rather than as a table you have to compare cell by
 /// cell.
-fn cell(row: &roles::Row, field: RoleField, width: usize) -> Span<'static> {
+fn cell(
+    row: &roles::Row,
+    field: RoleField,
+    width: usize,
+    models: &roles::Models,
+) -> Span<'static> {
     let text = row.cell(field);
-    let colour = if row.value(field).is_some() {
+    // A value the row's own harness will not take is the one thing on this
+    // table worth looking at, because it is the one that fails later and
+    // elsewhere — see [`roles::column_refused`].
+    let colour = if roles::column_refused(row, field, models) {
+        BAD
+    } else if row.value(field).is_some() {
         AGENT
     } else {
         MUTED
@@ -5465,7 +5491,7 @@ fn cell(row: &roles::Row, field: RoleField, width: usize) -> Span<'static> {
 /// Inside rather than floating over the table, because the table is what you
 /// are choosing *for*: a box covering the row you are editing would hide the
 /// value you are about to replace.
-fn chooser_lines<'a>(app: &App, choosing: &roles::Choosing) -> Vec<Line<'a>> {
+fn chooser_lines<'a>(app: &App, choosing: &roles::Choosing, room: usize) -> Vec<Line<'a>> {
     let role = choosing.role();
     let mut lines = vec![Line::from(Span::styled(
         match choosing {
@@ -5490,33 +5516,52 @@ fn chooser_lines<'a>(app: &App, choosing: &roles::Choosing) -> Vec<Line<'a>> {
                 lines.push(option_line(i == at, field.as_str(), now));
             }
         }
-        roles::Choosing::Value { field, options, .. } => {
-            for (i, choice) in options.iter().enumerate() {
+        roles::Choosing::Value {
+            field,
+            options,
+            models,
+            ..
+        } => {
+            // Windowed rather than drawn whole. OpenCode lists sixty-odd
+            // models and the panel is one box on one screen, so a list drawn in
+            // full runs off the bottom — taking the cursor with it, which is a
+            // chooser you cannot see what you are choosing in.
+            //
+            // The room the options get is what is left after the note under a
+            // model list and, when the list is longer than the box, the two
+            // "… n more" markers: all of them are drawn in the same space.
+            let room = room.saturating_sub(if *field == RoleField::Model { 1 } else { 0 });
+            let room = if options.len() > room {
+                room.saturating_sub(2)
+            } else {
+                room
+            }
+            .max(1);
+            // The same window every other list on this screen uses, so a
+            // chooser scrolls the way the fleet does.
+            let start = window_start(at, room, options.len());
+            let end = (start + room).min(options.len());
+            if start > 0 {
+                lines.push(more_line(start, "above"));
+            }
+            for (i, choice) in options.iter().enumerate().skip(start).take(end - start) {
                 lines.push(option_line(i == at, &choice.label, &choice.what));
             }
-            // Whose names these are, when that is not the obvious answer.
-            //
-            // The list is whatever the harness *this console is on* said it
-            // accepts, because that is the one Jod has already asked and asking
-            // another means running its binary and waiting up to fifteen
-            // seconds on a keypress. A row that names a different harness is
-            // therefore being offered the wrong vocabulary, and saying so beats
-            // a list that looks authoritative and is not — the name still goes
-            // through verbatim, so anything can be set here.
+            if end < options.len() {
+                lines.push(more_line(options.len() - end, "below"));
+            }
+            // Whose names these are, always — the model column is the one
+            // column where the list itself does not say. A model id belongs to
+            // exactly one harness, so a list from the wrong one is a list of
+            // names that fail the run, and this panel shipped offering the
+            // console session's names on every row whatever harness the row
+            // said. `Models` carries which harness answered and whether it
+            // answered at all; see [`roles::Models::note`].
             if *field == RoleField::Model {
-                let row = app.role_rows().into_iter().find(|r| r.role == role);
-                let theirs = row.and_then(|r| r.harness_kind());
-                if theirs.is_some_and(|kind| kind != app.harness) {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "    these are {}'s names, and this row runs on {} — \
-                             a name typed here is passed through as it is",
-                            app.harness.label(),
-                            theirs.expect("just matched").label()
-                        ),
-                        fg(MUTED),
-                    )));
-                }
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", models.note()),
+                    fg(MUTED),
+                )));
             }
         }
     }
@@ -5525,6 +5570,15 @@ fn chooser_lines<'a>(app: &App, choosing: &roles::Choosing) -> Vec<Line<'a>> {
         fg(MUTED),
     )));
     lines
+}
+
+/// The line standing in for the options the window is not showing, so a list
+/// that continues past the edge of the box says so.
+fn more_line<'a>(hidden: usize, which: &str) -> Line<'a> {
+    Line::from(Span::styled(
+        format!("    … {hidden} more {which}"),
+        fg(MUTED),
+    ))
 }
 
 fn option_line<'a>(chosen: bool, label: &str, what: &str) -> Line<'a> {
@@ -7348,10 +7402,12 @@ mod tests {
         let mut a = app();
         a.go(Workspace::Roles);
         a.reconcile();
+        let models = a.role_models(None);
         a.choosing = Some(roles::Choosing::Value {
             role: jod_core::harness::Role::Main,
             field: RoleField::Harness,
-            options: roles::options(RoleField::Harness, None, &[]),
+            options: roles::options(RoleField::Harness, None, &models),
+            models,
             selected: 0,
         });
         let frame = rendered(&a, 120, 30);
@@ -7364,30 +7420,153 @@ mod tests {
         );
     }
 
-    /// The model list is whatever the harness this console is on said it
-    /// accepts, and a row that names a different one has to be told so — a list
-    /// that looks authoritative and is not is worse than no list.
+    /// The model list belongs to the harness the *row* names, and the screen
+    /// says which harness that is. This console is on Claude Code and the row
+    /// is on OpenCode, so none of Claude Code's names may appear on it — every
+    /// one of them fails an OpenCode run.
     #[test]
-    fn the_model_list_says_whose_names_it_is_offering() {
+    fn the_model_list_is_the_rows_own_harnesss_and_says_so() {
         let mut a = app();
         a.roles = vec![jod_core::store::RoleRow {
             role: "main".into(),
             harness: Some(HarnessKind::OpenCode.id().into()),
             ..Default::default()
         }];
+        a.note_models(
+            HarnessKind::OpenCode,
+            jod_core::harness::models::parse(
+                HarnessKind::OpenCode,
+                "opencode/claude-opus-5\nopencode/hy3-free\n",
+            ),
+        );
         a.go(Workspace::Roles);
         a.reconcile();
+        let models = a.role_models(Some(HarnessKind::OpenCode));
         a.choosing = Some(roles::Choosing::Value {
             role: jod_core::harness::Role::Main,
             field: RoleField::Model,
-            options: roles::options(RoleField::Model, Some(HarnessKind::OpenCode), &a.models),
+            options: roles::options(RoleField::Model, Some(HarnessKind::OpenCode), &models),
+            models,
             selected: 0,
         });
 
         let frame = rendered(&a, 120, 30);
         assert!(
-            frame.contains("this row runs on OpenCode"),
-            "the console is on Claude Code and the row is not:\n{frame}"
+            frame.contains("these are OpenCode's own names"),
+            "the list has to name the harness it came from:\n{frame}"
+        );
+        assert!(frame.contains("opencode/hy3-free"), "{frame}");
+        assert!(
+            !frame.contains("claude-haiku-4-5"),
+            "that is Claude Code's spelling and this row runs on OpenCode:\n{frame}"
+        );
+    }
+
+    /// A harness that has not answered offers nothing rather than the console's
+    /// names, and says which of the two is happening. AGY is asked over the
+    /// network, so the first second on this panel really does look like this.
+    #[test]
+    fn a_row_whose_harness_has_not_answered_yet_is_offered_no_names() {
+        let mut a = app();
+        a.roles = vec![jod_core::store::RoleRow {
+            role: "main".into(),
+            harness: Some(HarnessKind::Agy.id().into()),
+            ..Default::default()
+        }];
+        a.go(Workspace::Roles);
+        a.reconcile();
+        let models = a.role_models(Some(HarnessKind::Agy));
+        a.choosing = Some(roles::Choosing::Value {
+            role: jod_core::harness::Role::Main,
+            field: RoleField::Model,
+            options: roles::options(RoleField::Model, Some(HarnessKind::Agy), &models),
+            models,
+            selected: 0,
+        });
+
+        let frame = rendered(&a, 120, 30);
+        assert!(frame.contains("asking AGY what it accepts"), "{frame}");
+        assert!(
+            !frame.contains("claude-haiku-4-5"),
+            "no list at all beats Claude Code's list on an AGY row:\n{frame}"
+        );
+    }
+
+    /// A row left holding a model its harness has never heard of is the state
+    /// the panel makes easy to reach — the harness column is set on its own —
+    /// and the sentence under the table is what makes it fixable.
+    #[test]
+    fn a_row_holding_a_model_its_harness_lacks_says_so_under_the_table() {
+        let mut a = app();
+        a.roles = vec![jod_core::store::RoleRow {
+            role: "main".into(),
+            harness: Some(HarnessKind::Agy.id().into()),
+            model: Some("claude-opus-4-6".into()),
+            ..Default::default()
+        }];
+        a.note_models(
+            HarnessKind::Agy,
+            jod_core::harness::models::parse(
+                HarnessKind::Agy,
+                "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n",
+            ),
+        );
+        a.go(Workspace::Roles);
+        a.reconcile();
+
+        let frame = rendered(&a, 120, 30);
+        assert!(
+            frame.contains("AGY has no model called claude-opus-4-6"),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("claude-opus-4-6-thinking"),
+            "and the name that would have worked:\n{frame}"
+        );
+    }
+
+    /// A list longer than the box is windowed onto the selected row rather than
+    /// drawn off the bottom of the screen. OpenCode names sixty-odd models, so
+    /// this is the ordinary case and not the corner one.
+    #[test]
+    fn a_model_list_longer_than_the_box_keeps_the_cursor_on_screen() {
+        // Short ids on purpose: the label column is cut at nineteen cells, and
+        // ids long enough to be cut are ids this test cannot tell apart.
+        let printed: String = (0..60).map(|i| format!("opencode/m-{i:02}\n")).collect();
+        let mut a = app();
+        a.roles = vec![jod_core::store::RoleRow {
+            role: "main".into(),
+            harness: Some(HarnessKind::OpenCode.id().into()),
+            ..Default::default()
+        }];
+        a.note_models(
+            HarnessKind::OpenCode,
+            jod_core::harness::models::parse(HarnessKind::OpenCode, &printed),
+        );
+        a.go(Workspace::Roles);
+        a.reconcile();
+        let models = a.role_models(Some(HarnessKind::OpenCode));
+        a.choosing = Some(roles::Choosing::Value {
+            role: jod_core::harness::Role::Main,
+            field: RoleField::Model,
+            options: roles::options(RoleField::Model, Some(HarnessKind::OpenCode), &models),
+            models,
+            selected: 55,
+        });
+
+        let frame = rendered(&a, 120, 30);
+        assert!(
+            frame.contains("▸ opencode/m-54"),
+            "the selected row is the one that has to be on screen:\n{frame}"
+        );
+        assert!(
+            !frame.contains("opencode/m-00"),
+            "and the far end of the list is off it:\n{frame}"
+        );
+        assert!(frame.contains("more above"), "{frame}");
+        assert!(
+            frame.contains("Esc leave it alone"),
+            "and the key line still fits under it:\n{frame}"
         );
     }
 

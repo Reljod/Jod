@@ -4378,3 +4378,31 @@ identical to a clean one. Only the supervisor saw the signal, and it writes what
 it saw to `runs.status` on the statement after the event — so a status that
 still says `running` means the read landed between those two writes, and the
 wait re-reads for half a second rather than calling a stop a success.
+
+## A model list belongs to the row that named the harness, not to the console
+
+The roles panel offered the model names of whatever harness the *chat box* was
+on, whichever harness the row itself named. Set a row to `agy`, press `m`, and
+the list was `opus`, `claude-opus-5`, `sonnet` — Claude Code's names, every one
+of which fails an AGY run. The panel said so in small type under the list, which
+is not a fix: a list of names that cannot work is worse than no list, and being
+told that after choosing from it is worse still.
+
+The cause was one slot. The console kept a single model list with a note saying
+which harness it belonged to, so there was no way to answer "what does AGY
+accept" while sitting on Claude Code. The lists are now kept one per harness,
+the panel asks for the row's own, and the loader fetches all three while the
+panel is open — one subprocess per harness, once per session, off the render
+path.
+
+A harness that has not answered yet and one that could not be asked are told
+apart and both offer nothing, because the alternative is offering another
+harness's vocabulary. A row that names *no* harness is offered the console's
+list, labelled as the guess it is: such a row runs on whatever the caller, the
+conversation or the console hands it, and the console's own harness is what a
+run started from this console inherits.
+
+The same rule reaches the spawn seam. `apply_role` leaves a resumed run on the
+harness that minted its session id, and used to take the row's model anyway —
+handing AGY's spelling to Claude Code. It now takes the model only when the run
+is actually going to the harness the row names.
