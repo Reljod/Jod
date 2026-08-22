@@ -3847,3 +3847,44 @@ badges should follow it; the stack, the kind and the search go, because none of
 them is consent to be told nothing. It is capped like the rail's own query, so
 past fifty the count says `50+` rather than a number the screen cannot stand
 behind.
+
+## The fleet draws a roster, and a row on it is somewhere you can go
+
+Two things were wrong with the row that stands for an engineer, and both came
+out of the same place: nothing ever decided what that row is *for*.
+
+It was **labelled with its conversation's title**, and nothing names a work
+session — `service::open_conversation` falls back to the opening prompt — so on
+a project with a manager the fleet read `manager` on one line and
+`Reljod's words: "maybe create a simple tic tac toe web app …"` on the next. The
+screen whose whole job is showing a chain of command showed a rank and then an
+instruction. Worse, that instruction belongs to the *work*, so every agent on
+one work carried the same string, and it took the width the row's `summary`
+needed — the one part of the line that was actually about this agent, being its
+newest message.
+
+So a session row is now a seat: `engineer#1`, `engineer#2`, numbered within the
+heading it hangs from. A number rather than a name because there is nothing to
+name these after, and a position rather than an identity because an engineer
+that finishes and leaves renumbers the ones after it, the way a list does.
+Identity stays in `NodeId`, which is what the cursor and every verb are keyed
+by. The numbering runs across a repository rather than restarting inside each
+work, because the fold has already put both works' agents on one level and two
+`engineer#1`s under one project are two rows nobody can tell apart.
+
+And `⏎` on that row **did not go into the conversation**. It produced
+`Sessions(Request::Open)`, which is a listing — one truncated line per turn,
+pushed as notices into whichever transcript happened to be bound, from a screen
+that is not the chat. So the row that says an agent is running was the one row
+on the fleet you could not open, and the agent actually doing the work could not
+be read, followed, or spoken to. It enters now, exactly as `⏎` on the manager
+row above it does, and `→` and `←` make the same round trip they make there.
+
+Entering also picks up the run, which the manager path never needed. The event
+stream appends to the screen for exactly one run — the one in `App::watching` —
+so replaying the transcript and stopping there showed a working engineer up to
+that instant and then went silent while it carried on writing. A live agent
+drawn as a dead one is precisely the picture the fleet exists to prevent, so
+`follow_live_run` attaches to the run if one is still going, and deliberately
+does nothing if none is: marking the chat busy for a process that has ended
+would take the input box away with nothing coming back to give it.

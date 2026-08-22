@@ -634,6 +634,12 @@ mod tests {
     /// The shape the fleet asks for: a project, then its manager and every
     /// agent in it, all at one level. No works, no runs, and no session nested
     /// under the session that spawned it.
+    ///
+    /// The agents are numbered rather than titled — see `tree::hired_as`. The
+    /// numbering runs across the repository and not inside each work, because
+    /// the fold has just put both works' agents on one level and two
+    /// `engineer#1`s under one project would be two rows nobody can tell apart:
+    /// `fix the CI` belongs to `w2` and is still the third seat here.
     #[test]
     fn a_project_holds_its_manager_and_every_agent_at_the_same_level() {
         let folded = condense(&repository(), &nothing());
@@ -642,9 +648,9 @@ mod tests {
             [
                 ("project", 0, "jod"),
                 ("manager", 1, "manager"),
-                ("session", 1, "port the lexer"),
-                ("session", 1, "write the docs"),
-                ("session", 1, "fix the CI"),
+                ("session", 1, "engineer#1"),
+                ("session", 1, "engineer#2"),
+                ("session", 1, "engineer#3"),
             ]
         );
         for row in folded.nodes.iter().filter(|n| n.depth == 1) {
@@ -747,14 +753,18 @@ mod tests {
             shape(&folded.nodes),
             [
                 ("work", 0, "the parser"),
-                ("session", 1, "port the lexer"),
-                ("session", 1, "write the docs"),
+                ("session", 1, "engineer#1"),
+                ("session", 1, "engineer#2"),
             ]
         );
     }
 
     /// `z` shows the archives, and an archive flattened into the roster would be
     /// a finished agent sitting among the working ones with nothing marking it.
+    ///
+    /// The closed work's own agent starts its heading's numbering again, which
+    /// is the reading that matches the screen: the seats being counted are the
+    /// ones under the row you are looking at, and an archive is its own row.
     #[test]
     fn a_closed_work_keeps_its_heading_under_the_project() {
         let closed: HashSet<NodeId> = [NodeId::work("w2")].into_iter().collect();
@@ -764,10 +774,10 @@ mod tests {
             [
                 ("project", 0, "jod"),
                 ("manager", 1, "manager"),
-                ("session", 1, "port the lexer"),
-                ("session", 1, "write the docs"),
+                ("session", 1, "engineer#1"),
+                ("session", 1, "engineer#2"),
                 ("work", 1, "the deploy"),
-                ("session", 2, "fix the CI"),
+                ("session", 2, "engineer#1"),
             ]
         );
     }

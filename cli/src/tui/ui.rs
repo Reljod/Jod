@@ -4342,7 +4342,19 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) -> Preview {
             fg(MUTED),
         ))),
     }
-    preview_pane(f, app, area, lines, " node ", "", MUTED)
+    // The verbs the selected row actually answers. The pane used to print none
+    // for anything, which was true when a node was only ever a heading — and
+    // stopped being true the moment `⏎` on an agent's row started going into
+    // its conversation. A row you can enter, stop and resume, advertising
+    // nothing, is a row nobody finds.
+    let verbs = match app.selected_node().map(|node| node.kind) {
+        Some(jod_core::tree::NodeKind::Session) => {
+            " ⏎ enter · s stop · r resume · a attach · T bus "
+        }
+        Some(jod_core::tree::NodeKind::Manager) => " ⏎ enter ",
+        _ => "",
+    };
+    preview_pane(f, app, area, lines, " node ", verbs, MUTED)
 }
 
 /// The fleet's preview pane, scrolled to where the keyboard left it.
@@ -13218,13 +13230,15 @@ mod tests {
         a.tree.expand_or_descend(&forest, &closed);
         let open = rendered(&a, 150, 30);
 
-        for agent in ["manager", "port the lexer", "fix the CI"] {
+        // The agents are seats on this repository's roster rather than the
+        // titles their conversations carry — see `tree::hired_as`.
+        for agent in ["manager", "engineer#1", "engineer#2"] {
             assert!(open.contains(agent), "`{agent}` is missing:\n{open}");
         }
-        for gone in ["the parser", "the deploy"] {
+        for gone in ["the parser", "the deploy", "port the lexer", "fix the CI"] {
             assert!(
                 !open.contains(gone),
-                "a work is not a row any more, and `{gone}` is one:\n{open}"
+                "neither a work nor an instruction is a row here, and `{gone}` is one:\n{open}"
             );
         }
         // The manager and the engineers are siblings, so their rows start at the
@@ -13236,8 +13250,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} is not on screen:\n{open}"));
             line.find(needle).expect("the needle is in the line")
         };
-        assert_eq!(indent("manager"), indent("port the lexer"), "{open}");
-        assert_eq!(indent("manager"), indent("fix the CI"), "{open}");
+        assert_eq!(indent("manager"), indent("engineer#1"), "{open}");
+        assert_eq!(indent("manager"), indent("engineer#2"), "{open}");
     }
 
     /// The pinned chat is the tree's first row, as it is the flat list's.
