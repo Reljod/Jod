@@ -58,8 +58,6 @@ pub enum Slash {
     Project(ProjectCmd),
     /// Start a fresh conversation, forgetting the session cursor.
     New,
-    /// List conversations that can be resumed.
-    Sessions,
     /// Continue a specific conversation by its harness-assigned id.
     Resume(String),
     /// Go to a workspace. One variant for all nine, because the palette and the
@@ -287,7 +285,6 @@ pub fn parse(line: &str) -> Option<Slash> {
             None if arg.is_empty() => Slash::New,
             None => Slash::Unknown(format!("/new {arg}")),
         },
-        "sessions" => Slash::Sessions,
         "root" | "roots" => {
             let mut words = arg.split_whitespace();
             match words.next() {
@@ -697,8 +694,10 @@ pub const HELP: &[(&str, &str)] = &[
         "/project [add|untrack]",
         "the repositories an instruction resolves against; `untrack <name>` drops one",
     ),
-    ("/sessions", "pick a conversation to carry on with (Ctrl-G r)"),
-    ("/resume <id>", "continue one of them by its id"),
+    (
+        "/resume <id>",
+        "carry on with a conversation by its id — the fleet lists them",
+    ),
     ("/delegate <prompt>", "run it in the background (Ctrl-B)"),
     ("/main", "go into the main chat — the pinned one"),
     // Not "and stay where you are". The reply is watched in this transcript,
@@ -1556,7 +1555,6 @@ mod tests {
         assert_eq!(parse("/output"), Some(Slash::Details));
         assert_eq!(parse("/reasoning"), Some(Slash::Thinking));
         assert_eq!(parse("/new"), Some(Slash::New));
-        assert_eq!(parse("/sessions"), Some(Slash::Sessions));
         // One command, three shapes. Bare and `ls` both list, because half the
         // people who type `/root` mean "show me" and the other half will type
         // the subcommand out of habit.
