@@ -1581,31 +1581,43 @@ impl Ticker {
         };
 
         for held in waiting {
-            // The main chat is answered, not woken. Everything else on this
-            // list is a member whose turn is a fresh spawn resuming its own
-            // harness session; the orchestrator is one pinned conversation that
-            // has to keep accumulating, so its mail joins the delivery queue
-            // and `tick_deliveries` resumes the conversation itself. Waking it
-            // the ordinary way would start a run in a *new* conversation, and
-            // the chat Reljod reads would never show the answer at all.
+            // A standing conversation is answered, not woken. Everything else
+            // on this list is a member whose turn is a fresh spawn resuming its
+            // own harness session; the main chat and a project's manager are
+            // conversations that have to keep accumulating one transcript, so
+            // their mail joins the delivery queue and `tick_deliveries` resumes
+            // the conversation itself. Waking either the ordinary way would
+            // start a run in a *new* conversation, and the thread the reader is
+            // watching would never show the answer at all.
             //
-            // Asked of the row rather than of the name. The name is reserved
-            // from now on, but a database written before it was is not, so a
+            // Asked of the row rather than of the name. Both names are reserved
+            // from now on, but a database written before they were is not, so a
             // teammate somebody called `main` years ago must keep receiving its
             // own mail rather than having it quietly diverted here.
-            if store
-                .is_main_chat_member(held.scope, &held.team, &held.member.name)
-                .unwrap_or(false)
-            {
-                match self.hand_to_main(&store, &held) {
-                    Ok(0) => report.held += 1,
-                    Ok(_) => report.started += 1,
-                    Err(e) => {
-                        report.failed += 1;
-                        eprintln!("[jod/tick] could not hand mail to the main chat: {e}");
+            match store.standing_conversation_for_member(
+                held.scope,
+                &held.team,
+                &held.member.name,
+            ) {
+                Ok(Some(conversation)) => {
+                    match self.hand_to_conversation(&store, &held, &conversation) {
+                        Ok(0) => report.held += 1,
+                        Ok(_) => report.started += 1,
+                        Err(e) => {
+                            report.failed += 1;
+                            eprintln!(
+                                "[jod/tick] could not hand mail to `{}`: {e}",
+                                held.member.name
+                            );
+                        }
                     }
+                    continue;
                 }
-                continue;
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "[jod/tick] could not tell whether `{}` is a standing conversation: {e}",
+                    held.member.name
+                ),
             }
             let Some(order) = team::wake_order(&held.member, &held.pending) else {
                 report.held += 1;
@@ -2296,35 +2308,43 @@ impl Ticker {
         }
     }
 
-    /// Resume one member on its own conversation, carrying its unread mail.
-    /// Move mail addressed to the main chat onto the main chat's own queue.
+    /// Move mail addressed to a standing conversation onto that conversation's
+    /// own queue, instead of waking it as a fresh session.
     ///
     /// The return leg Reljod asked for: a run he delegated something to says
     /// what the answer is, and the orchestrator takes a turn carrying it. No
     /// new delivery mechanism — [`crate::delivery`] already turns something
     /// waiting for a conversation into a resumed turn, batching whatever else
-    /// arrives in the meantime into the same one, and the main chat is the one
-    /// member of any roster that *is* a conversation.
+    /// arrives in the meantime into the same one, and the two members of a
+    /// roster that *are* conversations are the main chat and a project's
+    /// manager.
+    ///
+    /// The manager is the half that was missing, and it is the half the fleet
+    /// now runs on. A manager owns its engineers and is the only participant
+    /// that can redirect one, so an engineer's report and an answer the manager
+    /// has to act on both have to arrive as turns of the same standing
+    /// transcript — the one that remembers what it planned.
     ///
     /// Returns how many messages moved. Zero means there was nothing to hand
-    /// over, or that the chat is not resumable yet — a pinned conversation that
-    /// has never run has no session, and an orchestrator resumed into a fresh
-    /// context would answer having forgotten what it delegated. The mail stays
-    /// on the bus and visible, which is the same choice `wake_order` makes for
-    /// a member with no session.
-    fn hand_to_main(&self, store: &Store, held: &team::Waiting) -> Result<usize> {
-        let Some(conversation) = store.pinned_conversation()? else {
-            return Ok(0);
-        };
-        if !store.main_chat_is_resumable()? {
+    /// over, or that the conversation is not resumable yet — one that has never
+    /// run has no session, and an agent resumed into a fresh context would
+    /// answer having forgotten what it set in motion. The mail stays on the bus
+    /// and visible, which is the same choice `wake_order` makes for a member
+    /// with no session.
+    fn hand_to_conversation(
+        &self,
+        store: &Store,
+        held: &team::Waiting,
+        conversation: &str,
+    ) -> Result<usize> {
+        if !store.conversation_is_resumable(conversation)? {
             return Ok(0);
         }
-        let moved =
-            store.hand_mail_to_conversation(&held.team, &held.member.name, &conversation)?;
+        let moved = store.hand_mail_to_conversation(&held.team, &held.member.name, conversation)?;
         if moved > 0 {
             eprintln!(
-                "[jod/tick] queued {moved} message(s) for the main chat from {}",
-                held.team
+                "[jod/tick] queued {moved} message(s) for `{}` from {}",
+                held.member.name, held.team
             );
         }
         Ok(moved)
@@ -6048,6 +6068,87 @@ mod tests {
             assert_eq!(report.claimed, 0);
         }
 
+        /// A project with a manager that has already had a turn — the state
+        /// every instruction about a repository leaves behind. `hand_to_manager`
+        /// gets or creates this conversation and resumes it; the session id is
+        /// what the harness reported the first time it ran.
+        fn a_manager(store: &Store) -> String {
+            let dir = std::env::temp_dir().join(format!("jod-mgr-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let project = store
+                .add_project(crate::projects::NewProject::at(&dir).named("acme"))
+                .unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            store
+                .record_session(&manager, HarnessKind::ClaudeCode, "ses-manager")
+                .unwrap();
+            manager
+        }
+
+        /// **The bug Reljod reported, end to end.**
+        ///
+        /// He answered a decision card asking for the work to be split between
+        /// two engineers instead of one, and the manager carried on with one.
+        /// This is the whole leg it has to travel: the manager records its
+        /// decision, Reljod picks a different option, and the manager — whose
+        /// last run finished long ago — has a turn waiting that says it was
+        /// overruled.
+        ///
+        /// A manager is a resumed conversation, not a resident process, so
+        /// "interrupt the manager" means exactly this: something has to notice
+        /// the answer and resume a session whose turn has already ended. The
+        /// spawn itself needs a supervisor a test box has not got, so this
+        /// asserts the tick got as far as attempting it, the same way every
+        /// other spawning test here does.
+        #[tokio::test]
+        async fn an_overruled_decision_reaches_the_manager_that_recorded_it() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let manager = a_manager(&store);
+            let card = store
+                .raise_card(NewCard {
+                    conversation_id: manager.clone(),
+                    kind: Some(crate::cards::CardKind::Decision),
+                    title: "how to split the cards fix".into(),
+                    options: vec!["1 engineer".into(), "2 engineers".into()],
+                    chosen: Some("1 engineer".into()),
+                    ..NewCard::default()
+                })
+                .unwrap();
+            store
+                .answer_card(card.id, Some("2 engineers"), None)
+                .unwrap();
+
+            // What is waiting, before anything is spoken. The manager has to be
+            // able to tell it was overruled from the text alone: it is resumed
+            // for this turn and has nothing else to compare against.
+            let waiting = store
+                .plan_injection(&manager, false)
+                .unwrap()
+                .expect("the manager must have a turn waiting");
+            assert!(
+                waiting.prompt.contains("you chose: 1 engineer")
+                    && waiting.prompt.contains("chosen: 2 engineers")
+                    && waiting.prompt.contains("Reljod overruled you"),
+                "the manager cannot tell being overruled from being agreed with: {}",
+                waiting.prompt
+            );
+
+            let report = ticker_over(&store).tick_deliveries(1).await.unwrap();
+            assert_eq!(report.claimed, 1, "nothing looked at the manager's queue");
+            assert_eq!(
+                report.started + report.failed,
+                1,
+                "a manager whose last run has finished was never resumed, so the answer sat \
+                 queued for ever"
+            );
+            assert_eq!(report.held, 0);
+        }
+
         /// The guard the lesson of this build asks for: unit tests on an
         /// uncalled function stay green for ever, so this one calls the tick
         /// the daemon actually runs. Remove the `tick_deliveries` line from
@@ -6373,6 +6474,132 @@ mod tests {
             assert!(
                 injection.prompt.contains("call `reply`"),
                 "the chat has to be told how to answer it: {}",
+                injection.prompt
+            );
+        }
+
+        // ---- the way back to a project's manager -------------------------
+
+        /// A project whose manager has run, and one work it opened with an
+        /// engineer on it. This is what every instruction about a repository
+        /// leaves behind now that `open_work` is refused from the main chat.
+        fn a_manager_and_an_engineer() -> (Arc<Store>, String, String, String) {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let dir = std::env::temp_dir().join(format!("jod-mgr-mail-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let project = store
+                .add_project(crate::projects::NewProject::at(&dir).named("acme"))
+                .unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            store
+                .record_session(&manager, HarnessKind::ClaudeCode, "ses-manager")
+                .unwrap();
+
+            let work = store
+                .create_work_in("split the cards fix", Some(&project.id))
+                .unwrap();
+            let engineer = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap();
+            store
+                .set_conversation_title(&engineer.id, "cards engineer")
+                .unwrap();
+            let session = store
+                .attach_conversation(
+                    &engineer.id,
+                    &work.id,
+                    Some(&manager),
+                    crate::works::Origin::Agent,
+                )
+                .unwrap();
+            (store, manager, work.id, session.name)
+        }
+
+        /// **What a manager could not do at all.**
+        ///
+        /// A manager owns its engineers and is the only participant that can
+        /// redirect one, and it was in no addressing scope: `caller_for_run`
+        /// found nothing for it, so `roster`, `send_message` and `reply` all
+        /// refused it with "not a member of any team or work". It could start an
+        /// engineer and stop it and could not say one word to one already
+        /// running — which is the mechanism an answered card has to cascade
+        /// through.
+        #[test]
+        fn a_manager_is_on_the_roster_of_the_work_it_opened() {
+            let (store, manager, work, engineer) = a_manager_and_an_engineer();
+
+            let seen = store
+                .roster(Scope::Work, &work, &engineer)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.name)
+                .collect::<Vec<_>>();
+            assert!(
+                seen.contains(&crate::team::MANAGER.to_string()),
+                "an engineer cannot address the manager it reports to: {seen:?}"
+            );
+
+            // And the other direction, which is the one the cascade needs: the
+            // manager speaks as `manager` rather than as nobody.
+            let run = "mgr-run";
+            store
+                .save_run(&crate::store::StoredRun {
+                    id: run.into(),
+                    name: "acme-manager".into(),
+                    harness: "claude_code".into(),
+                    status: "running".into(),
+                    cwd: "/tmp".into(),
+                    session_id: Some("ses-manager".into()),
+                    pid: None,
+                    pgid: None,
+                    created_at_ms: 1,
+                    summary: serde_json::Value::Null,
+                })
+                .unwrap();
+            store.append_prompt(&manager, run, "split it").unwrap();
+            let caller = store
+                .caller_for_run(run)
+                .unwrap()
+                .expect("the manager has to be somebody on the bus");
+            assert_eq!(caller.name, crate::team::MANAGER);
+            assert_eq!(caller.team, work);
+        }
+
+        /// The manager is answered, never woken, for the same reason the main
+        /// chat is: it is one standing conversation that has to keep
+        /// accumulating. Waking it the way a teammate is woken would spawn a run
+        /// in a *new* conversation, and the transcript that remembers what it
+        /// planned would never show the message.
+        #[tokio::test]
+        async fn an_engineers_report_becomes_a_turn_of_the_managers() {
+            let (store, manager, work, engineer) = a_manager_and_an_engineer();
+            store
+                .post(
+                    &Post::new(Scope::Work, &work, &engineer, "the tests are green")
+                        .to(crate::team::MANAGER),
+                )
+                .unwrap();
+
+            let report = ticker_over(&store).tick_mail(1_000_000).await.unwrap();
+            assert_eq!(report.claimed, 1);
+            assert_eq!(report.started, 1, "the report never reached the manager");
+
+            assert!(
+                store.runs(10).unwrap().is_empty(),
+                "handing mail to the manager spawned a fresh session beside it"
+            );
+            let injection = store
+                .plan_injection(&manager, false)
+                .unwrap()
+                .expect("the manager must have a turn waiting");
+            assert!(
+                injection.prompt.contains("the tests are green"),
+                "{}",
                 injection.prompt
             );
         }

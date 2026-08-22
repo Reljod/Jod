@@ -722,6 +722,43 @@ pub fn is_main(name: &str) -> bool {
 /// What the roster calls the main chat, so a run knows what it is answering.
 const MAIN_ROLE: &str = "the orchestrator that started this — report your answer here";
 
+/// What a project's manager is called on the bus.
+///
+/// A **reserved name**, for the same reason [`MAIN`] and [`HUMAN`] are, and it
+/// closes the same hole one layer down. Works used to be opened by the main
+/// chat, so `main` and the person were the whole return leg and a work's roster
+/// needed nobody else. They are not opened by main any more: `open_work` is
+/// refused from the main chat outright, and a project's manager is what opens
+/// them.
+///
+/// Nothing gave the manager a row, so it was in no scope at all and every bus
+/// tool answered it exactly the way they answered a delegated run before
+/// [`MAIN`] existed — `run ... is not a member of any team or work, so there is
+/// nobody it could be writing to`. A manager could start engineers and stop
+/// them and could not say one word to one that was already running. Its
+/// engineers had the mirror image of the problem: a roster with `main` and
+/// `reljod` on it and no way to address the manager they report to.
+///
+/// Reserved rather than merely conventional because the reservation is what
+/// makes the address mean something. Sender identity comes from the run
+/// ([`Store::caller_for_run`]) and cannot be argued with, so the only way to
+/// speak as a manager would be to *be called* `manager` — which is why
+/// [`Store::join_scope`] and [`Store::enrol_session`] both refuse the name.
+pub const MANAGER: &str = "manager";
+
+/// Whether this name is a project manager's.
+///
+/// Case-insensitive, like [`is_main`] and [`is_human`]: a name capitalised in a
+/// sentence must still reach the manager rather than nobody.
+pub fn is_manager(name: &str) -> bool {
+    name.eq_ignore_ascii_case(MANAGER)
+}
+
+/// What the roster calls a project's manager, so an engineer knows who it is
+/// reporting to and why that is not the same address as `main`.
+const MANAGER_ROLE: &str =
+    "the project manager that planned this work — report your task and ask about it here";
+
 /// What the roster calls a run started by `delegate`, on its own return channel.
 const DELEGATED_ROLE: &str = "the run the orchestrator delegated this to";
 
@@ -1201,6 +1238,16 @@ impl Store {
                 "`{name}` is the main chat's name on the bus and cannot be joined as an agent"
             )));
         }
+        // And once more, for the address an engineer reports its task to.
+        // [`insert_manager_member_in`] is the only way that row is written, and
+        // it writes the project's own manager conversation onto it — a session
+        // that could join under the name would collect the reports of every
+        // engineer on the work.
+        if is_manager(name) {
+            return Err(JodError::Invalid(format!(
+                "`{name}` is a project manager's name on the bus and cannot be joined as an agent"
+            )));
+        }
         self.write(|tx| {
             tx.execute(
                 "INSERT INTO team_members
@@ -1345,6 +1392,73 @@ impl Store {
         Ok(on_row.flatten().as_deref() == Some(pinned.as_str()))
     }
 
+    /// The conversation this member is *answered on*, rather than woken as.
+    ///
+    /// Two members of a roster are not sessions that get spawned for a turn and
+    /// thrown away: the main chat and a project's manager. Both are standing
+    /// conversations with a stable id that outlives every run, both have to keep
+    /// accumulating one transcript, and both are resumed by
+    /// [`crate::ticker::Ticker::tick_deliveries`] rather than started fresh.
+    /// Waking either the ordinary way starts a run in a *new* conversation, and
+    /// the answer never appears in the thread anybody is reading.
+    ///
+    /// `Some(conversation)` means "hand this member's mail to that
+    /// conversation's queue"; `None` means the ordinary wake. Nothing here says
+    /// whether the conversation can be resumed *yet* — that is
+    /// [`Store::conversation_is_resumable`], kept separate so "who is this" and
+    /// "can it be spoken to" stay two questions with two answers.
+    ///
+    /// **Identity comes from the row, never from the spelling of the name.**
+    /// Both names are reserved from now on, but a database written before they
+    /// were is not: `jod team join crew main` was once legal, and a work session
+    /// titled "Manager" once slugged to `manager`. Deciding from the name alone
+    /// would divert an ordinary teammate's mail to a conversation it has nothing
+    /// to do with, and that teammate would simply stop receiving anything — the
+    /// kind of fault that surfaces weeks later as an unexplained silence. So the
+    /// main chat is confirmed against the pinned conversation, and a manager
+    /// against the conversation some project actually names as its manager.
+    pub fn standing_conversation_for_member(
+        &self,
+        scope: Scope,
+        team: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        if is_main(name) {
+            if !self.is_main_chat_member(scope, team, name)? {
+                return Ok(None);
+            }
+            return self.pinned_conversation();
+        }
+        if !is_manager(name) {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT m.conversation_id FROM team_members m
+                   JOIN projects p ON p.manager_conversation_id = m.conversation_id
+                  WHERE m.scope = ?1 AND m.team = ?2 AND m.name = ?3",
+                params![scope.as_str(), team, name],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Whether resuming this conversation would put an agent back where it was.
+    ///
+    /// True once it holds a harness session id. Before that — a conversation
+    /// that exists but has never run — anything said to it would have to start
+    /// a fresh context, and an agent woken with no memory of what it set in
+    /// motion is worse than one that has not been woken yet. The same judgement
+    /// [`wake_order`] makes about a member with no session, asked about the one
+    /// kind of member whose session lives on its conversation instead.
+    pub fn conversation_is_resumable(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conversation(id)?
+            .and_then(|c| c.session_id)
+            .is_some_and(|s| !s.trim().is_empty()))
+    }
+
     /// Whether mail to the main chat would actually start a turn.
     ///
     /// True once the chat holds a harness session to resume. Before that — a
@@ -1355,10 +1469,7 @@ impl Store {
         let Some(id) = self.pinned_conversation()? else {
             return Ok(false);
         };
-        Ok(self
-            .conversation(&id)?
-            .and_then(|c| c.session_id)
-            .is_some())
+        self.conversation_is_resumable(&id)
     }
 
     /// Move everything addressed to the main chat onto its delivery queue, and
@@ -1557,9 +1668,14 @@ impl Store {
         // The orchestrator's name is taken for the same reason and by the same
         // rule: a session titled "main" would otherwise slug to `main` and be
         // indistinguishable from the chat that opened the work.
+        //
+        // A manager's is taken on the same rule and for the sharper version of
+        // the reason: an engineer is told to report its task to `manager`, so a
+        // sibling session titled "Manager" would collect the whole work's
+        // reports and the manager would hear nothing and see nothing wrong.
         let mut name = base.clone();
         let mut n = 2;
-        while taken.contains(&name) || is_human(&name) || is_main(&name) {
+        while taken.contains(&name) || is_human(&name) || is_main(&name) || is_manager(&name) {
             name = format!("{base}-{n}");
             n += 1;
         }
@@ -1626,31 +1742,30 @@ impl Store {
     /// not need a tenth to say the same thing.
     pub fn roster(&self, scope: Scope, team: &str, asking: &str) -> Result<Vec<Addressee>> {
         let members = self.members_in(scope, team)?;
-        // Asked once for the whole roster rather than per member: the main
-        // chat's row holds no `session_id` of its own, because the thing that
-        // gets resumed is the pinned conversation and that is where the session
-        // id lives. Copying it onto the member row would be a second copy of a
-        // value that changes on every turn.
-        let main_resumable = self.main_chat_is_resumable().unwrap_or(false);
-        // And once for whether the `main` on *this* roster is the chat at all.
-        // A teammate named `main` on an older database is an ordinary member
-        // and is described as one.
-        let main_is_the_chat = self.is_main_chat_member(scope, team, MAIN)?;
         let mut out = Vec::with_capacity(members.len());
         for m in members.into_iter().filter(|m| m.name != asking) {
             let waiting = self.team_unread(team, &m.name)?.len();
             let human = is_human(&m.name);
-            let main = is_main(&m.name) && main_is_the_chat;
+            // The main chat and a project's manager hold no `session_id` of
+            // their own: what gets resumed for either is a standing
+            // conversation, and that is where the session id lives. Copying it
+            // onto the member row would be a second copy of a value that
+            // changes on every turn — so the question is asked of the
+            // conversation instead. `None` is every ordinary member, including
+            // a teammate that an older database happens to call `main` or
+            // `manager`.
+            let standing = self.standing_conversation_for_member(scope, team, &m.name)?;
             out.push(Addressee {
                 idle: m.status == MemberStatus::Ready,
                 // A person is never "woken". False here says the same word to
                 // an agent as it does about a stuck teammate, which is why
                 // `human` sits beside it: one of them is waiting to be read,
                 // the other cannot be reached at all.
-                can_be_woken: if main {
-                    main_resumable
-                } else {
-                    !human && m.session_id.is_some()
+                can_be_woken: match &standing {
+                    Some(conversation) => {
+                        self.conversation_is_resumable(conversation).unwrap_or(false)
+                    }
+                    None => !human && m.session_id.is_some(),
                 },
                 name: m.name,
                 role: m.role,
@@ -2004,6 +2119,47 @@ pub(crate) fn insert_main_member_in(
             MAIN,
             harness.id(),
             MAIN_ROLE,
+            at_ms,
+            scope.as_str(),
+            conversation_id
+        ],
+    )?;
+    Ok(())
+}
+
+/// Write a project manager's member row.
+///
+/// The counterpart to [`insert_main_member_in`], one layer down, and it takes a
+/// transaction for the same reason: [`crate::works::Store::create_work_in`]
+/// enrols it inside the transaction that opens the work, so a work never exists
+/// — even for an instant — whose engineers could be told to report to a manager
+/// the roster does not have.
+///
+/// The conversation on the row is the project's own manager conversation, which
+/// is what makes the address mean something: mail for `manager` ends up on that
+/// conversation's delivery queue and `tick_deliveries` resumes it. `session_id`
+/// and `agent_id` stay empty, exactly as they do for the main chat — the
+/// session to resume belongs to the conversation and changes every turn, and a
+/// copy here would be a second value free to disagree with the first.
+pub(crate) fn insert_manager_member_in(
+    tx: &rusqlite::Transaction,
+    scope: Scope,
+    team: &str,
+    conversation_id: &str,
+    harness: HarnessKind,
+    at_ms: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO team_members
+           (team, name, harness, role, status, joined_at_ms, scope, conversation_id)
+         VALUES (?1, ?2, ?3, ?4, 'ready', ?5, ?6, ?7)
+         ON CONFLICT(team, name) DO UPDATE SET
+           harness = ?3, role = ?4, scope = ?6, conversation_id = ?7",
+        params![
+            team,
+            MANAGER,
+            harness.id(),
+            MANAGER_ROLE,
             at_ms,
             scope.as_str(),
             conversation_id
@@ -3921,12 +4077,18 @@ mod tests {
         assert_eq!(left, stranger, "a bus off the chain is not moved");
     }
 
-    /// The two reserved names are refused on both join paths. The gap was real:
+    /// The reserved names are refused on both join paths. The gap was real:
     /// `jod team join` calls [`Store::join_team`], which had neither guard.
+    ///
+    /// `manager` joined them when a project's manager became a member of the
+    /// works it opens. It is the reservation that matters most of the three,
+    /// because an engineer is told to report its task to `manager`: a session
+    /// that could take the name would collect the reports of every engineer on
+    /// the work, and the manager would hear nothing and see nothing wrong.
     #[test]
-    fn neither_reserved_name_can_be_joined_from_the_command_line() {
+    fn no_reserved_name_can_be_joined_from_the_command_line() {
         let s = Store::in_memory().unwrap();
-        for name in ["main", "Main", "reljod", "Reljod"] {
+        for name in ["main", "Main", "reljod", "Reljod", "manager", "Manager"] {
             assert!(
                 matches!(
                     s.join_team("crew", name, HarnessKind::ClaudeCode, "impostor"),
@@ -3938,6 +4100,55 @@ mod tests {
         assert!(s
             .join_team("crew", "scout", HarnessKind::ClaudeCode, "research")
             .is_ok());
+    }
+
+    /// A teammate that an older database happens to call `manager` is an
+    /// ordinary member and keeps its own mail.
+    ///
+    /// The same protection `main` already had, and it matters for the same
+    /// reason: diverting a teammate's mail to a conversation it has nothing to
+    /// do with does not fail, it goes quiet, and the silence surfaces weeks
+    /// later. So identity comes from the row — a member whose conversation some
+    /// project actually names as its manager — and never from the spelling.
+    #[test]
+    fn a_teammate_named_manager_is_not_mistaken_for_a_project_manager() {
+        let s = Store::in_memory().unwrap();
+        // Written straight in, because `join_scope` now refuses the name. This
+        // is exactly the row a database written before the reservation holds.
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO team_members
+                   (team, name, harness, role, status, joined_at_ms, scope)
+                 VALUES ('crew', 'manager', 'claude_code', 'old hand', 'ready', 1, 'team')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            s.standing_conversation_for_member(Scope::Team, "crew", "manager")
+                .unwrap(),
+            None,
+            "an ordinary teammate's mail was about to be handed to somebody else's transcript"
+        );
+    }
+
+    /// A manager conversation that exists but has never run has no session to
+    /// resume, so nothing is handed to it and its mail stays visible on the bus.
+    /// The same judgement `wake_order` makes for a member with no session, and
+    /// the same one the main chat gets below.
+    #[test]
+    fn a_conversation_that_has_never_run_is_not_resumable() {
+        let s = Store::in_memory().unwrap();
+        let c = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        assert!(!s.conversation_is_resumable(&c.id).unwrap());
+
+        s.record_session(&c.id, HarnessKind::ClaudeCode, "ses-1")
+            .unwrap();
+        assert!(s.conversation_is_resumable(&c.id).unwrap());
     }
 
     /// A pinned chat that exists but has never run has no session to resume.
