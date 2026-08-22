@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Thirty-five changes, each with a test that fails without it. Driven by running the
+Thirty-six changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -103,11 +103,11 @@ and then re-run end to end on an empty install.
   silent move when typed inside a manager. The promise was corrected rather than
   the behaviour, because watching the answer is the point of the command.
 
-**One fault, four times over: when a conversation is superseded, what points at it is left behind.**
+**One fault, six times over: when a conversation is superseded, what points at it is left behind.**
 
 Main compacts itself when its context fills. `continue_as_new` opens a fresh
 conversation and moves the pin onto it — correctly; the alternative strands the
-summary. Four other things named the old conversation and none of them moved.
+summary. Five other things named the old conversation and none of them moved.
 
 | What pointed at it | What broke |
 |---|---|
@@ -115,6 +115,8 @@ summary. Four other things named the old conversation and none of them moved.
 | `team_members.conversation_id` | mail to `main` stranded for ever |
 | `projects.manager_conversation_id` | a manager's harness switch silently undone |
 | `conversations.parent_conversation_id` | **Reljod's rail emptied** |
+| `pending_deliveries.conversation_id` | an answer he had given was owed to a dead thread |
+| `cards.conversation_id` | **a question put to him dropped off the rail** |
 
 The last one is the worst, and it **undid a fix made earlier in this same
 pass**. Hanging a manager under main is what makes its answers reach the rail;
@@ -123,9 +125,22 @@ around it. Observed an hour later as a fleet reading `alpha [3 cards]` and
 `gamma [8 cards]` beside a rail reading "nothing waiting — no agent has asked
 anything". After the fix and its backfill, the same store read `rail · 14 open`.
 
-All four now move in the one transaction that moves the pin. Migrations `0025`
-and `0026` repair the stores that have already compacted, which is every store
-that has been up long enough.
+All six now move in the one transaction that moves the pin, and migrations
+`0025` to `0028` repair the stores that have already compacted — which is every
+store that has been up long enough.
+
+**The line the fix holds is worth stating, because it decides each case.**
+Anything still *owed* follows the chat: mail not yet delivered, an answer not
+yet injected, a question not yet answered. Anything that already *happened*
+stays where it happened: a delivered message, a settled card, the resolution
+log. Move the second kind and the record starts lying about which conversation
+did what, which is the one thing these tables exist to be honest about.
+
+The last two were found late and separately — the deliveries by auditing every
+foreign key into `conversations` after the fourth instance, and the cards by
+sitting on the rail pressing `t` and `f` and noticing the answered stack was
+empty when it should not have been. Neither would have turned up from reading
+the compaction code, because neither is *in* it.
 
 **The lesson is narrower than "test your fixes" and worth stating exactly.** Fix
 2 was verified, live, and was genuinely correct when verified. It was still
