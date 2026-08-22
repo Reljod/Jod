@@ -24,7 +24,10 @@ impl Harness for OpenCode {
         HarnessKind::OpenCode
     }
 
-    fn args(&self, req: &SpawnRequest) -> Vec<ArgPart> {
+    /// No store is read here: this adapter builds its whole command line
+    /// from the request. The parameter is on the trait for Claude Code,
+    /// which has standing approval grants to put in a settings document.
+    fn args(&self, req: &SpawnRequest, _store: Option<&crate::store::Store>) -> Vec<ArgPart> {
         let mut args = vec![
             ArgPart::lit("run"),
             ArgPart::lit("--format"),
@@ -336,7 +339,7 @@ mod tests {
     fn an_effort_level_reaches_opencode_as_a_variant() {
         let mut r = req(PermissionPolicy::Ask, None);
         r.effort = Some(Effort::High);
-        let args = lits(&OpenCode::default().args(&r));
+        let args = lits(&OpenCode::default().args(&r, None));
         let at = args
             .iter()
             .position(|a| a == "--variant")
@@ -352,7 +355,7 @@ mod tests {
     fn the_variant_flag_leaves_the_thinking_boolean_alone() {
         let mut r = req(PermissionPolicy::Ask, None);
         r.effort = Some(Effort::Low);
-        let args = lits(&OpenCode::default().args(&r));
+        let args = lits(&OpenCode::default().args(&r, None));
         assert_eq!(
             args.iter().filter(|a| *a == "--thinking").count(),
             1,
@@ -371,12 +374,12 @@ mod tests {
     #[test]
     fn no_effort_level_means_no_variant_flag_and_no_other_change() {
         let plain = req(PermissionPolicy::Ask, Some("gpt-5"));
-        let args = lits(&OpenCode::default().args(&plain));
+        let args = lits(&OpenCode::default().args(&plain, None));
         assert!(!args.iter().any(|a| a == "--variant"));
 
         let mut tagged = plain.clone();
         tagged.role = Some(Role::Scratch);
-        assert_eq!(lits(&OpenCode::default().args(&tagged)), args);
+        assert_eq!(lits(&OpenCode::default().args(&tagged, None)), args);
     }
 
     fn lits(args: &[ArgPart]) -> Vec<String> {
@@ -390,7 +393,7 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_last_argument() {
-        let a = OpenCode::default().args(&req(PermissionPolicy::Ask, None));
+        let a = OpenCode::default().args(&req(PermissionPolicy::Ask, None), None);
         assert_eq!(a.last(), Some(&ArgPart::Prompt));
         assert!(a.contains(&ArgPart::lit("run")));
         assert!(a.contains(&ArgPart::lit("json")));
@@ -405,7 +408,7 @@ mod tests {
     fn a_command_is_named_by_the_flag_that_actually_expands_it() {
         let mut r = req(PermissionPolicy::Ask, None);
         r.command = Some("deploy".into());
-        let args = OpenCode::default().args(&r);
+        let args = OpenCode::default().args(&r, None);
         let flat: Vec<String> = args
             .iter()
             .map(|a| match a {
@@ -429,7 +432,7 @@ mod tests {
     /// be trying to resolve a command that does not exist.
     #[test]
     fn a_plain_prompt_carries_no_command_flag() {
-        let args = OpenCode::default().args(&req(PermissionPolicy::Ask, None));
+        let args = OpenCode::default().args(&req(PermissionPolicy::Ask, None), None);
         assert!(!args.contains(&ArgPart::lit("--command")));
     }
 
@@ -445,7 +448,7 @@ mod tests {
         let mut r = req(PermissionPolicy::Ask, None);
         r.roots = vec![PathBuf::from("/work/one"), PathBuf::from("/work/two")];
         let args: Vec<String> = OpenCode::default()
-            .args(&r)
+            .args(&r, None)
             .iter()
             .map(|a| match a {
                 ArgPart::Literal(s) => s.clone(),
@@ -467,7 +470,7 @@ mod tests {
 
     #[test]
     fn the_working_directory_is_passed_via_dir() {
-        let a = OpenCode::default().args(&req(PermissionPolicy::Ask, None));
+        let a = OpenCode::default().args(&req(PermissionPolicy::Ask, None), None);
         let i = a.iter().position(|x| *x == ArgPart::lit("--dir")).unwrap();
         assert_eq!(a[i + 1], ArgPart::lit("/work"));
     }
@@ -479,7 +482,7 @@ mod tests {
     /// switching between nothing and nothing.
     #[test]
     fn reasoning_is_requested_so_there_is_something_to_show() {
-        let a = OpenCode::default().args(&req(PermissionPolicy::Bypass, None));
+        let a = OpenCode::default().args(&req(PermissionPolicy::Bypass, None), None);
         assert!(a.contains(&ArgPart::lit("--thinking")));
     }
 
@@ -490,7 +493,7 @@ mod tests {
         for policy in PermissionPolicy::ALL {
             assert!(
                 OpenCode::default()
-                    .args(&req(policy, None))
+                    .args(&req(policy, None), None)
                     .contains(&ArgPart::lit("--thinking")),
                 "{policy:?} would record no reasoning"
             );
@@ -504,13 +507,13 @@ mod tests {
             PermissionPolicy::Ask,
             PermissionPolicy::AcceptEdits,
         ] {
-            let a = OpenCode::default().args(&req(policy, None));
+            let a = OpenCode::default().args(&req(policy, None), None);
             assert!(
                 !a.contains(&ArgPart::lit("--auto")),
                 "{policy:?} must not auto-approve"
             );
         }
-        let a = OpenCode::default().args(&req(PermissionPolicy::Bypass, None));
+        let a = OpenCode::default().args(&req(PermissionPolicy::Bypass, None), None);
         assert!(a.contains(&ArgPart::lit("--auto")));
     }
 

@@ -45,7 +45,10 @@ impl Harness for Agy {
         HarnessKind::Agy
     }
 
-    fn args(&self, req: &SpawnRequest) -> Vec<ArgPart> {
+    /// No store is read here: this adapter builds its whole command line
+    /// from the request. The parameter is on the trait for Claude Code,
+    /// which has standing approval grants to put in a settings document.
+    fn args(&self, req: &SpawnRequest, _store: Option<&crate::store::Store>) -> Vec<ArgPart> {
         let mut args = vec![
             ArgPart::lit("--print"),
             ArgPart::Prompt,
@@ -397,7 +400,7 @@ mod tests {
     fn the_working_directory_is_added_to_the_workspace() {
         let mut r = req();
         r.cwd = std::path::PathBuf::from("/work/repo");
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         let at = args
             .iter()
             .position(|a| a == "--add-dir")
@@ -418,7 +421,7 @@ mod tests {
             std::path::PathBuf::from("/work/one"),
             std::path::PathBuf::from("/work/two"),
         ];
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         let granted: Vec<&String> = args
             .iter()
             .enumerate()
@@ -440,7 +443,7 @@ mod tests {
     fn a_request_with_no_roots_still_grants_the_working_directory() {
         let mut r = req();
         r.cwd = std::path::PathBuf::from("/work/repo");
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         let granted: Vec<&String> = args
             .iter()
             .enumerate()
@@ -465,7 +468,7 @@ mod tests {
     fn a_command_rides_in_the_prompt_untouched() {
         let mut r = req();
         r.prompt = "/planning now".into();
-        let args = Agy::default().args(&r);
+        let args = Agy::default().args(&r, None);
         assert!(args.contains(&ArgPart::Prompt), "the prompt is a placeholder");
         let flat = lits(&args);
         assert!(!flat.iter().any(|a| a == "--command"));
@@ -496,7 +499,7 @@ mod tests {
     fn an_effort_level_reaches_agy_as_its_own_flag() {
         let mut r = req();
         r.effort = Some(Effort::High);
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         let at = args
             .iter()
             .position(|a| a == "--effort")
@@ -513,7 +516,7 @@ mod tests {
         for level in [Effort::XHigh, Effort::Max] {
             let mut r = req();
             r.effort = Some(level);
-            let args = lits(&Agy::default().args(&r));
+            let args = lits(&Agy::default().args(&r, None));
             assert!(
                 !args.iter().any(|a| a == "--effort"),
                 "{level:?} reached AGY, which cannot spell it: {args:?}"
@@ -526,12 +529,12 @@ mod tests {
     #[test]
     fn no_effort_level_means_no_effort_flag_and_no_other_change() {
         let plain = req();
-        let args = lits(&Agy::default().args(&plain));
+        let args = lits(&Agy::default().args(&plain, None));
         assert!(!args.iter().any(|a| a == "--effort"));
 
         let mut tagged = plain.clone();
         tagged.role = Some(Role::Engineer);
-        assert_eq!(lits(&Agy::default().args(&tagged)), args);
+        assert_eq!(lits(&Agy::default().args(&tagged, None)), args);
     }
 
     fn lits(args: &[ArgPart]) -> Vec<String> {
@@ -545,21 +548,21 @@ mod tests {
 
     #[test]
     fn the_prompt_is_a_placeholder_never_an_inlined_literal() {
-        let args = Agy::default().args(&req());
+        let args = Agy::default().args(&req(), None);
         assert!(args.contains(&ArgPart::Prompt));
         assert!(lits(&args).contains(&"--print".to_string()));
     }
 
     #[test]
     fn streaming_json_is_always_requested_or_nothing_could_be_parsed() {
-        let args = lits(&Agy::default().args(&req()));
+        let args = lits(&Agy::default().args(&req(), None));
         let i = args.iter().position(|a| a == "--output-format").unwrap();
         assert_eq!(args[i + 1], "stream-json");
     }
 
     #[test]
     fn the_default_permission_adds_no_bypass_flag() {
-        let args = lits(&Agy::default().args(&req()));
+        let args = lits(&Agy::default().args(&req(), None));
         assert!(!args.iter().any(|a| a.contains("dangerously")));
     }
 
@@ -567,7 +570,7 @@ mod tests {
     fn bypass_is_the_only_policy_that_skips_permissions() {
         let mut r = req();
         r.permission = PermissionPolicy::Bypass;
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
@@ -575,7 +578,7 @@ mod tests {
     fn accept_edits_maps_to_agys_own_mode_flag() {
         let mut r = req();
         r.permission = PermissionPolicy::AcceptEdits;
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         let i = args.iter().position(|a| a == "--mode").unwrap();
         assert_eq!(args[i + 1], "accept-edits");
     }
@@ -584,14 +587,14 @@ mod tests {
     fn resuming_the_last_conversation_uses_continue() {
         let mut r = req();
         r.resume = Resume::Last;
-        assert!(lits(&Agy::default().args(&r)).contains(&"--continue".to_string()));
+        assert!(lits(&Agy::default().args(&r, None)).contains(&"--continue".to_string()));
     }
 
     #[test]
     fn resuming_a_named_conversation_passes_its_id() {
         let mut r = req();
         r.resume = Resume::Session("abc-123".into());
-        let args = lits(&Agy::default().args(&r));
+        let args = lits(&Agy::default().args(&r, None));
         let i = args.iter().position(|a| a == "--conversation").unwrap();
         assert_eq!(args[i + 1], "abc-123");
     }
@@ -744,7 +747,7 @@ mod tests {
     /// which looks like a truncated answer rather than a timeout.
     #[test]
     fn the_print_timeout_is_raised_off_agys_five_minute_default() {
-        let args = lits(&Agy::default().args(&req()));
+        let args = lits(&Agy::default().args(&req(), None));
         let i = args.iter().position(|a| a == "--print-timeout").unwrap();
         assert_eq!(args[i + 1], PRINT_TIMEOUT);
         assert_ne!(
@@ -798,7 +801,7 @@ mod tests {
         let mut h = Agy::default();
         let mut r = req();
         r.resume = Resume::Session("wanted-id".into());
-        let _ = h.args(&r);
+        let _ = h.args(&r, None);
 
         let events =
             h.parse_line(r#"{"event":"init","conversation_id":"a-different-id","init":{}}"#);
@@ -821,7 +824,7 @@ mod tests {
         let mut h = Agy::default();
         let mut r = req();
         r.resume = Resume::Session("wanted-id".into());
-        let _ = h.args(&r);
+        let _ = h.args(&r, None);
 
         let events = h.parse_line(r#"{"event":"init","conversation_id":"wanted-id","init":{}}"#);
         assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
@@ -833,7 +836,7 @@ mod tests {
         let mut h = Agy::default();
         let mut r = req();
         r.resume = Resume::Session("wanted".into());
-        let _ = h.args(&r);
+        let _ = h.args(&r, None);
 
         let first = h.parse_line(r#"{"event":"init","conversation_id":"other","init":{}}"#);
         let second = h.parse_line(
@@ -859,7 +862,7 @@ mod tests {
     #[test]
     fn a_fresh_run_never_reports_a_lost_conversation() {
         let mut h = Agy::default();
-        let _ = h.args(&req());
+        let _ = h.args(&req(), None);
         let events = h.parse_line(r#"{"event":"init","conversation_id":"brand-new","init":{}}"#);
         assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
     }

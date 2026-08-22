@@ -734,7 +734,22 @@ pub trait Harness: Send {
     fn kind(&self) -> HarnessKind;
 
     /// argv after the program name.
-    fn args(&self, req: &SpawnRequest) -> Vec<ArgPart>;
+    ///
+    /// `store` is the caller's own database handle, for the one adapter that
+    /// needs to read something before it can build a flag — Claude Code reads
+    /// the standing approval grants into its settings document. It is passed in
+    /// rather than opened here because an adapter that opens its own store has
+    /// to guess which one, and the only guess available is the global
+    /// `JOD_HOME` path. That guess ran the migrations on a developer's real
+    /// `~/.jod/jod.db` every time somebody ran `cargo test`. See
+    /// `building_arguments_opens_no_database_of_its_own` in `claude.rs`.
+    ///
+    /// `None` means "there is no store here", which every adapter must treat as
+    /// "nothing to read" rather than as licence to go and find one. The runner
+    /// always has a store and always passes it, so a production run loses
+    /// nothing; the callers that pass `None` are tests asking only what the
+    /// command line looks like.
+    fn args(&self, req: &SpawnRequest, store: Option<&crate::store::Store>) -> Vec<ArgPart>;
 
     /// Whether [`SpawnRequest::system`] reaches this harness as a real system
     /// prompt rather than as text glued to the front of the user's.

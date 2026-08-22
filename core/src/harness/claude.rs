@@ -36,7 +36,7 @@ impl Harness for ClaudeCode {
         true
     }
 
-    fn args(&self, req: &SpawnRequest) -> Vec<ArgPart> {
+    fn args(&self, req: &SpawnRequest, store: Option<&crate::store::Store>) -> Vec<ArgPart> {
         let mut args = vec![
             ArgPart::lit("-p"),
             ArgPart::Prompt,
@@ -269,7 +269,7 @@ impl Harness for ClaudeCode {
         );
         let refuses_waiting = req.tools.is_some_and(|t| t.may_delegate());
         if let (Some(run_id), true) = (&req.run_id, asks || refuses_waiting) {
-            if let Ok(Some(path)) = write_settings(run_id, asks, refuses_waiting) {
+            if let Ok(Some(path)) = write_settings(store, run_id, asks, refuses_waiting) {
                 args.push(ArgPart::lit("--settings"));
                 args.push(ArgPart::lit(path.to_string_lossy()));
             }
@@ -598,6 +598,7 @@ const APPROVAL_WAIT_SECS: u64 = 60;
 /// run that behaves exactly as it did before this existed, which is the right
 /// failure: the alternative is refusing to start over a convenience.
 fn write_settings(
+    store: Option<&crate::store::Store>,
     run_id: &str,
     asks: bool,
     refuses_waiting: bool,
@@ -606,10 +607,23 @@ fn write_settings(
     // `mcp_config` makes: a daemon started from a build directory must point
     // its children at *that* binary.
     let exe = crate::paths::own_exe()?;
-    // Its own connection, opened for one read. `args()` has no store — it is
-    // handed a request, not a process — and threading one through every caller
-    // to save a read on a path taken once per spawn would be the more invasive
-    // change, not the cheaper one.
+    // The caller's store, read through rather than replaced.
+    //
+    // This used to open its own connection on `crate::paths::db_path()`, on the
+    // argument that threading a store through every caller was the more
+    // invasive change. It was the cheaper change and the wrong one: that path
+    // is the global `$JOD_HOME/jod.db`, which with `JOD_HOME` unset is the
+    // developer's real database, and `Store::open` runs `migrate()` before it
+    // returns. So `cargo test` migrated a person's live history — caught when a
+    // migration still under development turned up in it after one
+    // `cargo test --workspace` from a worktree, with no `jod` command issued
+    // and no daemon started. It happened to be a correct migration. `0003`
+    // rebuilds the `runs` table, and a wrong one there takes real history with
+    // it. There turned out to be exactly one caller in production, `runner::
+    // launch`, and it already holds the store.
+    //
+    // No store means no grants, which is the whole discipline: this function
+    // may read a database it was handed and must never go looking for one.
     //
     // A *snapshot*, and only an optimisation: these rules let the harness
     // answer without spawning a hook, while the hook itself reads the live
@@ -619,11 +633,9 @@ fn write_settings(
     // Not read at all for a mode that does not ask: a grant means nothing to
     // `auto`, which allows everything anyway, and handing one to `plan` would
     // be the way around the mode that this file has always refused to build.
-    let grants = match asks {
-        true => crate::store::Store::open(&crate::paths::db_path())
-            .and_then(|store| store.grants())
-            .unwrap_or_default(),
-        false => vec![],
+    let grants = match (asks, store) {
+        (true, Some(store)) => store.grants().unwrap_or_default(),
+        _ => vec![],
     };
     let doc = settings_doc(
         &grants,
@@ -796,7 +808,7 @@ mod tests {
     /// The argv as strings, with the prompt placeholder spelled out.
     fn flat(r: &SpawnRequest) -> Vec<String> {
         ClaudeCode::default()
-            .args(r)
+            .args(r, None)
             .iter()
             .map(|a| match a {
                 ArgPart::Literal(s) => s.clone(),
@@ -916,7 +928,7 @@ mod tests {
     fn a_command_rides_in_the_prompt_untouched() {
         let mut r = req(PermissionPolicy::Bypass, None);
         r.prompt = "/deploy now".into();
-        let args = ClaudeCode::default().args(&r);
+        let args = ClaudeCode::default().args(&r, None);
         assert!(args.contains(&ArgPart::Prompt), "the prompt is a placeholder");
         let flat = flat(&r);
         assert!(!flat.iter().any(|a| a == "--command"));
@@ -980,7 +992,7 @@ mod tests {
     fn a_granted_tool_level_reaches_the_command_line() {
         let mut r = req(PermissionPolicy::Ask, None);
         r.tools = Some(super::super::ToolAccess::ReadOnly);
-        let args = ClaudeCode::default().args(&r);
+        let args = ClaudeCode::default().args(&r, None);
 
         assert!(
             args.contains(&ArgPart::lit("--mcp-config")),
@@ -1025,7 +1037,7 @@ mod tests {
     fn an_agent_granted_nothing_is_not_allowed_jods_tools() {
         // `Plan` rather than `Ask`: this reads the read-only allowlist, which
         // is now plan mode's, not ask mode's.
-        let args = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None));
+        let args = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None), None);
         let allowed = args
             .iter()
             .filter_map(|a| match a {
@@ -1053,7 +1065,7 @@ mod tests {
         ] {
             let mut r = req(permission, None);
             r.tools = Some(super::super::ToolAccess::Orchestrate);
-            let args = ClaudeCode::default().args(&r);
+            let args = ClaudeCode::default().args(&r, None);
 
             let allowed = args
                 .iter()
@@ -1080,7 +1092,7 @@ mod tests {
     /// happens to have the browser installed.
     #[test]
     fn an_agent_granted_nothing_reaches_none_of_jods_own_tools() {
-        let args = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let args = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None), None);
         let granted: Vec<String> = args
             .iter()
             .filter_map(|a| match a {
@@ -1106,7 +1118,7 @@ mod tests {
         ] {
             let mut r = req(PermissionPolicy::Ask, None);
             r.tools = Some(access);
-            let args = ClaudeCode::default().args(&r);
+            let args = ClaudeCode::default().args(&r, None);
             let path = args
                 .iter()
                 .filter_map(|a| match a {
@@ -1121,7 +1133,7 @@ mod tests {
 
     #[test]
     fn args_always_request_streaming_json_with_verbose() {
-        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None), None);
         assert!(a.contains(&ArgPart::lit("--output-format")));
         assert!(a.contains(&ArgPart::lit("stream-json")));
         assert!(a.contains(&ArgPart::lit("--verbose")));
@@ -1134,7 +1146,7 @@ mod tests {
     /// making the frames possible in the first place is not lost.
     #[test]
     fn args_always_request_partial_messages() {
-        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None), None);
         assert!(
             a.contains(&ArgPart::lit("--include-partial-messages")),
             "without this flag a long block puts nothing on the wire until \
@@ -1145,6 +1157,115 @@ mod tests {
     /// Each policy maps to its own flags, and no two share one.
     ///
     /// The property under test — distinct policies produce distinct argv — is
+    /// **Building a command line must not open a database of its own.**
+    ///
+    /// It used to. `write_settings` read the standing grants through
+    /// `Store::open(&crate::paths::db_path())`, and that path is whatever
+    /// `JOD_HOME` says — the real `~/.jod/jod.db` when nothing says otherwise,
+    /// which is how a plain `cargo test` runs. `Store::open` migrates before it
+    /// returns, so running the test suite migrated the developer's live
+    /// database. It was caught when a migration written on a branch appeared in
+    /// the real database after one `cargo test --workspace` from a worktree,
+    /// with no `jod` command issued and no daemon started.
+    ///
+    /// The test points `JOD_HOME` at an empty scratch directory and then
+    /// insists that nothing appears in it. That is the same defect the real
+    /// database suffered, observed where it can do no harm: a `jod.db` the test
+    /// never asked for is a `jod.db` this code went looking for on its own.
+    /// Grants now arrive from the store the caller already holds, so the only
+    /// database this path can touch is one it was handed.
+    #[test]
+    fn building_arguments_opens_no_database_of_its_own() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("jod-l10-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+        let previous = std::env::var("JOD_HOME").ok();
+        std::env::set_var("JOD_HOME", &home);
+
+        // The run that takes the branch: a mode that stops to ask, and an id to
+        // write the settings document under.
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.run_id = Some("run-no-database".into());
+        let _ = ClaudeCode::default().args(&r, None);
+
+        // Read the answer before restoring the variable, so a failure here
+        // cannot leave the rest of the suite pointed at this directory.
+        let strays: Vec<String> = std::fs::read_dir(&home)
+            .expect("the scratch home")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("jod.db"))
+            .collect();
+        match previous {
+            Some(value) => std::env::set_var("JOD_HOME", value),
+            None => std::env::remove_var("JOD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert!(
+            strays.is_empty(),
+            "building a command line opened a database nobody asked for: {strays:?}. \
+             With `JOD_HOME` unset this is the developer's real ~/.jod/jod.db, and \
+             `Store::open` migrates it."
+        );
+    }
+
+    /// The other half of the same change: a grant held by the store the caller
+    /// passes in does reach the settings document.
+    ///
+    /// Without this, "opens no database of its own" could be satisfied by an
+    /// adapter that had quietly stopped reading grants at all, and every
+    /// standing approval would silently stop working. The store here is a real
+    /// one in a scratch directory, and it is the only database in the test.
+    #[test]
+    fn a_grant_in_the_store_the_caller_passes_reaches_the_settings_document() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("jod-l10-grants-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+        let previous = std::env::var("JOD_HOME").ok();
+        std::env::set_var("JOD_HOME", &home);
+
+        let store = crate::store::Store::open(&home.join("caller.db")).expect("a scratch store");
+        store.add_grant("Bash", "git init*", "").expect("a grant");
+
+        let mut r = req(PermissionPolicy::Ask, None);
+        r.run_id = Some("run-caller-store".into());
+        let args = ClaudeCode::default().args(&r, Some(&store));
+        let flat: Vec<String> = args
+            .iter()
+            .map(|a| match a {
+                ArgPart::Literal(s) => s.clone(),
+                ArgPart::Prompt => "<PROMPT>".into(),
+            })
+            .collect();
+        let at = flat.iter().position(|a| a == "--settings");
+        let doc: Option<Value> = at.map(|at| {
+            let raw = std::fs::read_to_string(&flat[at + 1]).expect("the document it named");
+            serde_json::from_str(&raw).expect("a document the harness could read")
+        });
+
+        match previous {
+            Some(value) => std::env::set_var("JOD_HOME", value),
+            None => std::env::remove_var("JOD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+
+        let doc = doc.expect("an asking run carries a settings document");
+        let allow: Vec<&str> = doc["permissions"]["allow"]
+            .as_array()
+            .expect("an allow list")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            allow,
+            vec!["Bash(git init:*)"],
+            "the grant the caller's store holds did not reach the harness"
+        );
+    }
+
     fn grant(tool: &str, pattern: &str) -> crate::approvals::Grant {
         crate::approvals::Grant {
             id: 1,
@@ -1387,7 +1508,7 @@ mod tests {
     /// that can execute is a race lost on the next release.
     #[test]
     fn planning_confines_the_run_by_mode_rather_than_by_a_list_of_names() {
-        let a = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None));
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None), None);
         let i = a
             .iter()
             .position(|p| p == &ArgPart::lit("--permission-mode"))
@@ -1407,7 +1528,7 @@ mod tests {
             PermissionPolicy::AcceptEdits,
             PermissionPolicy::Bypass,
         ] {
-            let a = ClaudeCode::default().args(&req(policy, None));
+            let a = ClaudeCode::default().args(&req(policy, None), None);
             let plan = a
                 .iter()
                 .position(|p| p == &ArgPart::lit("--permission-mode"))
@@ -1419,7 +1540,7 @@ mod tests {
 
     #[test]
     fn planning_still_grants_the_tools_that_only_read() {
-        let a = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None));
+        let a = ClaudeCode::default().args(&req(PermissionPolicy::Plan, None), None);
         let i = a
             .iter()
             .position(|p| p == &ArgPart::lit("--allowedTools"))
@@ -1446,9 +1567,9 @@ mod tests {
 
     #[test]
     fn model_is_forwarded_only_when_set() {
-        let none = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None));
+        let none = ClaudeCode::default().args(&req(PermissionPolicy::Ask, None), None);
         assert!(!none.contains(&ArgPart::lit("--model")));
-        let some = ClaudeCode::default().args(&req(PermissionPolicy::Ask, Some("haiku")));
+        let some = ClaudeCode::default().args(&req(PermissionPolicy::Ask, Some("haiku")), None);
         assert!(some.contains(&ArgPart::lit("haiku")));
     }
 

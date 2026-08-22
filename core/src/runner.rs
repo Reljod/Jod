@@ -153,7 +153,10 @@ pub async fn launch(
         harness: harness.kind(),
         db_path: store.path().ok_or(JodError::StoreRequired)?,
         program: program.to_path_buf(),
-        args: resolve_args(&harness.args(req), &prompt),
+        // The run's own store, handed to the adapter rather than left for it to
+        // find. Claude Code reads the standing grants out of it; the others
+        // ignore it. See `Harness::args`.
+        args: resolve_args(&harness.args(req, Some(store.as_ref())), &prompt),
         cwd: req.cwd.clone(),
         env: req.env.clone(),
         secrets: req.secrets.clone(),
