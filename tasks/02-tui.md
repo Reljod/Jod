@@ -389,6 +389,66 @@ and assert a card is raised naming the run.
 
 ---
 
+## T7. Two of this pass's fixes were applied in one place and not the others
+Status: **open — small, and mine** · Severity: low · Owner: —
+
+A second adversarial sweep of the finished build confirmed all seven of the late
+changes working — the palette's column bound at every width from 100 to 200, the
+collapsed catalog line, the filter count, task ages, shared-name labels on both
+screens, the webhooks naming, and the stall badge on project, work and session
+rows collapsed and expanded. It then found that two fixes from this same pass
+stopped short.
+
+**The empty-state ellipsis was applied to one screen of five.** `empty()` cuts
+its text to the pane, and memory goes through it — `nothing remembered yet —
+/remembe…` with both borders intact. Schedules (`ui.rs:4848`), goals (`:4958`),
+webhooks (`:5110`) and activity (`:5332`) each push a raw `Line::from` instead,
+so at sixty columns they clip mid-word *and eat their own right border*:
+
+```
+│  nothing scheduled yet — n makes one, /new schedule t
+│  nothing has happened yet — cron, hooks and goals wri
+```
+
+The commit that fixed memory cites this rule in its own comment. These four were
+simply not looked at. The fix is to route them through `empty()` like the fifth.
+
+**The filter count and the "nothing matches" line disagree.** The count was
+changed to include the loose pane's rows, which is right — it is what the screen
+draws. The empty-state sentence beside it still asks only whether the *tree* is
+empty, so a filter matching only loose runs produces both claims in one box:
+
+```
+│  nothing matches                        │
+│ /old▏   ▸ filter · 7 match              │
+└─────────────────────────────────────────┘
+┌ loose · 7 ──────────────────────────────┐
+```
+Reproduced with `/old`, `/agent` and `/title`. `ui.rs:3835` decides that sentence
+from `rows.is_empty()` without consulting `app.loose_rows()`.
+
+Two smaller things from the same sweep, neither mine:
+
+- **The `Ctrl-G` menu paints over the side panel** and leaves its right-hand
+  columns as orphaned fragments — the same visual fault the palette fix
+  addressed, in a sibling overlay. It is a centred modal so it may be
+  deliberate; it belongs with [T2](#t2-an-overlay-paints-over-the-keybar-and-the-status-line).
+- **The age column has two edges.** A timestamp in the future renders as `—`, so
+  clock skew is indistinguishable from a missing value; and `short_duration` has
+  no unit above hours, so three days reads `72h19m`. The second is pre-existing.
+
+The sweep also produced a fleet that spun rows while the status bar read
+`0 running`, from seeded runs with dead pids. That is the state a real box is in
+after a crash before reconciliation writes back, so it is reachable — but it was
+made with synthetic rows and has never been seen live, which is the distinction
+this file has had to draw four times tonight.
+
+Check: for the ellipsis, render each of the four screens empty at sixty columns
+and assert the right border is present; for the filter, assert the two lines
+cannot both appear.
+
+---
+
 ## T2. An overlay paints over the keybar and the status line
 Status: **open — needs a decision from Reljod** · Severity: low · Owner: —
 
