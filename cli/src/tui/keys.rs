@@ -164,7 +164,10 @@ pub const SPINE: &[Key] = &[
     k("/", "filter this list"),
     k("n", "new"),
     k("e", "edit"),
-    k("x", "delete — confirms first"),
+    // Deliberately silent about confirmation. Four screens confirm and the
+    // fleet's `x` does not — untracking a project deletes nothing — so the
+    // promise lives on the screens that keep it, not on the row they share.
+    k("x", "delete"),
     k("S", "cycle sort"),
     k("1–9", "jump to a workspace"),
     k("Esc / q", "back one level"),
@@ -266,10 +269,17 @@ pub const GLOBAL: &[Key] = &[
     k("Ctrl-C/D", "quit — twice while agents run"),
 ];
 
+/// Two of these are printed nowhere else. `Tab` cycles the permission mode —
+/// the side panel says "Tab cycles" and no keymap said what it cycled — and
+/// `@` is the only way to reach the file picker. Both sit above `/` and `?`
+/// because those two are the spine's and this screen's own verbs must not be
+/// what a narrow terminal drops.
 const CHAT: &[Key] = &[
     k("Ctrl-B", "delegate"),
     k("Ctrl-F", "fleet"),
     k("Ctrl-G", "menu"),
+    k("Tab", "cycle the permission mode"),
+    k("@", "a file from this session's folders"),
     k("/", "commands"),
     k("?", "keys"),
 ];
@@ -383,7 +393,7 @@ const MEMORY: &[Key] = &[
     k("t", "type"),
     k("e", "edit"),
     k("n", "new"),
-    k("x", "forget"),
+    k("x", "forget — confirms first"),
     k("/", "filter"),
 ];
 
@@ -402,7 +412,7 @@ const SCHEDULES: &[Key] = &[
     k("p", "pause/resume"),
     k("e", "edit"),
     k("n", "new"),
-    k("x", "delete"),
+    k("x", "delete — confirms first"),
     k("/", "filter"),
 ];
 
@@ -435,7 +445,7 @@ const HOOKS: &[Key] = &[
     k("c", "copy URL"),
     k("e", "edit"),
     k("n", "new"),
-    k("x", "delete"),
+    k("x", "delete — confirms first"),
 ];
 
 const TASKS: &[Key] = &[
@@ -444,7 +454,7 @@ const TASKS: &[Key] = &[
     k("c", "claim"),
     k("o", "open run"),
     k("n", "new"),
-    k("x", "remove"),
+    k("x", "remove — confirms first"),
     k("/", "filter"),
 ];
 

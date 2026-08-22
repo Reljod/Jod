@@ -410,6 +410,39 @@ pub fn titler_run_name(work_id: &str) -> String {
     format!("title {work_id}")
 }
 
+/// Whether a run is Jod's own housekeeping rather than somebody's agent.
+///
+/// A titler and a compaction are runs in every sense the store cares about, and
+/// neither is a thing anybody delegated. They write into no conversation, so
+/// the fleet had nowhere to hang them and put them in the pane for runs that
+/// belong to no work — where, on a real machine, they outnumbered the agents.
+/// Five of the six rows under a four-project fleet were titlers.
+///
+/// Read off the name because the name is the durable link this module already
+/// treats as a contract — see [`titler_run_name`]. Kept here beside it so the
+/// two cannot drift; a reader that guessed the shape somewhere else is exactly
+/// what that function's own comment warns against.
+///
+/// This hides them from the fleet only. `jod ls --all` still lists every run —
+/// checked, five titlers in a store the fleet showed none of — which is what it
+/// is for: when a titler is the thing going wrong, it has to be visible
+/// somewhere. Plain `jod ls` pages to the newest and says how many it held
+/// back, so an old titler is behind `--all` rather than gone.
+pub fn is_housekeeping_run(name: &str) -> bool {
+    // `title <work-id>`, and nothing else that merely starts with "title" — a
+    // work called "title the chapter headings" must not vanish off the fleet.
+    if let Some(rest) = name.strip_prefix("title ") {
+        return uuid::Uuid::parse_str(rest).is_ok();
+    }
+    name == COMPACTION_RUN_NAME
+}
+
+/// What the run that compacts a conversation is called.
+///
+/// Here rather than in the terminal that spawns it, so [`is_housekeeping_run`]
+/// and the spawn agree on one spelling instead of two.
+pub const COMPACTION_RUN_NAME: &str = "summarise to compact";
+
 /// What a titler conversation is called while it exists.
 ///
 /// It exists for seconds and is then deleted, so the title is free to carry
@@ -1189,8 +1222,8 @@ impl Store {
     pub fn work_tasks(&self, work_id: &str) -> Result<Vec<crate::team::TeamTask>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(title, id), owner, status FROM tasks
-              WHERE work_id = ?1 ORDER BY created_at_ms, id",
+            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0)
+               FROM tasks WHERE work_id = ?1 ORDER BY created_at_ms, id",
         )?;
         let rows = stmt.query_map(params![work_id], |r| {
             Ok(crate::team::TeamTask {
@@ -1198,6 +1231,7 @@ impl Store {
                 title: r.get(1)?,
                 owner: r.get(2)?,
                 status: r.get(3)?,
+                created_at_ms: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1699,6 +1733,31 @@ mod tests {
 
     fn store() -> Store {
         Store::in_memory().expect("in-memory store")
+    }
+
+    /// Housekeeping is recognised by the name this module writes, and a work
+    /// that merely talks about titles is not housekeeping.
+    ///
+    /// The narrow case is the one that matters. A prefix test alone would take
+    /// "title the chapter headings" off the fleet — a real piece of work,
+    /// silently invisible, which is a worse fault than the noise this removes.
+    #[test]
+    fn jods_own_runs_are_told_apart_from_work_that_mentions_titles() {
+        let work = uuid::Uuid::new_v4().to_string();
+        assert!(is_housekeeping_run(&titler_run_name(&work)));
+        assert!(is_housekeeping_run(COMPACTION_RUN_NAME));
+
+        assert!(
+            !is_housekeeping_run("title the chapter headings"),
+            "a work whose name starts with `title` is still a work",
+        );
+        assert!(!is_housekeeping_run("title"));
+        assert!(
+            !is_housekeeping_run("title not-a-uuid"),
+            "the id is what makes it a titler, not the word",
+        );
+        assert!(!is_housekeeping_run("summarise for claude-code"));
+        assert!(!is_housekeeping_run("port the parser"));
     }
 
     fn session(s: &Store, work: &str, parent: Option<&str>, title: &str) -> String {

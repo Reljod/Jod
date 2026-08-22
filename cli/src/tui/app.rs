@@ -555,6 +555,30 @@ pub struct App {
     /// notice without this flag would be a line a second — which is not a
     /// warning, it is the feed being destroyed.
     pub said_nothing_is_sweeping: bool,
+    /// Whether sessions are being watched for stalls and nothing is sweeping.
+    ///
+    /// The transcript notice above says it once, which is right for a feed and
+    /// wrong for the fleet: the condition lasts until somebody starts the
+    /// daemon, and the fleet is the screen where its consequence shows — every
+    /// wedged agent drawn as healthy, because the mark that would say otherwise
+    /// is never written. So the fleet reads this every tick and keeps saying
+    /// it, and a person arriving at that screen an hour later is told too.
+    pub nothing_is_sweeping: bool,
+    /// Catalogued projects whose directory is not usable, by id.
+    ///
+    /// `Project::path_trouble` looks at the disk, and `draw` is a pure function
+    /// of state, so the answer is taken on the tick and read here. Only the ids
+    /// are kept: the panel has thirty columns and prints a word, while the
+    /// sentence explaining it belongs to `jod project ls`, which has the room.
+    pub broken_projects: std::collections::HashSet<String>,
+    /// Whether Escape has put the slash-command popup away for this line.
+    ///
+    /// The popup is derived from the input rather than stored, so there was
+    /// nothing for Escape to close and it fell through to `back()` — leaving
+    /// the list up with no key that dismissed it and its own header offering
+    /// none. Cleared the moment the line changes, because the next keystroke is
+    /// a new question about what to complete.
+    pub completions_dismissed: bool,
     /// Which entry of the slash-command popup is highlighted. Meaningless when
     /// there is no popup, and clamped every time the input changes.
     pub suggestion: usize,
@@ -1014,7 +1038,12 @@ pub fn one_line(s: &str, max: usize) -> String {
 /// The screen wants a run, a runnable check and a blocked-by pair that
 /// `TeamTask` does not carry yet, so those come back empty and the screen says
 /// so — rather than the board being invisible until the store catches up.
-fn task_row_from(task: &TeamTask) -> TaskRow {
+/// `now_ms` so the age is real. It used to be hard-coded to zero, so every task
+/// the store handed over read `0s` — "just now" — however long it had been on
+/// the board. The rule this repo already states for the pinned chat's row
+/// applies here too: a row with no age has none, and `0s` is a claim that
+/// something just happened.
+fn task_row_from(task: &TeamTask, now_ms: i64) -> TaskRow {
     let state = if task.is_done() {
         TaskState::Done
     } else if task.is_claimed() {
@@ -1028,7 +1057,13 @@ fn task_row_from(task: &TeamTask) -> TaskRow {
         owner: task.owner.clone(),
         state,
         run: None,
-        age_ms: 0,
+        // Zero stands for "no age recorded", which the renderer prints as a
+        // dash. A task written by an older build has no timestamp, and
+        // inventing one would be the fault this is fixing, backwards.
+        age_ms: match task.created_at_ms {
+            0 => 0,
+            at => now_ms.saturating_sub(at).max(0),
+        },
         what: task.title.clone(),
         check: String::new(),
         blocked_by: Vec::new(),
@@ -1261,6 +1296,9 @@ impl App {
             liveness: None,
             tick: 0,
             said_nothing_is_sweeping: false,
+            nothing_is_sweeping: false,
+            broken_projects: std::collections::HashSet::new(),
+            completions_dismissed: false,
             suggestion: 0,
             team: None,
             members: Vec::new(),
@@ -1363,7 +1401,7 @@ impl App {
     /// yet — which keeps the guarantee it was added for without ever doubling
     /// the row it guarantees. The real node is preferred because it is the one
     /// carrying a conversation id, its runs, and its liveness.
-    fn forest_holds_main(&self) -> bool {
+    pub fn forest_holds_main(&self) -> bool {
         self.forest.iter().any(|n| n.kind == NodeKind::Main)
     }
 
@@ -2240,6 +2278,13 @@ impl App {
         self.fleet_rows()
             .into_iter()
             .filter(|a| !self.tree_runs.contains(&a.id))
+            // Jod's own titlers and compactions write into no conversation, so
+            // they have no node in the forest and land here — the pane for
+            // runs somebody delegated that happen to belong to no work. On a
+            // fleet with four projects on it, five of the six rows in this
+            // pane were housekeeping, and the runs it exists to show were the
+            // ones scrolled out of sight.
+            .filter(|a| !jod_core::works::is_housekeeping_run(&a.name))
             .collect()
     }
 
@@ -2314,7 +2359,10 @@ impl App {
     /// promoting tasks to a screen never *removes* the board that exists today.
     pub fn task_rows(&self) -> Vec<TaskRow> {
         let source: Vec<TaskRow> = if self.board.is_empty() {
-            self.tasks.iter().map(task_row_from).collect()
+            self.tasks
+                .iter()
+                .map(|t| task_row_from(t, self.now_ms))
+                .collect()
         } else {
             self.board.clone()
         };
@@ -2474,7 +2522,29 @@ impl App {
             Workspace::Chat => "the conversation".to_string(),
             Workspace::Fleet => {
                 if self.agents.is_empty() {
-                    return "nothing delegated yet".into();
+                    // No *runs* is not an empty fleet. A tree can hold
+                    // projects, managers and works with no process alive in
+                    // any of them — every agent finished — and "nothing
+                    // delegated yet" printed under those rows is a caption
+                    // contradicting the screen it labels.
+                    let projects = self
+                        .forest
+                        .iter()
+                        .filter(|n| n.kind == NodeKind::Project)
+                        .count();
+                    let works = self
+                        .forest
+                        .iter()
+                        .filter(|n| n.kind == NodeKind::Work)
+                        .count();
+                    if projects == 0 && works == 0 {
+                        return "nothing delegated yet".into();
+                    }
+                    return format!(
+                        "{} · {} · nothing running",
+                        plural(projects, "project"),
+                        plural(works, "work"),
+                    );
                 }
                 let failed = self.agents.iter().filter(|a| a.status == "failed").count();
                 format!(
@@ -2667,6 +2737,9 @@ impl App {
     pub fn insert(&mut self, c: char) {
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        // A changed line is a new question about what to complete, so an
+        // Escape that put the popup away does not also silence the next word.
+        self.completions_dismissed = false;
     }
 
     pub fn backspace(&mut self) {
@@ -3229,6 +3302,52 @@ impl App {
             .iter()
             .any(|n| n.id == NodeId::manager(conversation_id))
     }
+
+    /// Which conversation the composer is about to send to, in words.
+    ///
+    /// Every one of these looks the same from the chair. The banner, the
+    /// composer's prompt and the status bar are identical in the main chat and
+    /// in any manager, and the transcript is titled after the *run* being
+    /// watched — so a manager, which is entered and then sits there with no run
+    /// of its own, was titled plainly `jod`. Walk away, come back, and there is
+    /// nothing on screen that says whether the next thing typed routes across
+    /// every project or lands in one of them.
+    ///
+    /// That is worth a word in the title because the mistake it prevents is
+    /// silent: an instruction meant for main, typed into beta's manager, is not
+    /// refused — it is carried out, in beta.
+    ///
+    /// `None` when the answer would be noise: no conversation bound yet, or an
+    /// ordinary session, which the run's own name already covers.
+    pub fn where_you_are(&self) -> Option<String> {
+        let conversation = self.conversation.as_deref()?;
+        if self
+            .forest
+            .iter()
+            .any(|n| n.id == NodeId::main(conversation))
+        {
+            return Some("main".to_string());
+        }
+        if !self.is_manager_conversation(conversation) {
+            return None;
+        }
+        // Named after its project rather than "manager", because "manager" is
+        // the answer to a question nobody asked — there is one per project and
+        // which project is the whole point.
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.manager_conversation_id.as_deref() == Some(conversation))
+            .map(|p| p.name.clone());
+        Some(match project {
+            Some(name) => format!("{name} · manager"),
+            // The forest says it is a manager and the catalog does not say
+            // whose. Saying "a manager" is still worth more than saying
+            // nothing, because the thing being prevented is thinking you are
+            // in main.
+            None => "a project manager".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3281,10 +3400,80 @@ mod tests {
             stalled_for_ms: None,
             cards: 1,
             blocked: 1,
+            stalled: 0,
             colour: String::new(),
+            branch: None,
+            worktree: None,
             expanded: false,
             has_children: false,
         }
+    }
+
+    // ---- which conversation the composer is pointed at ----
+
+    /// Main and a manager are the same picture, and typing does different
+    /// things in them. An instruction meant for main, typed into beta's
+    /// manager, is not refused — it is carried out, in beta — so the screen has
+    /// to say which one is under the cursor before the Enter, not after.
+    #[test]
+    fn the_screen_says_whether_you_are_in_main_or_in_a_managers_chat() {
+        use jod_core::projects::{Project, State};
+
+        let main_node = |conversation: &str| Node {
+            id: NodeId::main(conversation),
+            parent: None,
+            kind: NodeKind::Main,
+            depth: 0,
+            label: "jod".into(),
+            summary: String::new(),
+            running: false,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            stalled: 0,
+            colour: String::new(),
+            branch: None,
+            worktree: None,
+            expanded: true,
+            has_children: false,
+        };
+
+        let mut a = app();
+        a.forest = vec![main_node("c-main"), manager_node("c-alpha")];
+        a.projects = vec![Project {
+            id: "p-alpha".into(),
+            name: "alpha".into(),
+            path: "/tmp/alpha".into(),
+            remote: None,
+            aliases: Vec::new(),
+            state: State::Active,
+            colour: String::new(),
+            notes: String::new(),
+            created_at_ms: 0,
+            last_touched_ms: 0,
+            manager_conversation_id: Some("c-alpha".into()),
+        }];
+
+        a.conversation = Some("c-main".into());
+        assert_eq!(a.where_you_are().as_deref(), Some("main"));
+
+        a.conversation = Some("c-alpha".into());
+        assert_eq!(
+            a.where_you_are().as_deref(),
+            Some("alpha · manager"),
+            "named after its project, because which project is the whole point",
+        );
+
+        // An ordinary session says nothing: the run's own name already titles
+        // the transcript, and a second label would be noise.
+        a.conversation = Some("c-someone-else".into());
+        assert_eq!(a.where_you_are(), None);
+
+        // Nothing bound yet is not "main" — saying so would be a claim about
+        // where an Enter lands that nothing has decided.
+        a.conversation = None;
+        assert_eq!(a.where_you_are(), None);
     }
 
     // ---- notices raised off the chat screen ----
@@ -3408,7 +3597,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: String::new(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }

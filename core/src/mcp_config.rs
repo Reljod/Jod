@@ -192,7 +192,7 @@ fn write_config(
     // from a build directory must point agents at *that* binary, or they get
     // whichever `jod` a shell would have found — possibly an older install,
     // possibly none.
-    let exe = std::env::current_exe()?;
+    let exe = crate::paths::own_exe()?;
 
     // The child must open the same database this process is using. Inheriting
     // the environment would work today and break the moment a daemon runs with

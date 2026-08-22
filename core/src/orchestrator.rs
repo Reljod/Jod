@@ -1481,11 +1481,37 @@ impl Store {
             crate::projects::How::Human,
             &format!("this is {}'s manager", project.name),
         )?;
+        // Hang it under the main chat, which is the edge the rail reads.
+        //
+        // Both preambles promise Reljod that a manager answers onto his rail —
+        // `ask_manager` returns "It will raise a card on your rail", and the
+        // manager is told a card "cascades up to his rail and is the only way
+        // your answer reaches him". None of that was true. Cards cascade along
+        // `parent_conversation_id` (`Store::cards_in`, `subtree_cte`), an
+        // engineer is hung under its manager by `open_work`, and the manager
+        // was hung under nothing — so the chain reached one link short of the
+        // person it exists to report to. Main's rail said "nothing waiting"
+        // while the work sat finished on a rail nobody opens.
+        //
+        // Safe to do even though everything then hangs under main, because
+        // `Jod::cascade_stop` already exempts the pinned conversation by name
+        // and says why: stopping the chat you are typing into must not stop the
+        // machine. This makes the data say what that comment already assumed.
+        let main = self.pinned_conversation()?;
         self.write(|tx| {
             tx.execute(
                 "UPDATE projects SET manager_conversation_id = ?2 WHERE id = ?1",
                 rusqlite::params![project.id, created.id],
             )?;
+            // Only when there *is* a main chat. A manager created before one
+            // exists keeps a null parent rather than pointing at nothing, and
+            // the next one created will hang correctly.
+            if let Some(main) = &main {
+                tx.execute(
+                    "UPDATE conversations SET parent_conversation_id = ?2 WHERE id = ?1",
+                    rusqlite::params![created.id, main],
+                )?;
+            }
             Ok(())
         })?;
         Ok((created.id, true))
@@ -2387,6 +2413,310 @@ mod tests {
 
             std::fs::remove_dir_all(&dir).ok();
             std::fs::remove_dir_all(format!("{dir}-2")).ok();
+        }
+
+        /// A manager's card still reaches Reljod after main compacts itself.
+        ///
+        /// Cards cascade along `parent_conversation_id`, a manager is hung
+        /// under main when it is created, and compaction opens a *fresh* main.
+        /// The edges stayed on the thread that was compacted away, so the
+        /// managers went on reporting upward into a conversation nobody opens —
+        /// which silently undid the link that makes a manager's answer reach
+        /// Reljod at all.
+        ///
+        /// Observed as a fleet showing `alpha [3 cards]` and `gamma [8 cards]`
+        /// beside a rail reading "nothing waiting — no agent has asked
+        /// anything". Nobody has to do anything for it: main compacts itself.
+        ///
+        /// Driven through `cards` rather than by reading the column, because
+        /// the column being right is not the claim — the claim is that the card
+        /// arrives.
+        #[test]
+        fn a_managers_card_still_reaches_main_after_it_compacts() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-compact", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            for turn in 0..3 {
+                s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+            }
+
+            // What happens on its own when a context fills.
+            s.continue_as_new(&main, "so far", "full").unwrap();
+            let now = s.pinned_conversation().unwrap().unwrap();
+            assert_ne!(now, main, "the pin moved, which is the premise");
+
+            s.raise_card(NewCard {
+                conversation_id: manager,
+                title: "the README edit is done".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+            let rail = s
+                .cards(&Query {
+                    subtree_of: Some(now),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert!(
+                rail.iter().any(|c| c.title == "the README edit is done"),
+                "the manager still reports to whichever conversation is main: {:?}",
+                rail.iter().map(|c| &c.title).collect::<Vec<_>>(),
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// A question still owed to Reljod follows the chat it was asked in.
+        ///
+        /// The rail shows the subtree of the conversation being viewed, and
+        /// compaction moves the pin to a fresh one. A card raised by main
+        /// itself — which is how `ask_question` reaches Reljod — stayed on the
+        /// thread that was compacted away and dropped off the rail. A blocking
+        /// question asked shortly before a compaction simply disappeared, and
+        /// main compacts itself.
+        #[test]
+        fn an_open_card_on_the_main_chat_survives_its_compaction() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+            for turn in 0..3 {
+                s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+            }
+            s.raise_card(NewCard {
+                conversation_id: main.clone(),
+                title: "which web did you mean".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+            // And one already dealt with, which is history and must stay put.
+            let answered = s
+                .raise_card(NewCard {
+                    conversation_id: main.clone(),
+                    title: "something already settled".into(),
+                    ..NewCard::default()
+                })
+                .unwrap();
+            s.answer_card(answered.id, None, Some("yes")).unwrap();
+
+            s.continue_as_new(&main, "so far", "full").unwrap();
+            let now = s.pinned_conversation().unwrap().unwrap();
+
+            let open: Vec<String> = s
+                .cards(&Query {
+                    subtree_of: Some(now),
+                    ..Query::default()
+                })
+                .unwrap()
+                .iter()
+                .map(|c| c.title.clone())
+                .collect();
+            assert!(
+                open.contains(&"which web did you mean".to_string()),
+                "the question is still owed, so it is still on the rail: {open:?}",
+            );
+
+            // The settled one stays where it happened. Moving it would rewrite
+            // which conversation actually asked and answered it.
+            let stayed: Option<String> = {
+                let conn = s.conn.lock().expect("store lock poisoned");
+                conn.query_row(
+                    "SELECT conversation_id FROM cards WHERE title = ?1",
+                    rusqlite::params!["something already settled"],
+                    |r| r.get(0),
+                )
+                .ok()
+            };
+            assert_eq!(stayed.as_deref(), Some(main.as_str()));
+        }
+
+        /// The backfill, for the consoles that have already compacted."""
+        ///
+        /// `carry_forward` moves these edges now, but main compacts itself on a
+        /// timer, so any console that has been up a while is already carrying
+        /// managers parented to a thread nobody opens — and a rail that has
+        /// been quietly empty ever since.
+        #[test]
+        fn the_backfill_reattaches_managers_left_on_an_old_main_chat() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-reattach", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            for turn in 0..3 {
+                s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+            }
+            s.continue_as_new(&main, "so far", "full").unwrap();
+            let now = s.pinned_conversation().unwrap().unwrap();
+
+            // Put it back the way the old code left it.
+            s.write(|tx| {
+                tx.execute(
+                    "UPDATE conversations SET parent_conversation_id = ?2 WHERE id = ?1",
+                    rusqlite::params![manager, main],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            s.raise_card(NewCard {
+                conversation_id: manager.clone(),
+                title: "the README edit is done".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+            let rail = |root: &str| {
+                s.cards(&Query {
+                    subtree_of: Some(root.to_string()),
+                    ..Query::default()
+                })
+                .unwrap()
+                .iter()
+                .map(|c| c.title.clone())
+                .collect::<Vec<_>>()
+            };
+            assert!(
+                rail(&now).is_empty(),
+                "the bug, reproduced: the rail is empty while the work is done",
+            );
+
+            let (_, sql) = crate::store::MIGRATIONS
+                .iter()
+                .find(|(name, _)| name.starts_with("0026"))
+                .expect("the backfill migration");
+            s.write(|tx| {
+                tx.execute_batch(sql)?;
+                Ok(())
+            })
+            .unwrap();
+
+            assert!(
+                rail(&now).contains(&"the README edit is done".to_string()),
+                "after the backfill it arrives: {:?}",
+                rail(&now),
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// A manager handed to another harness stays that project's manager.
+        ///
+        /// A manager is found through `projects.manager_conversation_id`, and
+        /// `switch_harness` compacts the thread into a *new* conversation. The
+        /// pointer was left on the old one — which still exists, so
+        /// `manager_conversation` happily returned it — and the next
+        /// `ask_manager` resumed the thread the switch had handed away, on the
+        /// harness it had been handed away from. The switch was undone without
+        /// a word and the summary sat in a conversation nobody opens again.
+        ///
+        /// Observed by switching alpha's manager to OpenCode: the console ended
+        /// up in `alpha → OpenCode` while the catalog still named the Claude
+        /// Code row.
+        #[test]
+        fn a_manager_handed_to_another_harness_is_still_the_projects_manager() {
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-switch", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            // Something to carry over; a switch refuses an empty thread.
+            for turn in 0..3 {
+                s.append_prompt(&manager, &format!("run-{turn}"), "go").unwrap();
+            }
+
+            let switched = s
+                .switch_harness(&manager, HarnessKind::OpenCode, "so far", "moving")
+                .unwrap();
+            let now = switched.conversation.id;
+            assert_ne!(now, manager, "the switch opens a new thread, as it should");
+
+            let (found, fresh) = s
+                .manager_conversation(&project.id, HarnessKind::OpenCode)
+                .unwrap();
+            assert_eq!(
+                found, now,
+                "the project has to follow its manager onto the new harness",
+            );
+            assert!(!fresh, "and must not start a third conversation");
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// The promise both preambles make, held to by the data.
+        ///
+        /// `ask_manager` tells Reljod "It will raise a card on your rail", and
+        /// the manager preamble tells the manager a card "cascades up to his
+        /// rail and is the only way your answer reaches him". Neither was true:
+        /// cards cascade along `parent_conversation_id`, and a manager was
+        /// created with none — so main's rail read "nothing waiting" while a
+        /// finished piece of work sat on a rail nobody opens.
+        ///
+        /// Driven through `cards` rather than by reading the column, because
+        /// the column being set is not the claim — the claim is that the card
+        /// arrives.
+        #[test]
+        fn a_managers_card_reaches_the_main_chats_rail() {
+            use crate::cards::{NewCard, Query};
+
+            let s = store();
+            let dir = format!("/tmp/jod-mc-{}-rail", std::process::id());
+            let project = catalogued_at(&s, &dir, "tetris");
+            let main = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+
+            let (manager, _) = s
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            s.raise_card(NewCard {
+                conversation_id: manager.clone(),
+                title: "the README edit is done".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+            let rail = s
+                .cards(&Query {
+                    subtree_of: Some(main.clone()),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert!(
+                rail.iter().any(|c| c.title == "the README edit is done"),
+                "main's rail must carry what its manager raised: {:?}",
+                rail.iter().map(|c| &c.title).collect::<Vec<_>>(),
+            );
+
+            // And the cascade stays one-way: a manager must not be handed
+            // Reljod's own questions, which would be an answer landing on the
+            // wrong agent.
+            s.raise_card(NewCard {
+                conversation_id: main,
+                title: "a question for Reljod".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+            let below = s
+                .cards(&Query {
+                    subtree_of: Some(manager),
+                    ..Query::default()
+                })
+                .unwrap();
+            assert!(
+                !below.iter().any(|c| c.title == "a question for Reljod"),
+                "the cascade runs upward only",
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
         }
 
         /// A manager knows which project it owns from the moment it exists, so

@@ -522,7 +522,9 @@ impl Summarising {
     fn label(&self) -> String {
         match self {
             Summarising::Handover(to) => format!("summarise for {}", to.id()),
-            Summarising::Compaction { .. } => "summarise to compact".to_string(),
+            Summarising::Compaction { .. } => {
+                jod_core::works::COMPACTION_RUN_NAME.to_string()
+            }
         }
     }
 }
@@ -1029,7 +1031,26 @@ async fn event_loop(
                 // panel that only refreshes when the watched agent finishes
                 // shows a fleet that stopped moving minutes ago.
                 if app.tick.is_multiple_of(4) {
-                    app.agents = list_agents(&jod).await;
+                    // Read the store back first, or the refresh below is only
+                    // ever about runs *this* process started.
+                    //
+                    // `Jod::agents` reads an in-memory map, and every agent a
+                    // project manager starts is spawned by an MCP server in
+                    // another process. `rehydrate` at launch is what put the
+                    // fleet's runs there, and nothing called it again — so a
+                    // manager's engineer appeared in the tree, which is built
+                    // from SQL, and was absent from the agent list, which is
+                    // not. `selected_agent` therefore answered `None` for a row
+                    // visibly spinning, and every run verb on it — `s`, `r`,
+                    // `a`, `d`, and the thread keys — refused with "that row is
+                    // a session with nothing running on it". There was no way
+                    // to stop an agent a manager had started.
+                    //
+                    // Cheap to repeat by design: `rehydrate` checks the map
+                    // before replaying anything, and its own comment says the
+                    // check is there because a full replay would be "ruinous on
+                    // a two-second timer". Only genuinely new runs cost.
+                    refresh_fleet(&jod, &mut app).await;
                     // Before the refresh, because the chat box may have been
                     // rebound since the last one — `/resume`, a harness switch,
                     // entering the main chat — and the rail would otherwise
@@ -1801,12 +1822,19 @@ async fn perform(
                                 .to_string(),
                         ]
                     } else {
+                        // Spelled out, as `jod root ls` already does. `ro` was
+                        // two letters nothing on the screen explained, and it
+                        // is the one fact on the line worth reading: a checkout
+                        // is read-only, which is *why* an agent's edits land in
+                        // a worktree rather than where you are looking. Someone
+                        // who does not know what `ro` means is exactly the
+                        // person that surprises.
                         roots
                             .iter()
                             .map(|r| {
                                 format!(
                                     "{}  {}  {}",
-                                    if r.writable { "rw" } else { "ro" },
+                                    if r.writable { "writable " } else { "read-only" },
                                     r.label(),
                                     r.path.display()
                                 )
@@ -1868,11 +1896,28 @@ async fn perform(
                     [only] => match store
                         .set_project_state(&only.id, jod_core::projects::State::Archived)
                     {
-                        Ok(()) => format!(
-                            "{} untracked — off the fleet with its works, and out of \
-                             inference. `jod project restore {}` puts it back",
-                            only.name, only.name
-                        ),
+                        Ok(()) => {
+                            // The undo names the path when the name is shared,
+                            // because otherwise this sentence offers a command
+                            // that refuses: two checkouts called `web` both
+                            // answer to `web`, and `jod project restore web`
+                            // cannot pick between them. A remedy that does not
+                            // run is worse than none — it reads as reversible.
+                            let shared = store
+                                .projects_by_name(&only.name)
+                                .map(|found| found.len() > 1)
+                                .unwrap_or(false);
+                            let handle = if shared {
+                                only.path.display().to_string()
+                            } else {
+                                only.name.clone()
+                            };
+                            format!(
+                                "{} untracked — off the fleet with its works, and out of \
+                                 inference. `jod project restore {handle}` puts it back",
+                                only.name
+                            )
+                        }
                         Err(e) => format!("{} not untracked: {e}", only.name),
                     },
                     [] => format!(
@@ -4252,7 +4297,12 @@ fn on_which_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
         _ => {
             app.overlay = Overlay::None;
-            if let Some(ws) = Workspace::from_letter(c) {
+            // The letter, or the digit printed beside it. Every row of this
+            // menu says "or 4" against its letter, and the digit did nothing
+            // here — it works from inside another workspace, which is the one
+            // place you are not while reading this menu. A hint printed only
+            // where it is false is worse than no hint.
+            if let Some(ws) = Workspace::from_letter(c).or_else(|| Workspace::from_digit(c)) {
                 app.go(ws);
             }
             None
@@ -5605,8 +5655,19 @@ fn on_chat_key(
 
     // While the completion popup is up it owns Tab and the arrows, and Enter
     // finishes the word rather than sending a half-typed command.
-    let suggestions = command::completions(&app.input, app);
+    let suggestions = if app.completions_dismissed {
+        Vec::new()
+    } else {
+        command::completions(&app.input, app)
+    };
     if !suggestions.is_empty() {
+        // Escape closes the popup and nothing else. It used to fall through to
+        // `back()`, which scrolls the transcript — so the list stayed up, no
+        // key dismissed it, and its own header offered none.
+        if key.code == KeyCode::Esc {
+            app.completions_dismissed = true;
+            return None;
+        }
         app.clamp_suggestion(suggestions.len());
         match key.code {
             KeyCode::Tab => {
@@ -6034,16 +6095,22 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             app::Resolved::Verbatim(raw) => {
                 app.resume = Resume::Session(raw.clone());
                 app.session = Some(raw.clone());
-                // Say when it matched nothing on screen. A typo is otherwise
-                // indistinguishable from a real resume until the harness
-                // rejects it several seconds later.
-                if app.agents.is_empty() {
-                    app.push(Entry::Notice(format!("continuing {raw}")));
+                // Say, always, that this matched nothing on screen. A typo is
+                // otherwise indistinguishable from a real resume until the
+                // harness rejects it several seconds later — and an empty fleet
+                // is the case where that is *most* likely, not least: there is
+                // nothing it could have matched. Saying only "continuing
+                // bogus-id-123" there read as success.
+                app.push(Entry::Notice(if app.agents.is_empty() {
+                    format!(
+                        "continuing {raw} — nothing is running here to match it against, \
+                         so it is passed on to the harness as typed"
+                    )
                 } else {
-                    app.push(Entry::Notice(format!(
+                    format!(
                         "continuing {raw} — not one of the agents listed, passing it on as typed"
-                    )));
-                }
+                    )
+                }));
                 return Some(Action::NewThread);
             }
             app::Resolved::NoSession(agent) => {
@@ -6169,7 +6236,14 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         Slash::Reload => return Some(Action::Reload),
         Slash::Exit => app.should_quit = true,
         Slash::NeedsArgument(usage) => {
-            app.push(Entry::Notice(format!("usage: {usage}")));
+            // A sentence, not a usage line. Every other refusal in the console
+            // explains itself in plain English — "no agent starts with x",
+            // "that row is a project, not a run" — and this one answered a
+            // person with a synopsis. The form still leads, because it is the
+            // concrete thing; what it means follows.
+            app.push(Entry::Notice(format!(
+                "{usage} — that needs an argument, so nothing was run"
+            )));
         }
         Slash::Unknown(what) => {
             app.push(Entry::Notice(format!(
@@ -6745,7 +6819,7 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     app.goals = data::goals(jod);
     app.hooks = data::hooks(jod);
     app.activity = data::activity(jod);
-    app.board = data::tasks(jod, app.team.as_deref());
+    app.board = data::tasks(jod, app.team.as_deref(), app.now_ms);
     // The forest, and then the cursor onto a row that still exists — the tree
     // reshapes on every tick as runs finish, which is the whole reason the
     // selection is an id.
@@ -6757,6 +6831,19 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // reorders the catalog, and the current project changes underneath this
     // console whenever the orchestrator resolves an instruction.
     app.projects = data::projects(jod);
+    // Which of them can still be worked in. One `stat` per catalogued project
+    // per tick, which is a handful of syscalls — and the alternative is a
+    // catalog that lists a deleted checkout exactly like a healthy one, then
+    // routes an instruction into it and fails in the supervisor with the
+    // operating system's complaint about the working directory blamed on the
+    // harness binary. `jod project ls` has said so for a while; this screen
+    // did not.
+    app.broken_projects = app
+        .projects
+        .iter()
+        .filter(|p| p.path_trouble().is_some())
+        .map(|p| p.id.clone())
+        .collect();
     app.current_project = data::current_project(jod, app.conversation.as_deref());
     // ...and that reordering is what the catalog's cursor has to survive. A row
     // untracked from the fleet, or archived by another session, leaves the
@@ -6780,7 +6867,11 @@ fn refresh_workspaces(jod: &Arc<Jod>, app: &mut App) {
     // now arms a heartbeat, so without a daemon the fleet would draw every
     // wedged agent as healthy — which is precisely the state the mark was added
     // to end, quietly restored by a daemon nobody started.
-    if !app.said_nothing_is_sweeping && data::watched_but_unswept(jod, app.now_ms) {
+    // Read every tick, not only until it has been said once: the fleet keeps
+    // showing it for as long as it is true, and a one-shot flag cannot answer
+    // "is it still true" for a screen opened later.
+    app.nothing_is_sweeping = data::watched_but_unswept(jod, app.now_ms);
+    if !app.said_nothing_is_sweeping && app.nothing_is_sweeping {
         app.said_nothing_is_sweeping = true;
         app.push(Entry::Notice(
             "nothing is watching these sessions for stalls — start `jod daemon`, \
@@ -7542,6 +7633,36 @@ fn reload(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) 
 /// way the tick does. It called none of this and drew an empty fleet on a
 /// database full of runs, which is worse than an error because it looks like
 /// an answer.
+/// Re-read the fleet, including the runs this process did not start.
+///
+/// `Jod::agents` reads an in-memory map, and every agent a project manager
+/// starts is spawned by an MCP server in **another process**. `rehydrate` at
+/// launch is what put the existing runs in that map, and nothing called it
+/// again — so a manager's engineer appeared in the tree, which is built from
+/// SQL, and was absent from the agent list, which is not.
+///
+/// The consequence was not cosmetic. `App::selected_agent` resolves a session
+/// row through that list, so it answered `None` for a row visibly spinning, and
+/// every run verb on it — `s`, `r`, `a`, `d` and the thread keys — refused with
+/// "that row is a session with nothing running on it". There was no way to stop
+/// an agent a manager had started, which is nearly every agent in the fleet.
+///
+/// Cheap to repeat by design: `rehydrate` checks the map before replaying
+/// anything, and its own comment says that check exists because a full replay
+/// would be "ruinous on a two-second timer". Only genuinely new runs cost.
+///
+/// A store that cannot be read leaves the list as it was and says so, rather
+/// than emptying a fleet that is still out there working.
+pub async fn refresh_fleet(jod: &Arc<Jod>, app: &mut App) {
+    if let Err(e) = jod.rehydrate(200).await {
+        app.push(Entry::Notice(format!(
+            "could not read the fleet back from the store: {e}"
+        )));
+        return;
+    }
+    app.agents = list_agents(jod).await;
+}
+
 pub async fn list_agents(jod: &Arc<Jod>) -> Vec<AgentLine> {
     // Read once for the whole listing rather than per row. Without a store
     // every run reads as `Nothing`, which is the honest answer: with no ledger
@@ -9238,9 +9359,17 @@ mod tests {
 
         assert_eq!(app.input, "", "the line must be consumed");
         let last = last_notice(&app);
+        // What the reader needs is the form and the reason, in that order. The
+        // assertion used to pin the word "usage", which was the one thing about
+        // the sentence worth changing — every other refusal in the console is
+        // plain English and this one answered a person with a synopsis.
         assert!(
-            last.contains("usage"),
-            "expected a usage notice, got {last}"
+            last.contains("/resume"),
+            "the notice has to name the command's form, got {last}"
+        );
+        assert!(
+            last.contains("needs an argument"),
+            "and say why nothing happened, got {last}"
         );
     }
 
@@ -9847,12 +9976,14 @@ mod tests {
                 title: "port the parser".into(),
                 owner: None,
                 status: "open".into(),
+                created_at_ms: 0,
             },
             jod_core::team::TeamTask {
                 id: "t2".into(),
                 title: "write the docs".into(),
                 owner: None,
                 status: "done".into(),
+                created_at_ms: 0,
             },
         ];
         // The cursor is an id, so it has to be placed once the rows exist —
@@ -9932,6 +10063,7 @@ mod tests {
                 title: "x".into(),
                 owner: None,
                 status: "open".into(),
+                created_at_ms: 0,
             })
             .collect()
     }
@@ -10810,6 +10942,7 @@ mod tests {
             title: "Port the parser to the new AST".into(),
             owner: None,
             status: "open".into(),
+            created_at_ms: 0,
         }];
         app.go(Workspace::Tasks);
         app
@@ -11621,6 +11754,74 @@ mod tests {
         Jod::with_store(Arc::new(store))
     }
 
+    /// The console has to see the agents it did not start.
+    ///
+    /// `Jod::agents` reads an in-memory map, and every engineer a project
+    /// manager hires is spawned by an MCP server in another process, which
+    /// never touches this one's map. `rehydrate` ran once at launch and was
+    /// never called again, so those runs were in the tree — built from SQL —
+    /// and missing from the agent list. `selected_agent` resolves a session row
+    /// through that list, so it answered `None` for a row visibly spinning and
+    /// every run verb refused: there was no way to stop an agent a manager had
+    /// started.
+    ///
+    /// The run here is written straight to the store and never announced,
+    /// because that is exactly what another process looks like from in here.
+    #[tokio::test]
+    async fn the_console_picks_up_a_run_another_process_started() {
+        let store = RealStore::in_memory().expect("an in-memory store");
+        let summary = jod_core::service::AgentSummary {
+            id: "run-elsewhere".into(),
+            name: "gamma-engineer".into(),
+            harness: HarnessKind::ClaudeCode,
+            harness_label: "claude-code".into(),
+            status: jod_core::service::AgentStatus::Running,
+            cwd: "/tmp".into(),
+            model: None,
+            permission: jod_core::PermissionPolicy::AcceptEdits,
+            pid: None,
+            pgid: None,
+            process_alive: true,
+            watch_command: String::new(),
+            created_at_ms: 1,
+            session_id: Some("a-session".into()),
+            usage: Default::default(),
+            event_count: 0,
+            last_message: None,
+        };
+        store
+            .save_run(&jod_core::store::StoredRun {
+                id: "run-elsewhere".into(),
+                name: "gamma-engineer".into(),
+                harness: "claude-code".into(),
+                status: "running".into(),
+                cwd: "/tmp".into(),
+                session_id: Some("a-session".into()),
+                pid: None,
+                pgid: None,
+                created_at_ms: 1,
+                summary: serde_json::to_value(&summary).unwrap(),
+            })
+            .expect("a run written by somebody else");
+
+        let jod = jod_with(store);
+        let mut app = app_on(HarnessKind::ClaudeCode);
+
+        // The bug, stated: asking this process what it knows finds nothing.
+        app.agents = list_agents(&jod).await;
+        assert!(
+            !app.agents.iter().any(|a| a.id == "run-elsewhere"),
+            "the premise: the map holds only what this process started",
+        );
+
+        refresh_fleet(&jod, &mut app).await;
+        assert!(
+            app.agents.iter().any(|a| a.id == "run-elsewhere"),
+            "the console has to see it to be able to stop it: {:?}",
+            app.agents.iter().map(|a| &a.id).collect::<Vec<_>>(),
+        );
+    }
+
     // ---- the model and the mode are written down ----
 
     /// A conversation with a turn in it, and a chat box bound to it.
@@ -11944,7 +12145,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         };
@@ -12313,7 +12517,10 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: true,
             },
@@ -12329,7 +12536,10 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: false,
             },
@@ -12525,7 +12735,10 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: true,
             },
@@ -12541,7 +12754,10 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: false,
             },
@@ -12606,7 +12822,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }];
@@ -12659,7 +12878,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: true,
         }];
@@ -12746,7 +12968,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: String::new(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }];
@@ -12975,6 +13200,14 @@ mod tests {
         assert!(
             !after.contains("an orchestrator, not a chat window"),
             "and the splash has to have got out of the way:\n{after}"
+        );
+        // Spelled out, as `jod root ls` already does. `ro` was two letters
+        // nothing on screen explained, and it is the one fact on the line worth
+        // reading: a checkout is read-only, which is *why* an agent's edits
+        // land in a worktree rather than where the person is looking.
+        assert!(
+            after.contains("read-only") || after.contains("writable"),
+            "the line says what it means rather than abbreviating it:\n{after}"
         );
     }
 
@@ -14672,6 +14905,55 @@ mod tests {
         let mut app = app_on(harness);
         app.discovered = vec![found("create-pr", jod_core::commands::Kind::Command, harness)];
         app
+    }
+
+    /// The digit the menu prints beside each letter is a route it answers to.
+    ///
+    /// Every row reads `schedules … or 4`, and pressing `4` there closed the
+    /// menu and did nothing. The digit works from inside another workspace,
+    /// which is the one place you are not while reading this menu — so the hint
+    /// was printed only where it was false.
+    #[test]
+    fn the_which_key_menu_answers_to_the_digits_it_prints() {
+        for ws in Workspace::MENU {
+            let Some(digit) = ws.digit() else { continue };
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.overlay = Overlay::WhichKey;
+            press(&mut app, KeyCode::Char(digit));
+            assert_eq!(
+                app.workspace, ws,
+                "`{digit}` is printed against {} and has to go there",
+                ws.menu_name(),
+            );
+            assert!(matches!(app.overlay, Overlay::None), "and closes the menu");
+        }
+    }
+
+    /// Escape puts the palette away, and typing brings it back.
+    ///
+    /// The popup is derived from the input rather than stored, so there was
+    /// nothing for Escape to close: it fell through to `back()`, the list
+    /// stayed up, and its own header — `Tab completes · ↑↓ choose` — offered no
+    /// key that dismissed it. The only way out was to edit the line.
+    #[test]
+    fn escape_puts_the_command_palette_away_without_touching_the_line() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.input = "/mo".into();
+        app.cursor = app.input.len();
+        assert!(
+            !command::completions(&app.input, &app).is_empty(),
+            "the premise: `/mo` offers something",
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.completions_dismissed, "Escape closed it");
+        assert_eq!(app.input, "/mo", "and left what was typed alone");
+
+        // The next keystroke is a new question about what to complete, so the
+        // dismissal must not outlive the line it was about.
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.completions_dismissed, "typing asks again");
+        assert_eq!(app.input, "/mod");
     }
 
     /// The gap this closes: the palette was a hardcoded enum, so a repository's

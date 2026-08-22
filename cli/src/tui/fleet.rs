@@ -514,7 +514,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }

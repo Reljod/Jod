@@ -1136,6 +1136,14 @@ impl Server {
             .as_ref()
             .and_then(|s| s.stalled_runs().ok())
             .unwrap_or_default();
+        // The main chat's turns and every manager's. Both leave `completed`
+        // rows with session ids and neither is an engineer, so without this the
+        // roster's one recommendation is to hand the work back to whoever was
+        // handing it out.
+        let routers = store
+            .as_ref()
+            .and_then(|s| s.router_run_ids().ok())
+            .unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         let keep = |a: &&crate::service::AgentSummary| {
@@ -1155,8 +1163,13 @@ impl Server {
         // exits when its turn ends, so an engineer sitting there with nothing to
         // do is a `completed` row, not a `running` one — and it needs a session
         // id, because that is the thing being resumed.
+        // A router is never free *to be given work*: continuing main's own
+        // last turn, or a manager's, gives the instruction to the conversation
+        // whose job is to give it to somebody else.
         let is_free = |a: &crate::service::AgentSummary| {
-            a.status == AgentStatus::Completed && a.session_id.is_some()
+            a.status == AgentStatus::Completed
+                && a.session_id.is_some()
+                && !routers.contains(&a.id)
         };
 
         let matching = agents.iter().filter(keep).count();
@@ -1458,6 +1471,39 @@ impl Server {
         // is better told it was killed.
         if let Some(refusal) = refusal_to_continue(&run_id, agent.status) {
             return Err(ToolError::Refused(refusal));
+        }
+        // A stalled run is refused here, not merely discouraged in a preamble.
+        //
+        // Reljod's decision was that a stalled session is *marked and surfaced,
+        // never killed*, and that the router "treats it as not-continuable" —
+        // say so, start a fresh session beside it, and leave the wedged one for
+        // him to stop. Both preambles say it. Nothing enforced it, and the
+        // precedent for what to do about that is in this same file: `open_work`
+        // from the main chat is refused at the boundary because "prompt wording
+        // is not enforcement".
+        //
+        // Observed by wedging a real engineer and giving its project another
+        // instruction: the manager called `continue_agent` on the stalled run
+        // and the tool allowed it. That does not resume the stuck process — it
+        // starts a *second* one on the same session — so the wedged one is left
+        // running and unnoticed, which is the state the mark exists to end.
+        //
+        // Best effort: a store that cannot answer leaves the call alone rather
+        // than refusing work because a heartbeat could not be read.
+        let stalled = self
+            .store()
+            .ok()
+            .and_then(|s| s.stalled_runs().ok())
+            .unwrap_or_default();
+        if let Some(since) = stalled.get(&run_id) {
+            let silent = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(*since)
+                .max(0);
+            return Err(ToolError::Refused(format!(
+                "run `{run_id}` is stalled — it has said nothing for {}, and it is still                  running, so continuing it would start a second agent on the same session                  and leave the wedged one going. Open a fresh session beside it with                  `open_work`, and leave this one for Reljod to stop.",
+                crate::heartbeat::human_ms(silent)
+            )));
         }
         let Some(session) = agent.session_id.clone() else {
             return Err(ToolError::Refused(format!(
@@ -2689,13 +2735,32 @@ impl Server {
                 // Refused rather than defaulted to this process's directory: a
                 // work opened in whatever directory the daemon happens to be
                 // started in is a run editing something nobody meant.
-                roots.first().map(|r| r.path.clone()).ok_or_else(|| {
-                    ToolError::Refused(
-                        "say which directory this work happens in — `checkout` — because this \
-                         session has no roots of its own to inherit one from"
-                            .into(),
-                    )
-                })?
+                //
+                // A project manager is the one caller that reliably has no
+                // roots and still knows the answer. It is created against its
+                // project and never adds a root of its own, so its every first
+                // `open_work` was refused, and the manager spent a model turn
+                // discovering a directory the store could have told it. The
+                // project's own path is not a guess in the way the process
+                // directory is: it is the repository this conversation exists
+                // to run, written down when the manager was created.
+                let project = self
+                    .store()?
+                    .current_project(&raiser.conversation_id)
+                    .ok()
+                    .flatten();
+                match (roots.first(), project) {
+                    (Some(root), _) => root.path.clone(),
+                    (None, Some(project)) => project.path,
+                    (None, None) => {
+                        return Err(ToolError::Refused(
+                            "say which directory this work happens in — `checkout` — because \
+                             this session has no roots of its own to inherit one from, and no \
+                             project to take one from either"
+                                .into(),
+                        ))
+                    }
+                }
             }
         };
 
@@ -3595,6 +3660,22 @@ fn named_project(
     absent_because: &str,
     ambiguous_advice: &str,
 ) -> Result<crate::projects::Project, ToolError> {
+    // A path first, because `projects.path` is UNIQUE and a name is not.
+    //
+    // Two checkouts with the same directory name are catalogued under one name
+    // and neither can be addressed: the bare name matches both and is refused,
+    // and there is nothing else to say. Observed by running it — the router
+    // asked which `web` was meant, the answer came back, and every attempt to
+    // act on it was refused, including two that named the full path. The path
+    // is the one answer that cannot be ambiguous, so it is worth accepting from
+    // a caller that has it.
+    //
+    // Tried before the name rather than after, so a project whose *name* is a
+    // path cannot shadow the real checkout at that path.
+    let by_path = wanted.starts_with('/').then(|| store.project_at_path(wanted));
+    if let Some(Ok(Some(project))) = by_path {
+        return Ok(project);
+    }
     let found = store
         .projects_by_name(wanted)
         .map_err(|e| ToolError::Refused(format!("could not search the catalog: {e}")))?;
@@ -3623,8 +3704,14 @@ fn named_project(
                 .map(|p| format!("{} ({})", p.name, p.path.display()))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // The way out is named, because without it this refusal is a dead
+            // end: the bare name is the only thing either project answers to,
+            // so a caller told "pick one" has nothing to pick *with*. A path is
+            // unique and both are printed just above.
             Err(ToolError::Refused(format!(
-                "`{wanted}` is the name of {} projects — {candidates}. {ambiguous_advice}",
+                "`{wanted}` is the name of {} projects — {candidates}. {ambiguous_advice} \
+                 Once he has said which, pass that project's full path here instead of its \
+                 name — a path names exactly one project and a shared name cannot.",
                 several.len()
             )))
         }
@@ -6043,6 +6130,220 @@ mod tests {
                 !said.contains("not the main chat's to call"),
                 "a manager or an engineer must still be able to open work: {said}"
             );
+        }
+
+        /// A stalled run is refused by the tool, not merely discouraged.
+        ///
+        /// Reljod's decision was that a stalled session is marked and surfaced,
+        /// never killed, and that the router treats it as not-continuable: say
+        /// so, start a fresh session beside it, and leave the wedged one for
+        /// him to stop. Both preambles say it, and nothing enforced it.
+        ///
+        /// Found by wedging a real engineer and giving its project another
+        /// instruction: the manager called `continue_agent` on the stalled run
+        /// and the tool allowed it. That does not resume the stuck process — it
+        /// starts a second one on the same session — so the wedged one is left
+        /// running and unnoticed, which is the state the mark exists to end.
+        #[tokio::test]
+        async fn continuing_a_stalled_run_is_refused_and_names_what_to_do_instead() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let c = store
+                .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+                .unwrap()
+                .id;
+            run_in(&store, &c, "run-wedged");
+            finished_run(&store, "run-wedged", "engineer", Some("a-session"));
+
+            let server = Server::new(Jod::with_store(store.clone()))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-caller");
+
+            // Healthy first, so the refusal below is a change and not a
+            // constant. It may still fail for want of a supervisor, so this
+            // asserts on the *reason*.
+            let healthy = said(
+                &call(
+                    &server,
+                    "continue_agent",
+                    json!({ "run_id": "run-wedged", "prompt": "carry on" }),
+                )
+                .await,
+            );
+            assert!(
+                !healthy.contains("is stalled"),
+                "nothing is stalled yet: {healthy}"
+            );
+
+            let now = chrono::Utc::now().timestamp_millis();
+            let mut hb = crate::heartbeat::Heartbeat::starting(
+                "run-wedged",
+                crate::heartbeat::Watching::Run,
+                now,
+            );
+            hb.stalled_since_ms = Some(now - 35 * 60 * 1000);
+            store.watch_run(&hb).unwrap();
+
+            let said = said(
+                &call(
+                    &server,
+                    "continue_agent",
+                    json!({ "run_id": "run-wedged", "prompt": "carry on" }),
+                )
+                .await,
+            );
+            assert!(said.contains("is stalled"), "the tool refuses it: {said}");
+            assert!(
+                said.contains("open_work"),
+                "and names the way forward: {said}"
+            );
+            assert!(
+                said.contains("Reljod"),
+                "and leaves the wedged one to him, per the decision: {said}"
+            );
+        }
+
+        /// The roster must not offer a router as the agent to continue.
+        ///
+        /// Main and a manager both spend a turn deciding who does the work and
+        /// then exit, leaving `completed` rows with session ids — which is
+        /// exactly what "free" meant. So `list_agents` answered a manager
+        /// looking for an engineer with main's own last turn, saying it
+        /// "already holds this checkout" and to "prefer it for any instruction
+        /// here". Seen repeatedly in one session, and declined every time only
+        /// because the model reasoned past its own tool.
+        #[tokio::test]
+        async fn the_roster_does_not_offer_main_or_a_manager_as_an_engineer() {
+            let dir = format!("/tmp/jod-roster-{}", std::process::id());
+            let (store, project) = with_project(&dir);
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+
+            // A finished turn each, with a session to resume — the shape that
+            // used to read as an idle engineer.
+            for (conversation, run) in [(&main, "run-main"), (&manager, "run-manager")] {
+                run_in(&store, conversation, run);
+                finished_run(&store, run, run, Some(&format!("{run}-session")));
+            }
+
+            let routers = store.router_run_ids().unwrap();
+            assert!(routers.contains("run-main"), "main's own turn is a router");
+            assert!(routers.contains("run-manager"), "so is a manager's");
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-manager");
+            let answer = call(&server, "list_agents", json!({ "limit": 20 })).await;
+            let said = said(&answer);
+
+            assert!(
+                !said.contains("`run-main` is free"),
+                "main is not an engineer to hand work to: {said}"
+            );
+            assert!(
+                !said.contains("`run-manager` is free"),
+                "and neither is a manager: {said}"
+            );
+            assert!(
+                said.contains("nothing to reuse") || said.contains("nothing free"),
+                "with no engineer at all, the honest answer is that there is none: {said}"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// Two checkouts whose directories share a name are still each
+        /// reachable, because a path is.
+        ///
+        /// Found by running it. Two repositories both called `web` were
+        /// catalogued; the router correctly refused to guess and asked which
+        /// one was meant; the answer came back — and then every way of acting
+        /// on that answer was refused, including two attempts that named the
+        /// full path. The catalog printed `web, web, …` and neither `web` could
+        /// be addressed at all. A question nobody can answer is worse than one
+        /// nobody asks.
+        #[tokio::test]
+        async fn a_project_whose_name_is_shared_is_still_reachable_by_its_path() {
+            let base = format!("/tmp/jod-two-webs-{}", std::process::id());
+            let one = format!("{base}/one/web");
+            let two = format!("{base}/two/web");
+            let store = Arc::new(Store::in_memory().unwrap());
+            std::fs::create_dir_all(&one).unwrap();
+            std::fs::create_dir_all(&two).unwrap();
+            let first = store.add_project(NewProject::at(&one)).unwrap();
+            let second = store.add_project(NewProject::at(&two)).unwrap();
+            assert_eq!(first.name, second.name, "the premise: one name, two rows");
+
+            // The bare name is refused, and now says what to do about it.
+            let refusal = named_project(&store, &first.name, "", "Ask Reljod which.")
+                .expect_err("a shared name cannot resolve");
+            let ToolError::Refused(said) = refusal else {
+                panic!("a shared name is refused, not failed");
+            };
+            assert!(
+                said.contains("full path"),
+                "the refusal has to name the way out: {said}"
+            );
+
+            // And the path reaches exactly the one asked for, both ways round.
+            let got = named_project(&store, &one, "", "").expect("the first web, by path");
+            assert_eq!(got.id, first.id);
+            let got = named_project(&store, &two, "", "").expect("the second web, by path");
+            assert_eq!(got.id, second.id);
+
+            // A path nothing is catalogued at still falls through to the name
+            // branch rather than resolving to something near it.
+            assert!(
+                named_project(&store, &format!("{base}/three/web"), "", "").is_err(),
+                "an uncatalogued path is not a project",
+            );
+
+            std::fs::remove_dir_all(&base).ok();
+        }
+
+        /// A manager has no roots, and does not need to be told its own
+        /// repository.
+        ///
+        /// Observed by running one: alpha's manager called `open_work` with no
+        /// `checkout`, was refused with "this session has no roots of its own
+        /// to inherit one from", and spent a second model turn supplying the
+        /// path the store already had. A manager is created against its project
+        /// and never adds a root, so that happened on every manager's first
+        /// piece of work.
+        #[tokio::test]
+        async fn a_manager_opening_work_takes_the_checkout_from_its_project() {
+            let dir = format!("/tmp/jod-mgr-checkout-{}", std::process::id());
+            let (store, project) = with_project(&dir);
+            store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            let (manager, _) = store
+                .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+                .unwrap();
+            assert!(
+                store.roots(&manager).unwrap().is_empty(),
+                "the premise: a manager has no roots of its own",
+            );
+            run_in(&store, &manager, "run-manager");
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-manager");
+
+            // No `checkout` argument, which is the call that used to be refused.
+            let answer = call(&server, "open_work", json!({ "instruction": "port the parser" })).await;
+
+            // As above, this may still fail on a box with no supervisor, so it
+            // asserts on the reason rather than on success.
+            let said = said(&answer);
+            assert!(
+                !said.contains("no roots of its own"),
+                "a manager knows its own repository: {said}"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
         }
 
         /// The route around the rule, closed. A model just refused `open_work`

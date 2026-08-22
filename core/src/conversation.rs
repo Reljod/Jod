@@ -1617,7 +1617,106 @@ impl Store {
                     "UPDATE conversations SET pinned = 1, title = 'main' WHERE id = ?1",
                     params![new_id],
                 )?;
+                // Everything hanging under the old chat hangs under this one.
+                //
+                // Cards cascade upward along `parent_conversation_id`, and the
+                // rail asks for the subtree of the conversation being viewed.
+                // A project manager is hung under main when it is created, so
+                // leaving those edges on the compacted-away thread empties
+                // Reljod's rail — the managers still report, upward, to a
+                // conversation nobody opens.
+                //
+                // Observed: a fleet showing `alpha [3 cards]` and
+                // `gamma [8 cards]` beside a rail reading "nothing waiting — no
+                // agent has asked anything". Main compacts itself, so this
+                // undid the link on its own, on a timer, without anybody doing
+                // anything.
+                //
+                // The new row's own parent is null and stays that way — main
+                // reports to nobody — and the guard keeps it that way even if
+                // that ever changes.
+                tx.execute(
+                    "UPDATE conversations SET parent_conversation_id = ?2
+                      WHERE parent_conversation_id = ?1 AND id <> ?2",
+                    params![conversation_id, new_id],
+                )?;
+                // A question still owed follows the chat it was asked in.
+                //
+                // The rail shows the subtree of the conversation being viewed,
+                // and `ask_question` raises its card on the *asking*
+                // conversation — for main, that is main itself. Left behind,
+                // the card drops off the rail entirely: a blocking question put
+                // to Reljod shortly before a compaction simply disappears, and
+                // main compacts itself.
+                //
+                // Open cards only. An answered or dismissed one is a record of
+                // what was asked and settled where, and moving it would make
+                // the rail's history say a conversation asked something it
+                // never did — the same line `pending_deliveries` draws just
+                // below.
+                tx.execute(
+                    "UPDATE cards SET conversation_id = ?2
+                      WHERE conversation_id = ?1 AND status = 'open'",
+                    params![conversation_id, new_id],
+                )?;
+                // An answer still owed follows the chat it is owed to.
+                //
+                // `Ticker::tick_deliveries` reads `pending_deliveries` and
+                // injects into the conversation named there. A card answered
+                // just before a compaction was owed to the thread that has
+                // since been compacted away, so the reply would be injected
+                // into a conversation the console no longer shows — and Reljod
+                // would never see the answer to his own question.
+                //
+                // Queued rows only: a delivered one is a record of where it
+                // actually went, and moving it would make the ledger lie.
+                tx.execute(
+                    "UPDATE pending_deliveries SET conversation_id = ?2
+                      WHERE conversation_id = ?1 AND state = 'queued'",
+                    params![conversation_id, new_id],
+                )?;
+                // Every bus that has a `main` on its roster follows the pin.
+                //
+                // `Store::is_main_chat_member` decides whether mail addressed
+                // to `main` is handed to the main chat by comparing the member
+                // row's conversation against the *currently pinned* one. Moving
+                // the pin and leaving those rows behind makes every existing
+                // team's `main` a member of nothing: the mail is not diverted,
+                // falls through to a wake that cannot happen — a work member
+                // never gets a `session_id` — and waits for ever.
+                //
+                // Observed on a live daemon, once per tick, indefinitely:
+                // "1 message(s) waiting: `main` has no session to resume". It
+                // is not an edge case; main compacts itself when its context
+                // fills, so every long-running console reaches it.
+                tx.execute(
+                    "UPDATE team_members SET conversation_id = ?2 WHERE conversation_id = ?1",
+                    params![conversation_id, new_id],
+                )?;
             }
+            // A project's manager follows its thread too, for the same reason
+            // and by the same rule.
+            //
+            // A manager is found through `projects.manager_conversation_id`,
+            // never through `pinned`, so the block above does not cover it —
+            // and `Store::manager_conversation` checks that the conversation it
+            // names still exists, which the compacted-away one does. So a
+            // manager handed to another harness left the project pointing at
+            // the thread it was handed *from*: the next `ask_manager` resumed
+            // the old conversation on the old harness, the switch was undone
+            // without a word, and the summary sat in a conversation nobody
+            // opens again.
+            //
+            // Observed by switching alpha's manager to OpenCode: the console
+            // ended up in `alpha → OpenCode` while the catalog still named the
+            // Claude Code row, and the composer's title — which says which
+            // manager you are in — went blank, because the conversation it was
+            // bound to was no longer any project's.
+            tx.execute(
+                "UPDATE projects SET manager_conversation_id = ?2
+                  WHERE manager_conversation_id = ?1",
+                params![conversation_id, new_id],
+            )?;
             Ok(())
         })?;
 

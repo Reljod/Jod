@@ -26,6 +26,7 @@
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -556,6 +557,37 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Every worktree currently held, keyed by the work holding it.
+    ///
+    /// One query for the whole fleet rather than one per work, because the
+    /// caller is [`Store::forest_of`] — a screen redraw, where a query per row
+    /// is the difference between a tree and a stutter.
+    ///
+    /// Held only. A released lease may still have a directory on disk, but the
+    /// question a fleet row is answering is "where is this agent working now",
+    /// and a released one is not anywhere.
+    ///
+    /// The unique index on `(work_id, repo_path) WHERE state = 'held'` means at
+    /// most one per work per repository. A work spanning two repositories
+    /// keeps the first, which is the one its session was started in.
+    pub fn held_leases_by_work(&self) -> Result<HashMap<String, Lease>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {LEASE_COLUMNS} FROM leases
+              WHERE state = 'held' AND work_id IS NOT NULL
+              ORDER BY created_at_ms, id"
+        ))?;
+        let rows = stmt.query_map([], read_lease)?;
+        let mut out: HashMap<String, Lease> = HashMap::new();
+        for lease in rows {
+            let lease = lease?;
+            if let Some(work) = lease.work_id.clone() {
+                out.entry(work).or_insert(lease);
+            }
+        }
+        Ok(out)
+    }
+
     /// Leases whose work has been deleted and whose worktree is still on disk.
     ///
     /// The reason `work_title` is a column: this list is read by somebody
@@ -863,6 +895,69 @@ mod tests {
             .find(|r| r.path == roots::normalise(&lease.worktree_path))
             .expect("the worktree became a root");
         assert!(worktree.writable, "the worktree is the only writable root");
+    }
+
+    /// The fleet has to be able to say where an agent is actually writing.
+    ///
+    /// A work session reads the checkout and writes to a worktree it claimed
+    /// part-way through its run, so it can truthfully report a file changed
+    /// while the checkout somebody is looking at is untouched. Until the forest
+    /// carried these two fields nothing on any screen named the directory to
+    /// look in — the tree's `Node` had no `cwd`, no branch and no lease.
+    #[test]
+    fn a_work_holding_a_worktree_says_so_on_the_fleet() {
+        use crate::tree::NodeKind;
+
+        let (_env, dir) = scratch("forest");
+        let Some(repo) = fixture_repo(&dir.join("repo")) else {
+            return;
+        };
+        let s = store();
+        let (work, conversation) = session_on(&s, &repo);
+
+        let before = s.forest().unwrap();
+        assert!(
+            before
+                .iter()
+                .filter(|n| n.kind == NodeKind::Work || n.kind == NodeKind::Session)
+                .all(|n| n.branch.is_none() && n.worktree.is_none()),
+            "a work that has claimed nothing says nothing, rather than guessing",
+        );
+
+        let Claim::Cut(lease) = s.claim_lease(&work, &conversation, &repo).unwrap() else {
+            panic!("the first claim on a repository cuts a branch");
+        };
+
+        let forest = s.forest().unwrap();
+        let work_row = forest
+            .iter()
+            .find(|n| n.id == crate::tree::NodeId::work(&work))
+            .expect("the work is on the fleet");
+        assert_eq!(work_row.branch.as_deref(), Some(lease.branch.as_str()));
+        assert_eq!(
+            work_row.worktree.as_deref(),
+            Some(lease.worktree_path.to_string_lossy().as_ref()),
+        );
+
+        // The session too, because `condense` folds the work row away when it
+        // holds one session — so the row a person actually sees is that one,
+        // and a branch only on the work would be a branch nobody reads.
+        let session_row = forest
+            .iter()
+            .find(|n| n.id == crate::tree::NodeId::session(&conversation))
+            .expect("the session is on the fleet");
+        assert_eq!(session_row.branch.as_deref(), Some(lease.branch.as_str()));
+
+        // Released, and the row stops claiming a worktree it no longer holds.
+        s.release_lease(lease.id).unwrap();
+        let after = s.forest().unwrap();
+        assert!(
+            after
+                .iter()
+                .filter(|n| n.kind == NodeKind::Work || n.kind == NodeKind::Session)
+                .all(|n| n.branch.is_none()),
+            "a released lease is not where the agent is working any more",
+        );
     }
 
     /// The partial unique index says one live lease per work and repository.

@@ -290,7 +290,9 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     if app.panel && side.is_none() {
         panel_hits = draw_floating_panel(f, app, body);
     }
-    draw_completions(f, app, input);
+    // `body` rather than the frame: the popup may use the whole chat column,
+    // which is what is left once anything beside it has been taken out.
+    draw_completions(f, app, input, body);
     draw_mention(f, app, input);
     draw_overlay(f, app);
     // After the overlay, and that ordering is load-bearing. An overlay can raise
@@ -1176,8 +1178,13 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
             .collect()
     };
 
+    // Two rows of headroom, not one. A popup ending at `input.y - 1` puts its
+    // bottom border exactly on the transcript's, and `Clear` only covers the
+    // popup's own width — so the two borders join into one line of doubled
+    // corners, `└──└──popup──┘──┘`, which reads as a half-drawn box rather
+    // than as a panel floating over the transcript.
     let h = ((rows.len() + 2) as u16)
-        .min(input.y.saturating_sub(1))
+        .min(input.y.saturating_sub(2))
         .max(3);
     // Anchored on the `@` itself, then pulled back inside the box: a popup that
     // hangs off the right edge of the terminal is drawn over nothing. The
@@ -1197,7 +1204,7 @@ fn draw_mention(f: &mut Frame, app: &App, input: Rect) {
     );
     let panel = Rect {
         x,
-        y: input.y.saturating_sub(h),
+        y: input.y.saturating_sub(h + 1),
         width: w,
         height: h,
     };
@@ -1686,7 +1693,8 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) -> (usize, Rect) {
     // screen and the list comes out cut in half. While the popup is open the
     // input drops back to the bottom of the column and the wordmark keeps the
     // space above it: a logo that moves beats a list that is truncated.
-    let anchored = !crate::tui::command::completions(&app.input, app).is_empty();
+    let anchored = !app.completions_dismissed
+        && !crate::tui::command::completions(&app.input, app).is_empty();
 
     // Big lettering is the first thing to go. Below its width it would be
     // truncated mid-glyph, which reads as a broken screen rather than a logo.
@@ -2050,8 +2058,32 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
                 Span::styled(" ▸ ", fg(MUTED)),
                 Span::styled(cut(&c.name, inner.saturating_sub(3)), bold(GOOD)),
             ]),
+            // Two different emptinesses, and the box used to say the same
+            // sentence for both. Collapsed, this line is about the *current*
+            // project — but "nothing set — /project add" beside a fleet drawing
+            // four repositories reads as "you have no repositories", and its
+            // remedy tells you to add one you already have. Pressing Ctrl-P
+            // twice was enough to produce it.
+            // Both fitted, like the row above them. The count line was added
+            // without a `cut` and lost its last three characters at *every*
+            // width — `… catalogued — Ctr` — which dropped the keystroke the
+            // sentence exists to name. The same pass added "ellipsise rather
+            // than clip" for the empty states two panes over, and this was the
+            // one line that missed its own rule.
+            None if app.projects.is_empty() => Line::from(Span::styled(
+                cut(&format!(" ▸ nothing set — {CATALOG_REMEDY}"), inner),
+                fg(MUTED),
+            )),
+            // Short enough to survive a thirty-two column panel, which is what
+            // this box is at every terminal width. "None set" is not repeated
+            // here because the box's own title already says it — what the line
+            // is for is the two facts the title cannot carry: that there *are*
+            // projects, and the key that shows them.
             None => Line::from(Span::styled(
-                format!(" ▸ nothing set — {CATALOG_REMEDY}"),
+                cut(
+                    &format!(" ▸ {} catalogued · Ctrl-P", app.projects.len()),
+                    inner,
+                ),
                 fg(MUTED),
             )),
         };
@@ -2096,6 +2128,23 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
         projects: Vec::new(),
     };
 
+    // Names that more than one checkout answers to. Two repositories whose
+    // directories are both called `web` are catalogued under one name, and the
+    // panel drew them as two identical rows — so the one screen whose job is
+    // "which repository does the next sentence land in" could not tell you.
+    // The parent directory is what differs, and it is the shortest thing that
+    // does.
+    let shared: std::collections::HashSet<&str> = {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut twice: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for p in &rows {
+            if !seen.insert(p.name.as_str()) {
+                twice.insert(p.name.as_str());
+            }
+        }
+        twice
+    };
+
     let lines: Vec<Line> = visible
         .iter()
         .enumerate()
@@ -2124,9 +2173,38 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
                 (false, true) => bold(GOOD),
                 (false, false) => fg(AGENT),
             };
+            // A checkout that is not there any more. Said on the row because
+            // this panel is where a project is chosen, and choosing this one
+            // routes an instruction into a directory that cannot be entered —
+            // which surfaces as the supervisor blaming the harness binary for
+            // the operating system refusing the working directory. `jod project
+            // ls` prints the whole sentence; thirty columns get the word.
+            let missing = app.broken_projects.contains(&p.id);
+            // The qualifier is drawn muted and after the name, so a catalog
+            // with no clashes in it reads exactly as it did.
+            let qualifier = if missing {
+                " · missing".to_string()
+            } else {
+                shared
+                    .contains(p.name.as_str())
+                    .then(|| {
+                        p.path
+                            .parent()
+                            .and_then(|parent| parent.file_name())
+                            .map(|dir| format!(" in {}", dir.to_string_lossy()))
+                    })
+                    .flatten()
+                    .unwrap_or_default()
+            };
+            let room = inner.saturating_sub(3);
+            let name = cut(&p.name, room.saturating_sub(qualifier.chars().count()));
             Line::from(vec![
                 Span::styled(marker, fg(if is_current { GOOD } else { MUTED })),
-                Span::styled(cut(&p.name, inner.saturating_sub(3)), style),
+                Span::styled(name, style),
+                Span::styled(
+                    cut(&qualifier, room),
+                    fg(if missing { BAD } else { MUTED }),
+                ),
             ])
         })
         .collect();
@@ -2689,7 +2767,12 @@ fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static>
 /// Above rather than below because the input is already near the bottom of the
 /// screen, and a list that grows downwards would be clipped exactly when it is
 /// longest.
-fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
+fn draw_completions(f: &mut Frame, app: &App, input: Rect, column: Rect) {
+    // Escape put it away for this line. The popup is derived from the input, so
+    // there is nothing to close — this is the closing.
+    if app.completions_dismissed {
+        return;
+    }
     if app.workspace != Workspace::Chat {
         return;
     }
@@ -2716,22 +2799,37 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     // 72 columns — that cap is what stopped `no argument restores` one letter
     // short on a 200-column terminal.
     let want = text::panel_width([TAB_COMPLETES]).max(widest_name + widest_hint + 8);
-    // The popup is anchored to the input box's left edge, so the room is what
-    // lies to the right of it — never more, or it would be drawn off the
-    // buffer.
-    let room = f.area().width.saturating_sub(input.x).max(1);
+    // The room to the right of the input box, **within the chat column**.
+    //
+    // It used to be measured off the whole frame, which is not the same thing
+    // whenever something sits beside the chat: the palette grew to ninety-two
+    // columns next to a seventy-one column composer and painted straight over
+    // the context rail, leaving `8s`, `200k` and orphaned corners behind it.
+    //
+    // Bounding it by the *composer* instead would be wrong in the other
+    // direction, and there is a test that says so: the composer is capped at a
+    // comfortable reading width, so on a wide terminal the palette would be
+    // re-cut to it and `no argument restores` would lose its last word again —
+    // the very fault the fixed 72-column cap was removed to fix. The column is
+    // the honest bound: it is the whole width when nothing is beside the chat,
+    // and exactly the chat's share when something is.
+    let edge = column.x.saturating_add(column.width);
+    let room = edge.saturating_sub(input.x).max(1);
     let w = (want as u16).min(room).max(24.min(room));
     // Whatever is left for the hint once the mark, the name column and the
     // borders have been paid for. Below that it is cut *with* a marker, so a
     // sentence that stops never reads as a sentence that ended.
     let hint_room = (w as usize).saturating_sub(widest_name + 6);
     // Only as tall as it needs to be, and never taller than the space above.
+    // The headroom `draw_mention` documents, for the same reason. This popup
+    // is usually as wide as the transcript, so the seam is hidden — but it is
+    // the same seam, and two placements that only differ by accident drift.
     let h = ((suggestions.len() + 2) as u16)
-        .min(input.y.saturating_sub(1))
+        .min(input.y.saturating_sub(2))
         .max(3);
     let panel = Rect {
         x: input.x,
-        y: input.y.saturating_sub(h),
+        y: input.y.saturating_sub(h + 1),
         width: w,
         height: h,
     };
@@ -3188,7 +3286,10 @@ fn draw_which_key(f: &mut Frame, app: &App) {
         rows.push((String::new(), String::new()));
         rows.push((
             "n".into(),
-            "new…        n s sched · n g goal · n h hook · n t task".into(),
+            // Every kind the submenu answers to. It listed four of the five,
+            // and `n m memory` was reachable, undocumented, from the one menu
+            // whose job is to document it.
+            "new…        n s sched · n g goal · n h hook · n m memory · n t task".into(),
         ));
         rows.push(("e".into(), "editor      the input in $EDITOR".into()));
         // The verbs that lost their chord to tmux. They are drawn rather than
@@ -3224,6 +3325,22 @@ fn draw_which_key(f: &mut Frame, app: &App) {
 
     let title = keys::which_key_title(making);
     let panel = centred(f.area(), (widest + 10) as u16, (rows.len() + 2) as u16);
+    // What a short terminal is leaving out. `centred` clamps to the screen and
+    // the list draws from the top, so at ten rows this menu simply stopped
+    // after `a activity` — ten entries gone, including the only routes to
+    // jobs, resume, search and the keymap, with nothing saying they existed.
+    // The `?` overlay beside it has always said so; these two now agree.
+    let room = panel.height.saturating_sub(2) as usize;
+    let hidden = rows
+        .iter()
+        .skip(room.min(rows.len()))
+        .filter(|(letter, _)| !letter.is_empty())
+        .count();
+    let bottom = if hidden > 0 {
+        format!(" Esc cancels · {hidden} more — widen the window ")
+    } else {
+        " Esc cancels · any other key is ignored ".to_string()
+    };
     f.render_widget(Clear, panel);
     f.render_widget(
         List::new(items).block(
@@ -3231,7 +3348,7 @@ fn draw_which_key(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(fg(USER))
                 .title(title)
-                .title_bottom(" Esc cancels · any other key is ignored "),
+                .title_bottom(bottom),
         ),
         panel,
     );
@@ -3482,16 +3599,26 @@ fn filter_line(app: &App) -> Option<Line<'static>> {
     // A filter that is open but empty hides nothing, so it says so rather than
     // claiming a match count that is really the whole list.
     let what = if list.filtering() {
-        // Rows, less the ones a filter cannot exclude. The fleet's pinned chat
-        // is always in `row_ids` and never a match, so counting rows there
-        // claimed one more hit than the filter had actually found.
-        let unfilterable = usize::from(app.workspace == Workspace::Fleet);
-        format!(
-            "   ▸ filter · {} match",
+        // Count the rows the pane is actually drawing.
+        //
+        // On the fleet with a tree — which is every fleet now — the rows are
+        // the forest's, and `row_ids` answers with the *flat agent list* plus a
+        // sentinel. The two collections are unrelated, so the number was
+        // arbitrary: filtering for a word plainly present on four rows reported
+        // `0 match` beside them. `tree_rows` is what `draw_tree` walks, and the
+        // filter has already been applied to it, so nothing has to be
+        // subtracted back off.
+        let matched = if app.workspace == Workspace::Fleet && app.has_tree() {
+            app.tree_rows().len()
+        } else {
+            // The flat list keeps its correction: its pinned row is a sentinel
+            // that is always present and never a match.
+            let unfilterable = usize::from(app.workspace == Workspace::Fleet);
             app.row_ids(app.workspace)
                 .len()
                 .saturating_sub(unfilterable)
-        )
+        };
+        format!("   ▸ filter · {matched} match")
     } else {
         "   ▸ type to filter".to_string()
     };
@@ -3520,8 +3647,14 @@ fn body<'a>(ws: Workspace, items: Vec<ListItem<'a>>, width: u16) -> List<'a> {
     )
 }
 
-fn empty(what: &str) -> Vec<ListItem<'static>> {
-    vec![ListItem::new(Span::styled(what.to_string(), fg(MUTED)))]
+fn empty(what: &str, width: u16) -> Vec<ListItem<'static>> {
+    // Fitted, not left to the widget to clip. A silently cut sentence is not a
+    // shorter sentence, it is a different one: at a hundred columns the memory
+    // screen read "nothing remembered yet — /remember writes on", which is
+    // both wrong and, being a grammatical phrase, not obviously truncated. An
+    // ellipsis at least says something is missing.
+    let inner = width.saturating_sub(2) as usize;
+    vec![ListItem::new(Span::styled(cut(what, inner), fg(MUTED)))]
 }
 
 /// The fleet: every delegation this process knows about, and the cursor that
@@ -3551,7 +3684,12 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // stays parked on its own last row rather than scrolling to a position it
     // does not have.
     let cursor = app.tree.index(&ids);
-    let mine = rows.len() + 1;
+    // The sentinel pinned row, and whether this pane draws one at all. It is
+    // the fallback for a store whose forest has no `Main` node, exactly as
+    // `App::tree_rows` treats it — the two counts have to be derived from the
+    // same question or the cursor and the highlight drift apart.
+    let lead = usize::from(!app.forest_holds_main());
+    let mine = rows.len() + lead;
     let in_tree = cursor < mine;
     let selected = if in_tree {
         cursor
@@ -3570,15 +3708,23 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let show_id = width >= 35;
     let show_harness = width >= 31;
 
-    // One longer than the forest: position 0 is the pinned chat and everything
-    // below it reads its node at `at - 1`. This ordering and `tree_rows`' have
-    // to agree, or the cursor lands one row off its own highlight — the same
-    // trap the flat list documents, and the same reason it is said twice.
+    // Position 0 is the pinned chat *only when the forest has no row of its
+    // own for it*, and everything below reads its node at `at - lead`. This
+    // ordering and `tree_rows`' have to agree, or the cursor lands one row off
+    // its own highlight — the same trap the flat list documents, and the same
+    // reason it is said twice.
+    //
+    // `tree_rows` already drops the sentinel once `forest_of` emits a
+    // `NodeKind::Main` row, and drawing it anyway is how the two fell out of
+    // step: the pane drew one more row than the cursor had ids, so from the
+    // second row down the highlight sat above the row every verb acted on.
+    // Pressing `x` on what looked like Jod's own row untracked the project
+    // under it.
     let (start, height) = window(area, selected, mine);
     let mut items: Vec<ListItem> = Vec::new();
     for at in start..(start + height).min(mine) {
         let here = in_tree && at == selected;
-        if at == 0 {
+        if lead == 1 && at == 0 {
             items.push(ListItem::new(Line::from(main_line(
                 app,
                 here,
@@ -3588,14 +3734,14 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             ))));
             continue;
         }
-        let node = rows[at - 1];
+        let node = rows[at - lead];
         let expanded = app.tree.is_expanded(&node.id, &app.closed_works);
         let mut spans = vec![
             Span::styled(if here { "▸ " } else { "  " }.to_string(), bold(USER)),
             // The guides describe the forest, so they are indexed into it —
-            // the pinned row sits above the tree rather than in it, and an
-            // elbow measured past it would point one row off.
-            Span::styled(fleet::guides(&rows, at - 1, ascii), fg(MUTED)),
+            // a sentinel pinned row sits above the tree rather than in it, and
+            // an elbow measured past it would point one row off.
+            Span::styled(fleet::guides(&rows, at - lead, ascii), fg(MUTED)),
             Span::styled(fleet::marker(node, expanded).to_string(), fg(MUTED)),
             Span::styled(
                 format!("{} ", fleet::kind_glyph(node.kind)),
@@ -3631,6 +3777,21 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         let mark = match (node.stalled_for_ms, node.running, node.status.as_deref()) {
             (Some(silent_for), _, _) => Some((
                 format!(" ⏸ stalled {}", jod_core::heartbeat::human_ms(silent_for)),
+                BAD,
+            )),
+            // A group row whose subtree holds a stalled run says so instead of
+            // spinning. The fleet is read collapsed, and the spinner is the
+            // strongest "this is fine" signal on the screen: a project drawing
+            // one while its only engineer had been wedged for half an hour was
+            // the original bug, one level up from where it was fixed. It takes
+            // the row's whole mark rather than sitting beside the spinner,
+            // because "working, and also stalled" is not a state.
+            (None, _, None) if node.stalled > 0 => Some((
+                if node.stalled == 1 {
+                    " ⏸ stalled".to_string()
+                } else {
+                    format!(" ⏸ {} stalled", node.stalled)
+                },
                 BAD,
             )),
             (None, true, _) => Some((format!(" {}", app.spinner()), WARN)),
@@ -3674,11 +3835,22 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // tree is no longer empty — the chat is always its first row, and "no works
     // yet" as the only line would now be a claim the row above it contradicts.
     if rows.is_empty() {
-        items.extend(empty(if app.here().filtering() {
-            "  nothing matches"
-        } else {
-            "  no works yet"
-        }));
+        items.extend(empty(
+            if app.here().filtering() {
+                "  nothing matches"
+            } else {
+                "  no works yet"
+            },
+            area.width,
+        ));
+    }
+    // The flat list has always drawn this and the tree never did — so once the
+    // fleet had a tree, which it now always does, a filter hid rows with
+    // nothing anywhere saying one was on. `★ jod` and whole projects vanished
+    // and the screen looked like a fleet that had lost them.
+    if let Some(line) = filter_line(app) {
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(line));
     }
 
     // Summed over the top-level rows, each of which already holds the blocked
@@ -3686,10 +3858,18 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // card once on the agent that raised it and again on the project above it,
     // and the title would say twice the number the tree can show.
     let blocked: usize = rows.iter().filter(|n| n.depth == 0).map(|n| n.blocked).sum();
-    let title = if blocked > 0 {
-        format!(" fleet · {blocked} blocked ")
-    } else {
-        " fleet ".to_string()
+    // Both facts, because they are about different things and the second one
+    // changes how much the first is worth. Without a daemon nothing marks a
+    // stall, so every wedged agent on this screen draws as healthy — and the
+    // screen saying nothing about that is what let the fleet fill up with hung
+    // sessions nobody noticed. The transcript says it once when the console
+    // starts; this says it for as long as it is true, on the screen where it
+    // matters.
+    let title = match (blocked, app.nothing_is_sweeping) {
+        (0, false) => " fleet ".to_string(),
+        (0, true) => " fleet · no stall watch · jod daemon ".to_string(),
+        (n, false) => format!(" fleet · {n} blocked "),
+        (n, true) => format!(" fleet · {n} blocked · no stall watch · jod daemon "),
     };
     f.render_widget(
         List::new(items).block(
@@ -3805,6 +3985,29 @@ fn draw_tree_detail(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(detail(
                     "cards",
                     &format!("{} open · {} {}", node.cards, node.blocked, rail::BLOCKED),
+                ));
+            }
+            // Where the work is, which is the first thing a person asks after
+            // "is it done". A work session reads the checkout and writes to a
+            // worktree it claimed, so an agent can truthfully report a file
+            // changed while the checkout on screen is untouched — and until
+            // this was drawn, nothing anywhere said which directory to look
+            // in. The branch comes first because it is the shorter answer and
+            // the one that survives being written down.
+            if let Some(branch) = &node.branch {
+                lines.push(detail("branch", branch));
+            }
+            if let Some(worktree) = &node.worktree {
+                // Cut from the left, like every other path on this screen: the
+                // end of a worktree path is the repository name and the slug,
+                // and the front of it is `$JOD_HOME/worktrees` on every row.
+                let shown = under_home(
+                    Path::new(worktree),
+                    std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+                );
+                lines.push(detail(
+                    "worktree",
+                    &fit_path(&shown, area.width.saturating_sub(14) as usize),
                 ));
             }
             if !node.summary.is_empty() {
@@ -4052,7 +4255,7 @@ fn draw_fleet(f: &mut Frame, app: &App, area: Rect) {
     if rows.is_empty() {
         // Short enough to survive the master pane at the design width, which is
         // 44 cells inside its border — the longer form was clipped mid-word.
-        items.extend(empty("  nothing delegated yet — Ctrl-B starts one"));
+        items.extend(empty("  nothing delegated yet — Ctrl-B starts one", left.width));
     }
     if let Some(line) = filter_line(app) {
         items.push(ListItem::new(Line::from("")));
@@ -4364,7 +4567,7 @@ fn draw_memory(f: &mut Frame, app: &App, area: Rect) {
     let show_conf = inner >= 34;
 
     let mut items: Vec<ListItem> = if rows.is_empty() {
-        empty("nothing remembered yet — /remember writes one")
+        empty("nothing remembered yet — /remember writes one", left.width)
     } else {
         rows.iter()
             .enumerate()
@@ -5050,8 +5253,14 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
             ));
         }
         if show_age {
+            // A dash rather than `0s` when nothing recorded when this task was
+            // put on the board. `0s` reads as "just now", which is a claim
+            // about a moment that never happened.
             spans.push(Span::styled(
-                super::app::short_duration(t.age_ms),
+                match t.age_ms {
+                    0 => "—".to_string(),
+                    age => super::app::short_duration(age),
+                },
                 fg(MUTED),
             ));
         }
@@ -5207,13 +5416,16 @@ fn draw_traffic_log(f: &mut Frame, app: &App, area: Rect) {
     items.push(ListItem::new(traffic_header(app, width)));
 
     if app.traffic_of.is_none() {
-        items.extend(empty("  no work chosen — T on a fleet row opens its bus"));
+        items.extend(empty("  no work chosen — T on a fleet row opens its bus", area.width));
     } else if rows.is_empty() {
-        items.extend(empty(if app.here().filtering() {
-            "  nothing matches — Esc clears the filter"
-        } else {
-            "  nothing has been said on this bus yet"
-        }));
+        items.extend(empty(
+            if app.here().filtering() {
+                "  nothing matches — Esc clears the filter"
+            } else {
+                "  nothing has been said on this bus yet"
+            },
+            area.width,
+        ));
     }
 
     // One row shorter than the other lists, because the header above is drawn
@@ -5698,11 +5910,17 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
 
     // Naming what is on screen matters once several agents exist: a transcript
     // that could belong to any of them is a transcript you cannot trust.
+    // The run being watched names the transcript; failing that, the
+    // conversation the composer is bound to does. A manager is entered and then
+    // has no run of its own until it is given one, so the run-based name left
+    // it titled plainly `jod` — the one screen where knowing which project you
+    // are typing into matters most.
     let watching = app
         .watching
         .as_deref()
         .and_then(|id| app.agents.iter().find(|a| a.id == id))
         .map(|a| format!(" jod · {} ", a.name))
+        .or_else(|| app.where_you_are().map(|where_| format!(" jod · {where_} ")))
         .unwrap_or_else(|| " jod ".to_string());
     let title = if app.following() {
         watching
@@ -6101,13 +6319,23 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     }
     // The box stays live while an agent works — a prompt typed now is queued,
     // not refused — so it keeps its colour and says what will happen instead.
+    // Where this line is going, on the box it is typed into. Only for main and
+    // for a manager: an ordinary session is already named by the transcript
+    // above it, while those two look identical from the chair and differ in
+    // what typing does — main routes across every project, a manager acts
+    // inside exactly one. What is queued or in flight wins the title when there
+    // is something to say about it, because that is the newer fact.
+    let bound = app
+        .where_you_are()
+        .map(|where_| format!(" you → {where_} "))
+        .unwrap_or_else(|| " you ".to_string());
     let title = match (app.busy, app.queued.len()) {
         (_, n) if n > 0 => format!(" you · {n} queued "),
         (true, _) => format!(
             " you · sends after this turn{} ",
             app.elapsed().map(|t| format!(" ({t})")).unwrap_or_default()
         ),
-        _ => " you ".to_string(),
+        _ => bound,
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -6375,6 +6603,7 @@ mod tests {
             title: title.into(),
             owner: owner.map(str::to_string),
             status: status.into(),
+            created_at_ms: 0,
         }
     }
 
@@ -6695,7 +6924,7 @@ mod tests {
                 .to_string()
         };
         let go = label("go into the main chat");
-        let send = label("send it one instruction");
+        let send = label("hand main one instruction");
         assert_ne!(
             go, send,
             "the two /main rows must not read alike:\n{screen}"
@@ -7838,6 +8067,103 @@ mod tests {
         assert!(screen.contains("jod"), "{screen}");
     }
 
+    /// A collapsed catalog must not claim the catalog is empty.
+    ///
+    /// Collapsed, the box shows the *current* project — and with none set it
+    /// said "nothing set — /project add" beside a fleet drawing four
+    /// repositories, with a remedy telling you to add one you already have.
+    /// Two presses of `Ctrl-P` were enough to get there.
+    #[test]
+    fn a_collapsed_catalog_with_nothing_current_still_admits_it_has_projects() {
+        let mut a = with_catalog(&["alpha", "beta"], None);
+        a.projects_open = false;
+
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("2 catalogued"),
+            "it says how many it has:\n{screen}"
+        );
+        assert!(
+            !screen.contains("nothing set"),
+            "and does not claim to have none:\n{screen}"
+        );
+        // And it fits. Written without a `cut`, this line lost its last three
+        // characters at every width — `… catalogued · Ctr` — which dropped the
+        // keystroke the sentence exists to name, on the one screen that tells
+        // you how to reach your projects.
+        assert!(
+            screen.contains("Ctrl-P"),
+            "the keystroke it names has to survive the width:\n{screen}"
+        );
+
+        // A genuinely empty catalog keeps the sentence that fits it, remedy and
+        // all — that case is the one `/project add` is the answer to.
+        let mut empty = with_catalog(&[], None);
+        empty.projects_open = false;
+        let screen = rendered(&empty, 140, 30);
+        assert!(screen.contains("nothing set"), "{screen}");
+        assert!(screen.contains(CATALOG_REMEDY), "{screen}");
+    }
+
+    /// A catalogued checkout that is not there any more says so.
+    ///
+    /// The panel is where a project is chosen, and choosing one whose directory
+    /// has been deleted or renamed routes an instruction into a directory that
+    /// cannot be entered. It does not fail politely: the supervisor reports the
+    /// operating system refusing the working directory as
+    /// `could not start ".../claude": No such file or directory`, which reads
+    /// as the harness being missing from the machine. `jod project ls` has
+    /// explained this for a while; this screen listed it like any other row.
+    #[test]
+    fn a_project_whose_directory_is_gone_is_marked_on_the_panel() {
+        let mut a = with_catalog(&["alpha", "gone"], None);
+        a.projects_open = true;
+        a.broken_projects = ["gone".to_string()].into_iter().collect();
+
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("gone · missing"),
+            "the row says the checkout is not there:\n{screen}"
+        );
+        assert!(
+            screen.lines().any(|l| l.contains("alpha") && !l.contains("missing")),
+            "and a healthy project is left exactly as it was:\n{screen}"
+        );
+    }
+
+    /// Two checkouts whose directories share a name are two rows, and the
+    /// panel has to say which is which.
+    ///
+    /// Found by running it: two repositories both called `web` drew as two
+    /// identical rows, on the one box whose whole job is saying which
+    /// repository the next sentence lands in. Pressing `⏎` on either entered "a
+    /// manager" with no way to know whose.
+    #[test]
+    fn two_projects_with_one_name_are_told_apart_by_where_they_are() {
+        let mut a = with_catalog(&["web", "gamma"], None);
+        a.projects_open = true;
+        let mut other = catalogued("web");
+        other.id = "web-two".into();
+        other.path = "/home/reljod/work/web".into();
+        a.projects.push(other);
+
+        let screen = rendered(&a, 140, 30);
+        assert!(
+            screen.contains("web in repo"),
+            "the first says which directory it is in:\n{screen}"
+        );
+        assert!(
+            screen.contains("web in work"),
+            "and so does the second:\n{screen}"
+        );
+        // A name nothing else shares is left exactly as it was — the qualifier
+        // is for the clash, not decoration on every row.
+        assert!(
+            screen.lines().any(|l| l.contains("gamma") && !l.contains(" in ")),
+            "an unshared name is not qualified:\n{screen}"
+        );
+    }
+
     /// The one fact the box exists for.
     #[test]
     fn the_current_project_is_marked() {
@@ -8536,6 +8862,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A short terminal must not drop menu entries in silence.
+    ///
+    /// At 100×10 the workspace menu stopped after `a activity` and lost ten
+    /// rows — including the only routes to jobs, resume, search and the keymap
+    /// — with nothing on screen saying they were there. The `?` overlay in the
+    /// same situation has always said "N more — widen the window", so the two
+    /// overlays disagreed about whether truncation is worth mentioning.
+    #[test]
+    fn the_workspace_menu_says_what_a_short_terminal_is_hiding() {
+        let mut a = app();
+        a.overlay = Overlay::WhichKey;
+
+        let short = rendered(&a, 100, 10);
+        assert!(
+            short.contains("more — widen the window"),
+            "ten rows cannot hold the menu, and it has to say so:\n{short}"
+        );
+        // The count is of entries, so it has to be a real number rather than
+        // the word "some".
+        assert!(
+            short.contains("· 10 more"),
+            "and say how many:\n{short}"
+        );
+
+        // Given room, it goes back to the ordinary footer and claims nothing.
+        let tall = rendered(&a, 100, 40);
+        assert!(
+            !tall.contains("more — widen the window"),
+            "nothing is hidden at forty rows:\n{tall}"
+        );
+        assert!(tall.contains("any other key is ignored"), "{tall}");
     }
 
     /// The size the overlay is actually used at has to be complete, not merely
@@ -11254,7 +11613,10 @@ mod tests {
             stalled_for_ms: None,
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }
@@ -11639,6 +12001,495 @@ mod tests {
         assert!(
             frame.contains("hello-agent"),
             "and it is named, not just numbered:\n{frame}"
+        );
+    }
+
+    /// Every row the cursor can be on must be the row the highlight is on.
+    ///
+    /// `forest_of` emits a `NodeKind::Main` row for the pinned chat, and
+    /// `App::tree_rows` drops the older sentinel id when it does — but the pane
+    /// drew the sentinel anyway. That is one more drawn row than there were
+    /// ids, so from the second position down the `▸` sat one row above the node
+    /// every verb acted on: `⏎` opened the wrong thing and `x` untracked the
+    /// project under the row that looked like Jod's own.
+    ///
+    /// The assertion walks every cursor position rather than checking one,
+    /// because the two lists agreeing at position 0 is exactly how the bug hid.
+    #[test]
+    fn the_highlighted_row_is_the_row_the_cursor_is_on() {
+        use jod_core::projects::NewProject;
+
+        let store = RealStore::in_memory().expect("an in-memory store");
+        // The pinned chat, so the forest carries its own `Main` row — the case
+        // the sentinel was supposed to stand in for and no longer must.
+        store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .expect("a main chat");
+        // A real directory, because the catalog refuses a path that is not
+        // there — and rightly so: a project is somewhere a session is started.
+        let dir = std::env::temp_dir().join(format!("jod-tree-cursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory to catalog");
+        let project = store.add_project(NewProject::at(&dir)).expect("a project");
+        let work = store
+            .create_work_in("port the parser", Some(&project.id))
+            .expect("a work");
+        store
+            .set_work_title(&work.id, "the parser")
+            .expect("a work title");
+
+        let mut a = app();
+        a.forest = store.forest().expect("a forest");
+        a.go(Workspace::Fleet);
+        a.reconcile();
+        assert!(
+            a.forest_holds_main(),
+            "the forest carries the pinned chat, which is what this is about",
+        );
+
+        // Everything open, so the walk covers a project's children too rather
+        // than stopping at the two top-level rows.
+        a.tree.expand_all(&a.forest);
+        let ids = a.tree_rows();
+        assert!(
+            ids.len() >= 3,
+            "main, the project, its manager-less work: three rows to walk: {ids:?}",
+        );
+        a.tree.first(&ids);
+        for (at, id) in ids.iter().enumerate() {
+            if at > 0 {
+                a.tree.step(1, &ids);
+            }
+            assert_eq!(a.tree.index(&ids), at, "the cursor walks one row at a time");
+            let frame = rendered(&a, 150, 30);
+            // The cursor is the first cell inside a pane's left border, which
+            // is what tells it apart from the `▸` a collapsed node draws in
+            // the marker column further along the same row.
+            let cursor: Vec<&str> = frame
+                .lines()
+                .filter(|line| {
+                    line.split('│')
+                        .nth(1)
+                        .is_some_and(|cell| cell.starts_with('▸'))
+                })
+                .collect();
+            let label = a
+                .forest
+                .iter()
+                .find(|n| &n.id == id)
+                .map(|n| n.label.clone())
+                .unwrap_or_default();
+            assert!(
+                cursor.iter().any(|line| line.contains(label.as_str())),
+                "row {at} is `{label}`, and the ▸ must be on it, not above it:\n{frame}",
+            );
+        }
+    }
+
+    /// The fleet's caption describes the fleet, not only its processes.
+    ///
+    /// It counted runs, so a tree holding projects, managers and works whose
+    /// agents had all finished was captioned "nothing delegated yet" — a line
+    /// contradicting the rows directly above it.
+    #[test]
+    fn a_fleet_with_no_running_process_still_counts_what_is_on_it() {
+        let mut a = two_works();
+        a.agents = Vec::new();
+        a.reconcile();
+
+        let caption = a.count_for(Workspace::Fleet);
+        assert!(
+            !caption.contains("nothing delegated yet"),
+            "there are works on the screen: {caption}"
+        );
+        assert!(caption.contains("work"), "it says what is there: {caption}");
+        assert!(
+            caption.contains("nothing running"),
+            "and that none of it is moving: {caption}"
+        );
+
+        // A genuinely empty fleet keeps the sentence written for it.
+        let mut empty = app();
+        empty.go(Workspace::Fleet);
+        empty.reconcile();
+        assert_eq!(empty.count_for(Workspace::Fleet), "nothing delegated yet");
+    }
+
+    /// A filter on the fleet says so, on the tree as well as the flat list.
+    ///
+    /// The flat list has drawn this line since it had one; the tree never did.
+    /// Once the fleet always had a tree, filtering hid rows — whole projects,
+    /// and `★ jod` — with nothing anywhere saying a filter was on, so the
+    /// screen read as a fleet that had lost them.
+    #[test]
+    /// An empty state that does not fit says so, rather than becoming a
+    /// different sentence.
+    ///
+    /// The line was handed to the widget whole and clipped in silence. At a
+    /// hundred columns the memory screen read "nothing remembered yet —
+    /// /remember writes on", which is wrong *and* grammatical, so nothing about
+    /// it looks truncated — the reader has no reason to doubt it.
+    #[test]
+    fn an_empty_state_too_wide_for_its_pane_is_marked_as_cut() {
+        let mut a = app();
+        a.go(Workspace::Memory);
+        a.reconcile();
+
+        let narrow = rendered(&a, 100, 30);
+        let line = narrow
+            .lines()
+            .find(|l| l.contains("nothing remembered yet"))
+            .expect("the empty state is drawn");
+        assert!(
+            line.contains('…'),
+            "a clipped sentence has to say it was clipped:\n{line}"
+        );
+        assert!(
+            !line.contains("writes one"),
+            "the premise: it does not fit at this width:\n{line}"
+        );
+
+        // Given the room, it is left exactly as written.
+        let wide = rendered(&a, 200, 30);
+        assert!(
+            wide.contains("nothing remembered yet — /remember writes one"),
+            "nothing is cut when nothing needs to be:\n{wide}"
+        );
+    }
+
+    /// The board says how old a task is, and says nothing when it cannot.
+    ///
+    /// `age_ms` was hard-coded to zero in both converters, so every row read
+    /// `0s` — "just now" — about tasks that had been sitting there for hours.
+    /// The rule this repo already states for the pinned chat's row applies
+    /// here: a row with no age has none, and `0s` is a claim that something
+    /// just happened.
+    #[test]
+    fn the_board_ages_a_task_and_admits_when_it_cannot() {
+        use jod_core::team::TeamTask;
+
+        let mut a = app();
+        a.now_ms = 10_000_000;
+        a.tasks = vec![
+            TeamTask {
+                id: "t-old".into(),
+                title: "port the parser".into(),
+                owner: None,
+                status: "open".into(),
+                created_at_ms: a.now_ms - 3_600_000,
+            },
+            TeamTask {
+                id: "t-undated".into(),
+                title: "written by an older build".into(),
+                owner: None,
+                status: "open".into(),
+                created_at_ms: 0,
+            },
+        ];
+        a.go(Workspace::Tasks);
+        a.reconcile();
+
+        let frame = rendered(&a, 170, 30);
+        let row = |needle: &str| {
+            frame
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("expected a row for {needle}:\n{frame}"))
+                .to_string()
+        };
+        let old_row = row("port the parser");
+        assert!(old_row.contains("1h"), "an hour old reads as an hour:\n{old_row}");
+        assert!(!old_row.contains("0s"), "and never as just now:\n{old_row}");
+        let undated = row("written by an older build");
+        assert!(
+            undated.contains('\u{2014}'),
+            "no timestamp is a dash, not a zero:\n{undated}"
+        );
+    }
+
+    /// A popup stays inside the chat column and off the side panel.
+    ///
+    /// The width was the whole frame minus the box's left edge, which is not
+    /// "the room to the right of the input box" whenever anything sits beside
+    /// the chat. The palette grew past the composer and painted over the rail,
+    /// leaving fragments of it — `8s`, `200k` — and orphaned corners. It
+    /// happened at every width wide enough for the panel to exist and too
+    /// narrow for the chat column to cover the palette on its own.
+    #[test]
+    fn a_popup_stays_inside_the_chat_column() {
+        let mut a = app();
+        for n in 0..6 {
+            a.push(Entry::Notice(format!("something happened, number {n}")));
+        }
+        a.panel = true;
+        a.input = "/".into();
+        a.cursor = 1;
+
+        let frame = rendered(&a, 110, 42);
+        assert!(
+            frame.lines().any(|l| l.contains("mode ")),
+            "the side panel is on screen at all:\n{frame}"
+        );
+
+        // The bound is the **chat column**, not the composer.
+        //
+        // Asserting `palette <= composer` would be stricter than the truth and
+        // would reject correct output: the composer is capped at a comfortable
+        // reading width, and on a wide terminal the palette rightly runs past
+        // it to the edge of the column. At this size the two happen to
+        // coincide, which is exactly how such an assertion hides — so this
+        // measures the thing that actually matters, which is whether the
+        // palette reaches what sits beside the chat.
+        let palette_end = frame
+            .lines()
+            .find(|l| l.contains("Tab completes"))
+            .and_then(|l| l.chars().position(|c| c == '\u{2510}'))
+            .unwrap_or_else(|| panic!("the palette is drawn:\n{frame}"));
+        // The column where the *panel's* border begins, not the first border on
+        // the row — the palette's own opening corner is further left.
+        let panel_start = frame
+            .lines()
+            .find_map(|l| {
+                let chars: Vec<char> = l.chars().collect();
+                (0..chars.len()).find(|&at| {
+                    chars[at..].starts_with(&['\u{250c}', ' ', 'p', 'r', 'o', 'j'])
+                })
+            })
+            .unwrap_or_else(|| panic!("the side panel is drawn:\n{frame}"));
+        assert!(
+            palette_end < panel_start,
+            "the palette closes at column {palette_end} and the panel opens at \
+             {panel_start}, so it is drawn over what sits beside the chat:\n{frame}"
+        );
+    }
+
+    /// A popup floats over the transcript; it does not merge with its border.
+    ///
+    /// Both popups were anchored at `input.y - h`, which puts their bottom
+    /// border on exactly the row the transcript's bottom border occupies. The
+    /// `Clear` covers only the popup's own width, so the two joined into one
+    /// line of doubled corners —
+    ///
+    /// ```text
+    /// └───────────└──────── @ · ⏎ inserts ────────┘─────────────┘
+    /// ```
+    ///
+    /// — which reads as a half-drawn box. The `/` palette hid it by usually
+    /// being as wide as the transcript; the `@` picker is 56 columns and showed
+    /// it every time.
+    #[test]
+    fn a_popup_leaves_the_transcripts_border_whole() {
+        let mut a = app();
+        // A transcript with something in it, or the console draws the splash
+        // instead of a transcript box — and the border this is about is the
+        // transcript's. An empty console passes whatever the anchor does.
+        for n in 0..6 {
+            a.push(Entry::Notice(format!("something happened, number {n}")));
+        }
+        a.cwd = std::env::current_dir().expect("a working directory");
+        a.roots = vec![jod_core::roots::Root {
+            id: 1,
+            conversation_id: "c".into(),
+            path: a.cwd.clone(),
+            writable: false,
+            position: 0,
+            origin: jod_core::roots::Origin::Human,
+            added_at_ms: 0,
+        }];
+        a.input = "look at @".into();
+        a.cursor = a.input.len();
+        a.open_mention(a.input.len() - 1);
+
+        let frame = rendered(&a, 150, 30);
+        let lines: Vec<&str> = frame.lines().collect();
+        let composer = lines
+            .iter()
+            .position(|l| l.contains("┌ you"))
+            .expect("the composer box is drawn");
+        let border = lines[composer - 1];
+
+        assert!(
+            border.matches('└').count() <= 1 && border.matches('┘').count() <= 1,
+            "the row above the composer is one unbroken border, not two boxes \
+             sharing a line:\n{border}\n\n{frame}"
+        );
+        assert!(
+            !border.contains('┌') && !border.contains('┐'),
+            "and nothing opens a box on it:\n{border}"
+        );
+        // Still on screen: the point is where it sits, not that it was hidden
+        // in order to pass this.
+        assert!(frame.contains("⏎ inserts"), "the picker is drawn:\n{frame}");
+    }
+
+    /// A filter on the fleet says so, on the tree as well as the flat list.
+    ///
+    /// The flat list has drawn this line since it had one; the tree never did.
+    /// Once the fleet always had a tree, filtering hid rows — whole projects,
+    /// and `★ jod` — with nothing anywhere saying a filter was on, so the
+    /// screen read as a fleet that had lost them. The count has to be about
+    /// those rows too: it was reading the flat *agent* list while the pane drew
+    /// tree nodes, so it reported `0 match` beside rows plainly on screen.
+    #[test]
+    fn a_filtered_tree_says_it_is_filtered() {
+        let mut a = two_works();
+        a.reconcile();
+        assert!(a.has_tree(), "the case is the tree, not the flat list");
+
+        let unfiltered = rendered(&a, 150, 30);
+        assert!(
+            !unfiltered.contains("filter"),
+            "nothing is claimed when nothing is filtered:\n{unfiltered}"
+        );
+
+        a.here_mut().filter = Some("parser".into());
+        let frame = rendered(&a, 150, 30);
+        assert!(
+            frame.contains("/parser"),
+            "the typed filter is on screen:\n{frame}"
+        );
+        assert!(
+            frame.contains("match"),
+            "and how much it is hiding:\n{frame}"
+        );
+        // The number has to be about the rows on screen. It counted
+        // `row_ids(Fleet)` — the flat *agent* list plus a sentinel — while the
+        // pane drew tree nodes, two unrelated collections. With no agents and a
+        // filter matching several rows that arithmetic reports `0 match` beside
+        // them, which is what a person actually saw.
+        assert!(
+            a.agents.is_empty(),
+            "the premise: the flat list is empty while the tree is not",
+        );
+        assert!(
+            !frame.contains("0 match"),
+            "rows are plainly on screen, so the count cannot be zero:\n{frame}"
+        );
+        assert!(
+            frame.contains(&format!("{} match", a.tree_rows().len())),
+            "it counts the rows the pane draws:\n{frame}"
+        );
+    }
+
+    /// The fleet says when nothing is marking stalls.
+    ///
+    /// Every session arms a heartbeat, and only `jod daemon` sweeps them. With
+    /// no daemon no stall is ever marked, so this screen draws every wedged
+    /// agent as healthy — the state the mark exists to end, quietly restored by
+    /// a daemon nobody started. The console said so once into the transcript,
+    /// which the person who opens the fleet an hour later never sees.
+    #[test]
+    fn the_fleet_says_when_no_daemon_is_watching_for_stalls() {
+        let mut a = two_works();
+        a.reconcile();
+
+        let quiet = rendered(&a, 150, 30);
+        assert!(
+            !quiet.contains("no stall watch"),
+            "nothing is claimed while a daemon is sweeping:\n{quiet}"
+        );
+
+        a.nothing_is_sweeping = true;
+        let warned = rendered(&a, 150, 30);
+        assert!(
+            warned.contains("no stall watch"),
+            "the fleet says the mark is not being written:\n{warned}"
+        );
+        assert!(
+            warned.contains("jod daemon"),
+            "and names the remedy, since the warning is useless without it:\n{warned}"
+        );
+    }
+
+    /// A collapsed project whose engineer is wedged must not spin.
+    ///
+    /// The fleet is read collapsed. A spinner is the strongest "this is fine"
+    /// signal the screen has, and a project drew one while its only agent had
+    /// been silent for thirty-seven minutes — the exact picture the stall mark
+    /// was added to prevent, one level above where it was fixed.
+    #[test]
+    fn a_collapsed_project_says_stalled_rather_than_spinning() {
+        use jod_core::tree::{Node, NodeId, NodeKind};
+
+        let mut a = app();
+        a.forest = vec![Node {
+            id: NodeId::project("p"),
+            parent: None,
+            kind: NodeKind::Project,
+            depth: 0,
+            label: "web".into(),
+            summary: String::new(),
+            // Truthfully running — its wedged engineer has not exited — which
+            // is precisely why `running` alone must not decide the mark.
+            running: true,
+            status: None,
+            stalled_for_ms: None,
+            cards: 0,
+            blocked: 0,
+            stalled: 1,
+            colour: "cyan".into(),
+            branch: None,
+            worktree: None,
+            expanded: false,
+            has_children: true,
+        }];
+        a.go(Workspace::Fleet);
+        a.reconcile();
+
+        let frame = rendered(&a, 150, 30);
+        // The fleet pane's cell, not the detail pane beside it — both name the
+        // project, and only one of them is the row being tested.
+        let row = frame
+            .lines()
+            .filter_map(|l| l.split('│').nth(1))
+            .find(|cell| cell.contains("web"))
+            .expect("the project is drawn in the fleet pane")
+            .to_string();
+        assert!(row.contains("stalled"), "the row says so: {row}");
+        assert!(
+            !["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                .iter()
+                .any(|frame| row.contains(frame)),
+            "and does not also spin: {row}"
+        );
+    }
+
+    /// The fleet is the agents somebody delegated, not Jod's own errands.
+    ///
+    /// A titler and a compaction write into no conversation, so the forest has
+    /// no node for them and they fell into the pane for runs that belong to no
+    /// work. On a machine with four projects on it, five of that pane's six
+    /// rows were housekeeping and the delegated run it exists to show was the
+    /// one scrolled out of sight.
+    #[test]
+    fn the_fleet_does_not_count_jods_own_errands_as_agents() {
+        let mut a = two_works();
+        let titler = jod_core::works::titler_run_name(&uuid::Uuid::new_v4().to_string());
+        a.agents = vec![
+            agent_line("de1e6a7e", "hello-agent", "running"),
+            agent_line("7171e2ed", &titler, "completed"),
+            agent_line(
+                "c0m9ac70",
+                jod_core::works::COMPACTION_RUN_NAME,
+                "completed",
+            ),
+        ];
+        a.reconcile();
+
+        let loose: Vec<&str> = a.loose_rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            loose,
+            vec!["hello-agent"],
+            "only the delegated run belongs in the pane",
+        );
+
+        let frame = rendered(&a, 150, 30);
+        assert!(
+            frame.contains("hello-agent"),
+            "the delegated run is still drawn:\n{frame}"
+        );
+        assert!(
+            !frame.contains(&titler),
+            "and the titler is not:\n{frame}"
         );
     }
 

@@ -188,7 +188,7 @@ pub fn install(
     dry_run: bool,
 ) -> Result<Registration> {
     let path = config_path(harness)?;
-    let exe = std::env::current_exe()?;
+    let exe = crate::paths::own_exe()?;
     install_at(&path, harness, access, jod_home, &exe, dry_run)
 }
 

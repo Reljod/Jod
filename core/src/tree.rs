@@ -86,6 +86,26 @@ impl NodeId {
     }
 }
 
+/// What a project row is called.
+///
+/// Its name, unless another catalogued repository answers to the same one — in
+/// which case the directory it sits in comes too. Two checkouts both called
+/// `web` are otherwise two identical rows whose only difference is an id
+/// nobody reads, on the screen whose job is saying which repository work is
+/// happening in.
+///
+/// The same qualifier the projects panel uses, deliberately: two screens
+/// naming one thing differently is worse than either name.
+fn label_for(project: &crate::projects::Project, shared: &HashSet<String>) -> String {
+    if !shared.contains(&project.name) {
+        return project.name.clone();
+    }
+    match project.path.parent().and_then(|p| p.file_name()) {
+        Some(dir) => format!("{} in {}", project.name, dir.to_string_lossy()),
+        None => project.name.clone(),
+    }
+}
+
 /// One row, already flattened for rendering.
 ///
 /// `Serialize` so the HTTP API can hand the *same* forest to a browser that the
@@ -128,8 +148,33 @@ pub struct Node {
     pub cards: usize,
     /// Open cards in the subtree that are blocking.
     pub blocked: usize,
+    /// Runs stalled anywhere in this node's subtree, including this row itself.
+    ///
+    /// Rolled up the way `cards` is, and for the same reason: the fleet is read
+    /// **collapsed**. `stalled_for_ms` is deliberately a fact about one process
+    /// and null on every group row, which left a project whose only engineer
+    /// had been wedged for half an hour drawing the spinner — the strongest
+    /// "this is fine" signal on the screen, on exactly the case the stall mark
+    /// was added to catch. The badge was there; you had to already suspect
+    /// something to expand far enough to see it.
+    pub stalled: usize,
     /// The owning work's colour, for tinting the row.
     pub colour: String,
+    /// The branch the work's held worktree is on, if it has claimed one.
+    ///
+    /// A work session is launched in the checkout and reads it read-only; the
+    /// moment it needs to write it calls `claim_worktree`, and from then on its
+    /// edits land on a branch in a directory under `$JOD_HOME/worktrees` that
+    /// nothing on screen used to name. So an agent would report a file changed,
+    /// and the checkout the person was looking at was untouched. These two
+    /// fields are what lets a row say where its work actually is.
+    ///
+    /// Null on `Main`, `Project` and `Manager` rows, none of which do work, and
+    /// on a work that has not claimed one — which is the honest starting state,
+    /// not a missing value.
+    pub branch: Option<String>,
+    /// Where that branch is checked out.
+    pub worktree: Option<String>,
     pub expanded: bool,
     pub has_children: bool,
 }
@@ -219,11 +264,21 @@ fn push_runs(
     parent: &NodeId,
     depth: usize,
     colour: &str,
-) -> bool {
+) -> (bool, usize) {
     let mut any_running = false;
+    let mut stalled_here = 0usize;
     for run in from.runs.remove(conversation_id).unwrap_or_default() {
         let running = run.status == "running";
         any_running |= running;
+        // Only for a run that still claims to be running. A finished run's
+        // leftover mark, if a sweep has not yet retired the row, would draw a
+        // badge on something that has already stopped.
+        let stalled_for_ms = from
+            .stalled
+            .get(&run.id)
+            .filter(|_| running)
+            .map(|since| from.now_ms.saturating_sub(*since).max(0));
+        stalled_here += usize::from(stalled_for_ms.is_some());
         out.push(Node {
             id: NodeId::run(&run.id),
             parent: Some(parent.clone()),
@@ -235,20 +290,23 @@ fn push_runs(
             // Only for a run that still claims to be running. A finished run's
             // leftover mark, if a sweep has not yet retired the row, would draw
             // a badge on something that has already stopped.
-            stalled_for_ms: from
-                .stalled
-                .get(&run.id)
-                .filter(|_| running)
-                .map(|since| from.now_ms.saturating_sub(*since).max(0)),
+            stalled_for_ms: stalled_for_ms,
             status: Some(run.status),
             cards: 0,
             blocked: 0,
+            // Its own stall counts, so the roll-up above it is a plain sum
+            // rather than a special case for the row that holds the fact.
+            stalled: usize::from(stalled_for_ms.is_some()),
             colour: colour.to_string(),
+            // A run inherits nothing: the worktree belongs to the work
+            // above it, and the row that names it is the one that holds it.
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         });
     }
-    any_running
+    (any_running, stalled_here)
 }
 
 /// Whether any run wrote into this conversation, without draining them.
@@ -269,13 +327,32 @@ fn holds_runs(from: &Flatten<'_>, conversation_id: &str) -> bool {
 /// Returns the work's own cards, blocked cards and whether anything under it is
 /// running, so a project row can add them up the same way a work adds up its
 /// sessions.
+/// What one work contributed to the project above it.
+///
+/// A tuple of three had already outgrown being readable at the call site, and
+/// the stall count is a fourth thing that must not be silently swapped with the
+/// card count next to it.
+struct WorkRoll {
+    cards: usize,
+    blocked: usize,
+    stalled: usize,
+    running: bool,
+}
+
 fn push_work(
     out: &mut Vec<Node>,
     work: &Work,
     from: &mut Flatten<'_>,
     base_depth: usize,
     parent: Option<NodeId>,
-) -> (usize, usize, bool) {
+    // The worktree this work holds, if it has claimed one. Given to the work
+    // row and to every session under it: a session inherits its work's lease
+    // rather than holding one of its own, and the session row is what the tree
+    // usually shows once `condense` has folded the work away.
+    lease: Option<&crate::leases::Lease>,
+) -> WorkRoll {
+    let branch = lease.map(|l| l.branch.clone());
+    let worktree = lease.map(|l| l.worktree_path.to_string_lossy().into_owned());
     let own = from.sessions.remove(&work.id).unwrap_or_default();
     // A session whose parent is outside this work — the main chat is the usual
     // one — hangs from the work itself. Otherwise the whole subtree would be
@@ -308,7 +385,10 @@ fn push_work(
         stalled_for_ms: None,
         cards: 0,
         blocked: 0,
+        stalled: 0,
         colour: work.colour.clone(),
+        branch: branch.clone(),
+        worktree: worktree.clone(),
         expanded: true,
         has_children: !own.is_empty(),
     });
@@ -328,6 +408,7 @@ fn push_work(
 
     let mut work_cards = 0usize;
     let mut work_blocked = 0usize;
+    let mut work_stalled = 0usize;
     let mut work_running = false;
     while let Some((session, depth, session_parent)) = stack.pop() {
         if let Some(kids) = children.get(&Some(session.id.clone())) {
@@ -359,11 +440,15 @@ fn push_work(
             stalled_for_ms: None,
             cards: session.cards,
             blocked: session.blocked,
+            stalled: 0,
             colour: work.colour.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
             expanded: true,
             has_children,
         });
-        work_running |= push_runs(
+        let session_node = out.len() - 1;
+        let (session_running, session_stalled) = push_runs(
             out,
             from,
             &session.id,
@@ -371,15 +456,24 @@ fn push_work(
             depth + 1,
             &work.colour,
         );
+        work_running |= session_running;
+        work_stalled += session_stalled;
+        out[session_node].stalled = session_stalled;
     }
     // Cards cascade upward only, so the work's counts are its sessions' — which
     // is what makes the tree say where the questions are without being
     // expanded.
     out[work_node].cards = work_cards;
     out[work_node].blocked = work_blocked;
+    out[work_node].stalled = work_stalled;
     let running = work_running && work.state != State::Closed;
     out[work_node].running = running;
-    (work_cards, work_blocked, running)
+    WorkRoll {
+        cards: work_cards,
+        blocked: work_blocked,
+        stalled: work_stalled,
+        running,
+    }
 }
 
 /// One run under a session.
@@ -425,6 +519,24 @@ impl Store {
         // below. The alternative is a lookup per run node, on the screen most
         // likely to be open while forty runs are going.
         let stalled = self.stalled_runs()?;
+        // Same bargain as `stalled`: one read for the whole forest rather than
+        // a lookup per work, so the row can say where its agent is actually
+        // writing without costing a query per redraw.
+        let leases = self.held_leases_by_work()?;
+        // Names more than one catalogued repository answers to. Two checkouts
+        // both called `web` are two rows the tree cannot tell apart, and the
+        // id is the only thing that differs — so the row carries the same
+        // qualifier the projects panel does, and the two screens agree.
+        let shared_names: HashSet<String> = {
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut twice: HashSet<String> = HashSet::new();
+            for p in &projects {
+                if !seen.insert(p.name.as_str()) {
+                    twice.insert(p.name.clone());
+                }
+            }
+            twice
+        };
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         let mut cards: HashMap<String, (usize, usize)> = HashMap::new();
@@ -611,12 +723,18 @@ impl Store {
                 stalled_for_ms: None,
                 cards: main_cards,
                 blocked: main_blocked,
+                stalled: 0,
                 colour: "cyan".to_string(),
+                // Jod routes; it does not check anything out.
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: holds_runs(&from, main),
             });
-            let running = push_runs(&mut out, &mut from, main, &id, 1, "cyan");
+            let (running, stalled_below) =
+                push_runs(&mut out, &mut from, main, &id, 1, "cyan");
             out[main_node].running = running;
+            out[main_node].stalled = stalled_below;
         }
 
         for project_id in order {
@@ -659,20 +777,25 @@ impl Store {
                 parent: None,
                 kind: NodeKind::Project,
                 depth: 0,
-                label: project.name.clone(),
+                label: label_for(&project, &shared_names),
                 summary: project.notes.clone(),
                 running: false,
                 status: None,
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: project.colour.clone(),
+                // A project row is the checkout itself, never a worktree of it.
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: true,
             });
 
             let mut project_cards = 0usize;
             let mut project_blocked = 0usize;
+            let mut project_stalled = 0usize;
             let mut project_running = false;
 
             // The manager first, then the works. First because it is the row
@@ -702,37 +825,48 @@ impl Store {
                     stalled_for_ms: None,
                     cards: manager_cards,
                     blocked: manager_blocked,
+                    stalled: 0,
                     colour: project.colour.clone(),
+                    // A manager decides; its engineers hold the worktrees.
+                    branch: None,
+                    worktree: None,
                     expanded: true,
                     has_children: holds_runs(&from, manager),
                 });
-                let running =
+                let (running, stalled_below) =
                     push_runs(&mut out, &mut from, manager, &id, 2, &project.colour);
                 out[manager_node].running = running;
+                out[manager_node].stalled = stalled_below;
                 project_cards += manager_cards;
                 project_blocked += manager_blocked;
+                project_stalled += stalled_below;
                 project_running |= running;
             }
 
             for work in by_project.remove(&project.id).unwrap_or_default() {
-                let (cards, blocked, running) = push_work(
+                let held = leases.get(&work.id);
+                let roll = push_work(
                     &mut out,
                     &work,
                     &mut from,
                     1,
                     Some(NodeId::project(&project.id)),
+                    held,
                 );
-                project_cards += cards;
-                project_blocked += blocked;
-                project_running |= running;
+                project_cards += roll.cards;
+                project_blocked += roll.blocked;
+                project_stalled += roll.stalled;
+                project_running |= roll.running;
             }
             out[project_node].cards = project_cards;
             out[project_node].blocked = project_blocked;
+            out[project_node].stalled = project_stalled;
             out[project_node].running = project_running;
         }
 
         for work in loose {
-            push_work(&mut out, &work, &mut from, 0, None);
+            let held = leases.get(&work.id);
+            push_work(&mut out, &work, &mut from, 0, None, held);
         }
 
         Ok(out)
@@ -818,6 +952,54 @@ impl Condensed {
 /// - A **closed** work, which stays a heading under its project. `z` exists to
 ///   show the archives, and flattening them in would leave a project holding a
 ///   pile of finished agents with nothing marking which are over.
+/// Put every row directly after the row it hangs from.
+///
+/// The tree is flattened by array order: the guides, the indent, and which rows
+/// a collapsed row hides are all read off position, not off `parent`. So a row
+/// whose parent is correct and whose *place* is not is drawn under whatever
+/// happened to come before it, and collapsing that row hides it.
+///
+/// [`Store::fleet`] is where this bites. It reads the live forest and then
+/// appends a second, closed one, so every closed work landed after the last
+/// live row on the screen — a repository's finished work drawn under an
+/// unrelated one, and hidden when that one was folded away.
+///
+/// Depth-first over the existing order, so within one parent the rows keep the
+/// order they already had; only rows that were in the wrong group move.
+///
+/// A row whose parent is not on screen becomes a root rather than disappearing,
+/// and anything the walk cannot place — which would mean a cycle, and should be
+/// impossible — leaves the original order untouched. Losing a row from the
+/// fleet is worse than drawing one in an odd place.
+fn in_tree_order(nodes: Vec<Node>) -> Vec<Node> {
+    let present: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+    let mut children: HashMap<Option<NodeId>, Vec<usize>> = HashMap::new();
+    for (at, node) in nodes.iter().enumerate() {
+        let key = node.parent.clone().filter(|p| present.contains(p));
+        children.entry(key).or_default().push(at);
+    }
+    let mut out: Vec<Node> = Vec::with_capacity(nodes.len());
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = children.get(&None).cloned().unwrap_or_default();
+    stack.reverse();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        out.push(nodes[at].clone());
+        if let Some(kids) = children.get(&Some(nodes[at].id.clone())) {
+            for kid in kids.iter().rev() {
+                stack.push(*kid);
+            }
+        }
+    }
+    if out.len() == nodes.len() {
+        out
+    } else {
+        nodes
+    }
+}
+
 pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
     let mut out: Vec<Node> = Vec::new();
     let mut works: HashMap<NodeId, String> = HashMap::new();
@@ -967,6 +1149,12 @@ pub fn condense(nodes: &[Node], closed: &HashSet<NodeId>) -> Condensed {
         }
     }
 
+    // Every row into its own group before anything is read off position.
+    // `has_children` just below, and the guides and folding in the renderer,
+    // all ask "what comes next" rather than "what hangs from this" — so this
+    // has to happen first or they answer about the wrong rows.
+    let mut out = in_tree_order(out);
+
     // The shape that is left, rather than the one core described: a session
     // that had runs under it is now a leaf, and a project whose only work was
     // dropped has children it did not have before.
@@ -1093,6 +1281,300 @@ mod tests {
     #[test]
     fn an_empty_forest_has_no_rows() {
         assert!(store().forest().unwrap().is_empty());
+    }
+
+    /// Two repositories with one name are two rows a person can tell apart.
+    ///
+    /// The fleet labelled a project by its bare name, so two checkouts both
+    /// called `web` drew as two identical rows whose only difference was an id
+    /// nobody reads — on the screen whose whole job is saying which repository
+    /// work is happening in. The projects panel had already been taught this;
+    /// the tree had not, and two screens naming one thing differently is worse
+    /// than either name.
+    #[test]
+    fn two_projects_with_one_name_are_told_apart_on_the_fleet() {
+        use crate::projects::NewProject;
+
+        let s = store();
+        let base = format!("/tmp/jod-tree-shared-{}", std::process::id());
+        for side in ["one", "two"] {
+            let dir = format!("{base}/{side}/web");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = s.add_project(NewProject::at(&dir)).unwrap();
+            let work = s.create_work_in("do a thing", Some(&p.id)).unwrap();
+            s.set_work_title(&work.id, "a thing").unwrap();
+            session(&s, &work.id, None, "engineer");
+        }
+        // And one whose name nothing shares, which must be left alone.
+        let solo = format!("{base}/solo");
+        std::fs::create_dir_all(&solo).unwrap();
+        let p = s.add_project(NewProject::at(&solo)).unwrap();
+        let work = s.create_work_in("solo work", Some(&p.id)).unwrap();
+        session(&s, &work.id, None, "engineer");
+
+        let labels: Vec<String> = s
+            .forest()
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.kind == NodeKind::Project)
+            .map(|n| n.label)
+            .collect();
+
+        assert!(
+            labels.contains(&"web in one".to_string()),
+            "the first says where it is: {labels:?}",
+        );
+        assert!(
+            labels.contains(&"web in two".to_string()),
+            "and so does the second: {labels:?}",
+        );
+        assert!(
+            labels.contains(&"solo".to_string()),
+            "a name nothing shares is not qualified: {labels:?}",
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A closed work belongs to its own repository, not to whatever row the
+    /// live pass happened to leave the cursor on."""
+    ///
+    /// `fleet(All)` reads the live forest and then appends a second, closed
+    /// one, and `condense` walks the concatenation with running state — the
+    /// project it is inside, and the row sessions hang from. A loose work in
+    /// the first pass clears that state, so anything the second pass emitted
+    /// before its own project row inherited it.
+    #[test]
+    fn a_closed_work_is_drawn_under_its_own_project() {
+        use crate::projects::NewProject;
+
+        fn shape(nodes: &[Node]) -> Vec<(usize, &str)> {
+            nodes.iter().map(|n| (n.depth, n.label.as_str())).collect()
+        }
+
+        let s = store();
+        let base = format!("/tmp/jod-closed-parent-{}", std::process::id());
+        let dir = format!("{base}/alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s.add_project(NewProject::at(&dir)).unwrap();
+
+        // A closed work in the repository.
+        let done = s.create_work_in("ship the docs", Some(&project.id)).unwrap();
+        s.set_work_title(&done.id, "ship the docs").unwrap();
+        session(&s, &done.id, None, "writer");
+        s.close_work(&done.id).unwrap();
+
+        // A second repository, with live work in it as well as closed — the
+        // live pass therefore ends somewhere else entirely.
+        let other_dir = format!("{base}/beta");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = s.add_project(NewProject::at(&other_dir)).unwrap();
+        let live = s.create_work_in("make the parser faster", Some(&other.id)).unwrap();
+        s.set_work_title(&live.id, "make the parser faster").unwrap();
+        session(&s, &live.id, None, "engineer");
+        let done2 = s.create_work_in("archive the logs", Some(&other.id)).unwrap();
+        s.set_work_title(&done2.id, "archive the logs").unwrap();
+        session(&s, &done2.id, None, "keeper");
+        s.close_work(&done2.id).unwrap();
+
+        // And an open work belonging to no repository at all, which is the row
+        // the live pass ends on — `forest_of` emits loose works last.
+        let loose = s.create_work("tidy the dotfiles").unwrap();
+        s.set_work_title(&loose.id, "tidy the dotfiles").unwrap();
+        session(&s, &loose.id, None, "tidier");
+
+        let (folded, closed) = s.fleet(Filter::All).unwrap();
+        assert!(closed.contains(&NodeId::work(&done.id)), "the work is closed");
+
+        let row = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::work(&done.id))
+            .expect("the closed work is drawn");
+        assert_eq!(
+            row.parent,
+            Some(NodeId::project(&project.id)),
+            "a closed work hangs from its repository: {:?}",
+            folded
+                .nodes
+                .iter()
+                .map(|n| (n.kind, n.label.as_str(), n.depth, n.parent.clone()))
+                .collect::<Vec<_>>(),
+        );
+
+        let other_row = folded
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::work(&done2.id))
+            .expect("the second closed work is drawn");
+        assert_eq!(
+            other_row.parent,
+            Some(NodeId::project(&other.id)),
+            "and so does the one in the repository that also had live work: {:?}",
+            shape(&folded.nodes),
+        );
+
+        // And it has to be drawn *there*, not merely say so. The tree is
+        // flattened by array order — the guides, the indent, and which rows a
+        // collapsed row hides are all positional — so a row whose parent is
+        // correct but whose position is not is drawn under whatever came
+        // before it. `fleet(All)` appends a whole second forest, which put
+        // every closed work after the last live row on the screen.
+        for (at, node) in folded.nodes.iter().enumerate() {
+            let Some(parent) = &node.parent else { continue };
+            let above = folded.nodes[..at]
+                .iter()
+                .rev()
+                .find(|n| n.depth < node.depth)
+                .map(|n| n.id.clone());
+            assert_eq!(
+                above.as_ref(),
+                Some(parent),
+                "`{}` is drawn under the wrong row: {:?}",
+                node.label,
+                shape(&folded.nodes),
+            );
+        }
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Every row sits directly under the row it hangs from, in a forest with
+    /// one of everything in it.
+    ///
+    /// This is the invariant the renderer *reads*: the guides, the indent, and
+    /// which rows a collapsed row hides are all computed from position, not
+    /// from `parent`. `condense` now reorders to guarantee it, and nothing
+    /// asserted it in general — the closed-work bug was found only because
+    /// someone looked at the screen, and it passed a test that checked `parent`
+    /// because `parent` was right.
+    ///
+    /// Deliberately a *whole forest* rather than a case: main with its own
+    /// runs, two projects, a manager each, live and closed works, sessions
+    /// nested under sessions, and a work belonging to no repository.
+    #[test]
+    fn every_row_in_a_full_forest_is_drawn_under_its_own_parent() {
+        use crate::projects::NewProject;
+
+        let s = store();
+        let base = format!("/tmp/jod-forest-order-{}", std::process::id());
+        let mut ids = Vec::new();
+        for name in ["alpha", "beta"] {
+            let dir = format!("{base}/{name}");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = s.add_project(NewProject::at(&dir)).unwrap();
+            s.manager_conversation(&p.id, HarnessKind::ClaudeCode).unwrap();
+            ids.push(p.id);
+        }
+        s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+
+        for (n, project) in ids.iter().enumerate() {
+            let live = s
+                .create_work_in(&format!("live work {n}"), Some(project))
+                .unwrap();
+            s.set_work_title(&live.id, &format!("live {n}")).unwrap();
+            // Sessions nested under sessions, which is where an ordering bug
+            // shows up as an elbow pointing at the wrong row.
+            let lead = session(&s, &live.id, None, "lead");
+            let child = session(&s, &live.id, Some(&lead), "worker");
+            session(&s, &live.id, Some(&child), "helper");
+            run_for(&s, &lead, &format!("run-{n}"), "running");
+
+            let done = s
+                .create_work_in(&format!("closed work {n}"), Some(project))
+                .unwrap();
+            s.set_work_title(&done.id, &format!("closed {n}")).unwrap();
+            session(&s, &done.id, None, "writer");
+            s.close_work(&done.id).unwrap();
+        }
+        // And one belonging to no repository at all.
+        let loose = s.create_work("tidy the dotfiles").unwrap();
+        s.set_work_title(&loose.id, "tidy the dotfiles").unwrap();
+        session(&s, &loose.id, None, "tidier");
+
+        let (folded, _) = s.fleet(Filter::All).unwrap();
+        let shape: Vec<(usize, &str)> = folded
+            .nodes
+            .iter()
+            .map(|n| (n.depth, n.label.as_str()))
+            .collect();
+        assert!(folded.nodes.len() > 10, "a forest worth walking: {shape:?}");
+
+        for (at, node) in folded.nodes.iter().enumerate() {
+            let Some(parent) = &node.parent else {
+                assert_eq!(node.depth, 0, "a row with no parent is top level: {shape:?}");
+                continue;
+            };
+            let above = folded.nodes[..at]
+                .iter()
+                .rev()
+                .find(|n| n.depth < node.depth)
+                .map(|n| n.id.clone());
+            assert_eq!(
+                above.as_ref(),
+                Some(parent),
+                "`{}` is drawn under the wrong row: {shape:?}",
+                node.label,
+            );
+        }
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A stall is visible on a collapsed fleet, which is the fleet people read.
+    ///
+    /// `stalled_for_ms` is deliberately a fact about one process and null on
+    /// every group row. The consequence, found by seeding a wedged engineer and
+    /// looking: the project above it drew a **spinner** — the strongest "this
+    /// is fine" signal on the screen — while its only agent had been silent for
+    /// thirty-seven minutes. The badge existed; you had to already suspect
+    /// something to expand far enough to see it. So the count rolls up the way
+    /// open cards already do.
+    #[test]
+    fn a_stalled_run_is_counted_all_the_way_up_to_its_project() {
+        use crate::heartbeat::{Heartbeat, Watching};
+        use crate::projects::NewProject;
+
+        let s = store();
+        let dir = format!("/tmp/jod-stall-rollup-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s.add_project(NewProject::at(&dir)).unwrap();
+        let work = s.create_work_in("port the parser", Some(&project.id)).unwrap();
+        s.set_work_title(&work.id, "the parser").unwrap();
+        let lead = session(&s, &work.id, None, "lead");
+        run_for(&s, &lead, "run-wedged", "running");
+
+        let count = |nodes: &[Node], kind: NodeKind| {
+            nodes.iter().find(|n| n.kind == kind).map(|n| n.stalled)
+        };
+
+        // Healthy first, so the assertion below is a change and not a constant.
+        let healthy = s.forest().unwrap();
+        assert_eq!(count(&healthy, NodeKind::Project), Some(0));
+        assert_eq!(count(&healthy, NodeKind::Run), Some(0));
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut hb = Heartbeat::starting("run-wedged", Watching::Run, now);
+        hb.stalled_since_ms = Some(now - 37 * 60 * 1000);
+        s.watch_run(&hb).unwrap();
+
+        let nodes = s.forest().unwrap();
+        assert_eq!(count(&nodes, NodeKind::Run), Some(1), "the run holds the fact");
+        assert_eq!(count(&nodes, NodeKind::Session), Some(1));
+        assert_eq!(count(&nodes, NodeKind::Work), Some(1));
+        assert_eq!(
+            count(&nodes, NodeKind::Project),
+            Some(1),
+            "and the row a collapsed fleet shows carries it: {nodes:?}",
+        );
+
+        // The duration stays where it belongs — a group row says *that*
+        // something is wedged, not how long, because two wedged runs have two
+        // answers and the row has one line.
+        let project_row = nodes.iter().find(|n| n.kind == NodeKind::Project).unwrap();
+        assert_eq!(project_row.stalled_for_ms, None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The shape the fleet screen renders: a work, the sessions under it, and
@@ -1370,7 +1852,10 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 2,
                 blocked: 1,
+                stalled: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: true,
             },
@@ -1386,7 +1871,10 @@ mod tests {
                 stalled_for_ms: None,
                 cards: 0,
                 blocked: 0,
+                stalled: 0,
                 colour: "cyan".into(),
+                branch: None,
+                worktree: None,
                 expanded: true,
                 has_children: false,
             },
@@ -1810,7 +2298,12 @@ mod tests {
             stalled_for_ms: Some(45 * 60_000),
             cards: 0,
             blocked: 0,
+            stalled: 0,
             colour: "cyan".into(),
+            // A run inherits nothing: the worktree belongs to the work
+            // above it, and the row that names it is the one that holds it.
+            branch: None,
+            worktree: None,
             expanded: true,
             has_children: false,
         }];

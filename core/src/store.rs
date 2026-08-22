@@ -35,7 +35,7 @@ use crate::schedule::{Fire, FireOutcome, Goal, GoalState, Schedule, ScheduleStat
 use crate::team::{Member, MemberStatus, Message, TeamTask};
 
 /// Applied in order; each is recorded so it runs exactly once.
-const MIGRATIONS: &[(&str, &str)] = &[
+pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
     (
     "0001_initial",
     r#"
@@ -1533,6 +1533,182 @@ const MIGRATIONS: &[(&str, &str)] = &[
        AND id IN (SELECT work_id FROM settled);
     "#,
     ),
+    (
+    "0024_an_existing_manager_reports_to_main",
+    r#"
+    -- The link that made a manager's card reach Reljod.
+    --
+    -- Cards cascade upward along `conversations.parent_conversation_id`. An
+    -- engineer is hung under its manager when its work is opened, but a
+    -- manager was created hanging under nothing — so the chain stopped one
+    -- link short of the person it exists to report to. `ask_manager` told
+    -- Reljod "It will raise a card on your rail" and the manager preamble told
+    -- the manager that a card "cascades up to his rail and is the only way
+    -- your answer reaches him", while main's rail read "nothing waiting".
+    --
+    -- `Store::manager_conversation` sets the parent now. This is the backfill
+    -- for the managers that already exist, which are exactly the ones on the
+    -- machines where the promise has been broken longest.
+    --
+    -- Safe despite everything then hanging under main, because
+    -- `Jod::cascade_stop` already exempts the pinned conversation by name:
+    -- stopping the chat you are typing into must not stop the machine.
+    --
+    -- Only rows with no parent are touched. A manager that somehow acquired
+    -- one is a fact somebody wrote, and overwriting it would move an existing
+    -- rail's cards to a different rail.
+    UPDATE conversations
+       SET parent_conversation_id = (
+             SELECT m.id FROM conversations m WHERE COALESCE(m.pinned, 0) = 1 LIMIT 1
+           )
+     WHERE parent_conversation_id IS NULL
+       AND COALESCE(pinned, 0) = 0
+       AND id IN (SELECT manager_conversation_id FROM projects
+                   WHERE manager_conversation_id IS NOT NULL)
+       AND EXISTS (SELECT 1 FROM conversations m WHERE COALESCE(m.pinned, 0) = 1);
+    "#,
+    ),
+    (
+    "0025_a_bus_follows_the_main_chat_it_was_joined_to",
+    r#"
+    -- The backfill for buses stranded by a compaction.
+    --
+    -- `Store::is_main_chat_member` decides whether mail addressed to `main` is
+    -- handed to the main chat by comparing the member row's conversation
+    -- against the *currently pinned* one. When main's context fills it compacts
+    -- through `continue_as_new`, which opens a fresh conversation and moves the
+    -- pin onto it — correctly, or the summary would be stranded in a thread
+    -- nobody opens again. Every team joined before that keeps naming the old
+    -- conversation, so its `main` matches nothing: the mail is never diverted,
+    -- falls through to a wake that cannot happen — a member never gets a
+    -- `session_id` — and waits for ever.
+    --
+    -- Seen on a live daemon, once per tick and indefinitely:
+    -- "1 message(s) waiting: `main` has no session to resume". `carry_forward`
+    -- moves these rows now; this is for the consoles that have already
+    -- compacted, which is every console that has been up long enough.
+    --
+    -- Only rows on the pinned chat's *own* ancestry are touched.
+    -- `carry_forward` records the edge as `forked_from`, so walking it back
+    -- from the pinned row gives exactly the conversations that used to be main
+    -- and nothing else. A member pointing somewhere off that chain is pointing
+    -- at a conversation that was never this chat, and moving it would deliver
+    -- somebody's mail to the wrong reader.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE team_members
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE lower(name) = 'main'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
+    (
+    "0026_the_rail_follows_the_main_chat_it_compacted_from",
+    r#"
+    -- The other half of `0025`, and the one with teeth.
+    --
+    -- Cards cascade upward along `conversations.parent_conversation_id`, and
+    -- the rail asks for the subtree of the conversation being viewed. A project
+    -- manager is hung under main when it is created — which is what makes its
+    -- answers reach Reljod at all. Compaction opens a fresh main and moves the
+    -- pin, and every one of those edges stayed on the thread that was compacted
+    -- away, so the managers went on reporting upward into a conversation nobody
+    -- opens.
+    --
+    -- Seen as a fleet showing `alpha [3 cards]` and `gamma [8 cards]` beside a
+    -- rail reading "nothing waiting — no agent has asked anything". It needs
+    -- nobody to do anything: main compacts itself when its context fills.
+    --
+    -- Only edges on the pinned chat's own ancestry move, by the same reasoning
+    -- as `0025`: `forked_from` records where each thread came from, so walking
+    -- it back from the pinned row names exactly the conversations that used to
+    -- be main. A conversation parented anywhere else is somebody's child and
+    -- must stay there.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE conversations
+       SET parent_conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE parent_conversation_id IN (SELECT id FROM main_chain)
+       AND parent_conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
+    (
+    "0027_an_answer_still_owed_follows_the_main_chat",
+    r#"
+    -- The last of the four things left holding a stale conversation id when
+    -- main compacts, and the same walk as `0025` and `0026`.
+    --
+    -- `Ticker::tick_deliveries` injects into the conversation named on the row.
+    -- A card answered just before a compaction was owed to the thread that has
+    -- since been compacted away, so the reply lands in a conversation the
+    -- console no longer shows and Reljod never sees the answer to his own
+    -- question. It stays stranded: nothing retries it against a different
+    -- conversation.
+    --
+    -- Queued rows only. A delivered row records where the message actually
+    -- went, and rewriting it would make the ledger lie about history — which is
+    -- the one thing `pending_deliveries` exists to be honest about.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE pending_deliveries
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE state = 'queued'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
+    (
+    "0028_a_question_still_owed_follows_the_main_chat",
+    r#"
+    -- The fifth and last thing left holding a stale conversation id when main
+    -- compacts, and the same walk as `0025` to `0027`.
+    --
+    -- The rail shows the subtree of the conversation being viewed, and
+    -- `ask_question` raises its card on the conversation doing the asking —
+    -- for main, that is main itself. Compaction moves the pin to a fresh
+    -- conversation and the card stayed behind, so a blocking question put to
+    -- Reljod shortly before a compaction dropped off the rail with nothing
+    -- anywhere reporting it. Main compacts itself when its context fills, so
+    -- nobody has to do anything for this to happen.
+    --
+    -- Open cards only. An answered or dismissed one records what was asked and
+    -- settled where, and moving it would make the history say a conversation
+    -- asked something it never did.
+    WITH RECURSIVE main_chain(id) AS (
+      SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1
+      UNION
+      SELECT c.forked_from FROM conversations c
+        JOIN main_chain m ON c.id = m.id
+       WHERE c.forked_from IS NOT NULL
+    )
+    UPDATE cards
+       SET conversation_id = (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+     WHERE status = 'open'
+       AND conversation_id IN (SELECT id FROM main_chain)
+       AND conversation_id <> (SELECT id FROM conversations WHERE COALESCE(pinned, 0) = 1)
+       AND EXISTS (SELECT 1 FROM conversations WHERE COALESCE(pinned, 0) = 1);
+    "#,
+    ),
 ];
 
 /// What one run belongs to, for the fleet views that group by it.
@@ -2229,6 +2405,39 @@ impl Store {
     /// run goes on. A run that has written nothing yet is absent rather than
     /// present-and-empty: it has no conversation, so it has no project, and the
     /// two are the same fact.
+    /// Runs that belong to the main chat or to a project manager.
+    ///
+    /// These are the fleet's routers, and a router is not an engineer. Both
+    /// spend their turn deciding who does the work and then exit, so both leave
+    /// `completed` rows with session ids — which is exactly what `list_agents`
+    /// calls free. It offered main's own last turn as the agent to continue,
+    /// with "it already holds this checkout, so it starts where a new session
+    /// would have to start over", and said to prefer it for any instruction.
+    ///
+    /// Observed repeatedly in one session's transcript: *"`list_agents`
+    /// repeatedly recommended reusing them via `continue_agent`; that advice
+    /// was correctly declined every time — they are not workers."* It survived
+    /// only because a careful model kept refusing it. Taking a manager's advice
+    /// here would hand a project's work to the conversation whose job is to
+    /// hand out work.
+    ///
+    /// One query for the whole fleet, like [`Store::run_contexts`] beside it: a
+    /// router calls this before every routing decision.
+    pub fn router_run_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT m.run_id
+               FROM messages m
+               JOIN conversations c ON c.id = m.conversation_id
+              WHERE m.run_id IS NOT NULL
+                AND (COALESCE(c.pinned, 0) = 1
+                     OR c.id IN (SELECT manager_conversation_id FROM projects
+                                  WHERE manager_conversation_id IS NOT NULL))",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?)
+    }
+
     pub fn run_contexts(&self) -> Result<HashMap<String, RunContext>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
@@ -2283,6 +2492,18 @@ impl Store {
         )?;
         let rows = stmt.query_map([], heartbeat_from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Whether anything at all is being watched.
+    ///
+    /// The console asks this on every tick to decide whether to say that no
+    /// daemon is sweeping, and the honest answer needs one row, not all of
+    /// them. Reading the whole table to call `is_empty` on it grew with every
+    /// run the machine had ever started.
+    pub fn any_heartbeat(&self) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare("SELECT 1 FROM heartbeats LIMIT 1")?;
+        Ok(stmt.exists([])?)
     }
 
     /// One run's heartbeat, or `None` if it is not being watched.
@@ -2651,8 +2872,8 @@ impl Store {
     pub fn team_tasks(&self, team: &str) -> Result<Vec<TeamTask>> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(title, id), owner, status FROM tasks
-              WHERE team = ?1 ORDER BY rowid",
+            "SELECT id, COALESCE(title, id), owner, status, COALESCE(created_at_ms, 0)
+               FROM tasks WHERE team = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(params![team], |r| {
             Ok(TeamTask {
@@ -2660,6 +2881,7 @@ impl Store {
                 title: r.get(1)?,
                 owner: r.get(2)?,
                 status: r.get(3)?,
+                created_at_ms: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -5226,6 +5448,92 @@ mod tests {
     fn an_in_memory_store_admits_it_has_no_path_to_share() {
         // A supervisor is a separate process; it cannot open this.
         assert_eq!(Store::in_memory().unwrap().path(), None);
+    }
+
+    /// The backfill for managers that already exist.
+    ///
+    /// A manager created before `manager_conversation` set the parent hangs
+    /// under nothing, so its cards never reach main's rail — and those are the
+    /// managers on the machines where the promise has been broken longest.
+    /// Driven through `cards` rather than by reading the column, because the
+    /// column being set is not the claim; the claim is that the card arrives.
+    #[test]
+    fn the_backfill_puts_an_existing_manager_under_the_main_chat() {
+        use crate::cards::{NewCard, Query};
+
+        let s = Store::in_memory().unwrap();
+        let main = s
+            .main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let dir = format!("/tmp/jod-backfill-{}", std::process::id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir))
+            .unwrap();
+        let (manager, _) = s
+            .manager_conversation(&project.id, crate::harness::HarnessKind::ClaudeCode)
+            .unwrap();
+
+        // Put it back the way the old code left it, which is the state on
+        // every machine that has used a manager before today.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE conversations SET parent_conversation_id = NULL WHERE id = ?1",
+                params![manager],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        s.raise_card(NewCard {
+            conversation_id: manager.clone(),
+            title: "the edit is done".into(),
+            ..NewCard::default()
+        })
+        .unwrap();
+        let rail = |root: &str| {
+            s.cards(&Query {
+                subtree_of: Some(root.to_string()),
+                ..Query::default()
+            })
+            .unwrap()
+            .iter()
+            .map(|c| c.title.clone())
+            .collect::<Vec<_>>()
+        };
+        assert!(
+            !rail(&main).contains(&"the edit is done".to_string()),
+            "the bug, reproduced: main's rail cannot see it",
+        );
+
+        let (_, sql) = MIGRATIONS
+            .iter()
+            .find(|(name, _)| name.starts_with("0024"))
+            .expect("the backfill migration");
+        s.write(|tx| {
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            rail(&main).contains(&"the edit is done".to_string()),
+            "after the backfill it arrives: {:?}",
+            rail(&main),
+        );
+        // Main is not made its own parent, which would be a cycle the rail's
+        // recursive walk has to survive rather than a link anybody wanted.
+        let parent: Option<String> = {
+            let conn = s.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT parent_conversation_id FROM conversations WHERE id = ?1",
+                params![main],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(parent, None, "the main chat reports to nobody");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

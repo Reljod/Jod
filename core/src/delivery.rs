@@ -598,6 +598,40 @@ mod tests {
         Store::in_memory().expect("in-memory store")
     }
 
+    /// A queued delivery follows the chat it was queued for.
+    ///
+    /// Main compacts itself when its context fills, opening a fresh
+    /// conversation and moving the pin. A delivery queued just before that
+    /// still named the thread that was compacted away — so `tick_deliveries`
+    /// would resume the *old* session and inject Reljod's answer into a
+    /// conversation the console no longer shows, where he would never see the
+    /// reply.
+    ///
+    /// The fourth thing found holding a stale conversation id after a
+    /// compaction, and filed here for the same reason as the others.
+    #[test]
+    fn a_queued_delivery_follows_the_main_chat_through_a_compaction() {
+        let s = store();
+        let main = s
+            .main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        for turn in 0..3 {
+            s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+        }
+        s.enqueue_delivery(&main, Kind::CardAnswer, "card-1", "yes, go ahead")
+            .unwrap();
+
+        s.continue_as_new(&main, "so far", "full").unwrap();
+        let now = s.pinned_conversation().unwrap().unwrap();
+        assert_ne!(now, main, "the pin moved, which is the premise");
+
+        assert_eq!(
+            s.conversations_awaiting_delivery().unwrap(),
+            vec![now],
+            "the answer is owed to whichever conversation is main now",
+        );
+    }
+
     fn conversation(s: &Store) -> String {
         s.new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
             .expect("conversation")

@@ -130,6 +130,15 @@ pub struct TeamTask {
     #[serde(default)]
     pub owner: Option<String>,
     pub status: String,
+    /// When it was put on the board.
+    ///
+    /// Carried because the board draws an age column and had nothing to fill
+    /// it from, so every row read `0s` — "just now" — about tasks that were
+    /// hours old. `serde(default)` so a payload written by an older build
+    /// deserialises to zero, which the renderer treats as "no age" rather than
+    /// as this instant.
+    #[serde(default)]
+    pub created_at_ms: i64,
 }
 
 impl TeamTask {
@@ -2134,6 +2143,7 @@ mod tests {
             title: "port the parser".into(),
             owner: None,
             status: "open".into(),
+            created_at_ms: 0,
         };
         assert!(!t.is_claimed());
         assert!(!t.is_done());
@@ -3643,6 +3653,138 @@ mod tests {
         s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
             .unwrap();
         assert!(s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap());
+    }
+
+    /// A bus keeps its `main` when the main chat compacts.
+    ///
+    /// `is_main_chat_member` compares a member row against the *currently
+    /// pinned* conversation, and compaction moves that pin to a fresh
+    /// conversation. Every team joined before it then held a `main` that
+    /// matched nothing: mail to the orchestrator stopped being handed to the
+    /// chat, fell through to a wake that cannot happen — a member never gets a
+    /// `session_id` — and waited for ever.
+    ///
+    /// Observed on a live daemon, once per tick and indefinitely: *"1
+    /// message(s) waiting: `main` has no session to resume"*. Main compacts
+    /// itself when its context fills, so every long-running console gets there.
+    #[test]
+    fn a_return_channel_follows_the_main_chat_through_a_compaction() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        assert!(
+            s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "the premise: the channel names the chat that is pinned now",
+        );
+
+        // Something to compact. `compact` refuses an empty transcript, rightly.
+        let mut ids = Vec::new();
+        for turn in 0..4 {
+            if let Some(id) = s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap() {
+                ids.push(id);
+            }
+            ids.push(
+                s.append_message(
+                    &main,
+                    crate::conversation::NewMessage::new(
+                        crate::conversation::Role::Assistant,
+                        "on it",
+                    )
+                    .from_run(&format!("run-{turn}")),
+                )
+                .unwrap(),
+            );
+        }
+
+        // What compaction does to the pin, through the code that does it.
+        // `continue_as_new` is what the console runs when a context fills: it
+        // compacts into a *fresh* conversation and moves the pin onto it.
+        s.continue_as_new(&main, "what happened so far", "full")
+            .unwrap();
+        let moved = s.pinned_conversation().unwrap().unwrap();
+        assert_ne!(moved, main, "the pin moved, which is the premise of the bug");
+
+        assert!(
+            s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "and the bus followed it, so mail to main is still deliverable",
+        );
+    }
+
+    /// The backfill for buses already stranded by a compaction.
+    ///
+    /// `carry_forward` moves these rows now, but every console that has been up
+    /// long enough has already compacted at least once, and those rows point at
+    /// a conversation that stopped being main. Driven through
+    /// `is_main_chat_member` rather than by reading the column, because the
+    /// column being right is not the claim — the claim is that mail arrives.
+    #[test]
+    fn the_backfill_repoints_a_bus_left_on_an_old_main_chat() {
+        let (s, main) = with_a_main_chat();
+        s.open_return_channel("run-1", "reporter", HarnessKind::ClaudeCode)
+            .unwrap();
+        for turn in 0..4 {
+            s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+        }
+        s.continue_as_new(&main, "what happened so far", "full")
+            .unwrap();
+
+        // Put it back the way the old code left it: naming the conversation
+        // that used to be main.
+        s.write(|tx| {
+            tx.execute(
+                "UPDATE team_members SET conversation_id = ?1 WHERE lower(name) = 'main'",
+                rusqlite::params![main],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "the bug, reproduced: the bus names a chat that is no longer main",
+        );
+
+        let (_, sql) = crate::store::MIGRATIONS
+            .iter()
+            .find(|(name, _)| name.starts_with("0025"))
+            .expect("the backfill migration");
+        s.write(|tx| {
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            s.is_main_chat_member(Scope::Team, "run-1", MAIN).unwrap(),
+            "after the backfill the bus reaches the chat again",
+        );
+
+        // A member on a conversation that was never this chat is left alone —
+        // moving it would hand somebody's mail to the wrong reader.
+        let stranger = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap()
+            .id;
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO team_members
+                   (team, name, harness, role, status, joined_at_ms, scope, conversation_id)
+                 VALUES ('other', 'main', 'claude_code', '', 'ready', 1, 'team', ?1)",
+                rusqlite::params![stranger],
+            )?;
+            tx.execute_batch(sql)?;
+            Ok(())
+        })
+        .unwrap();
+        let left: String = {
+            let conn = s.conn.lock().expect("store lock poisoned");
+            conn.query_row(
+                "SELECT conversation_id FROM team_members WHERE team = 'other'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(left, stranger, "a bus off the chain is not moved");
     }
 
     /// The two reserved names are refused on both join paths. The gap was real:
