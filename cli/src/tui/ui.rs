@@ -290,7 +290,9 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     if app.panel && side.is_none() {
         panel_hits = draw_floating_panel(f, app, body);
     }
-    draw_completions(f, app, input);
+    // `body` rather than the frame: the popup may use the whole chat column,
+    // which is what is left once anything beside it has been taken out.
+    draw_completions(f, app, input, body);
     draw_mention(f, app, input);
     draw_overlay(f, app);
     // After the overlay, and that ordering is load-bearing. An overlay can raise
@@ -2765,7 +2767,7 @@ fn two_ends(left: &str, right: &str, width: u16, colour: Color) -> Line<'static>
 /// Above rather than below because the input is already near the bottom of the
 /// screen, and a list that grows downwards would be clipped exactly when it is
 /// longest.
-fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
+fn draw_completions(f: &mut Frame, app: &App, input: Rect, column: Rect) {
     // Escape put it away for this line. The popup is derived from the input, so
     // there is nothing to close — this is the closing.
     if app.completions_dismissed {
@@ -2797,10 +2799,22 @@ fn draw_completions(f: &mut Frame, app: &App, input: Rect) {
     // 72 columns — that cap is what stopped `no argument restores` one letter
     // short on a 200-column terminal.
     let want = text::panel_width([TAB_COMPLETES]).max(widest_name + widest_hint + 8);
-    // The popup is anchored to the input box's left edge, so the room is what
-    // lies to the right of it — never more, or it would be drawn off the
-    // buffer.
-    let room = f.area().width.saturating_sub(input.x).max(1);
+    // The room to the right of the input box, **within the chat column**.
+    //
+    // It used to be measured off the whole frame, which is not the same thing
+    // whenever something sits beside the chat: the palette grew to ninety-two
+    // columns next to a seventy-one column composer and painted straight over
+    // the context rail, leaving `8s`, `200k` and orphaned corners behind it.
+    //
+    // Bounding it by the *composer* instead would be wrong in the other
+    // direction, and there is a test that says so: the composer is capped at a
+    // comfortable reading width, so on a wide terminal the palette would be
+    // re-cut to it and `no argument restores` would lose its last word again —
+    // the very fault the fixed 72-column cap was removed to fix. The column is
+    // the honest bound: it is the whole width when nothing is beside the chat,
+    // and exactly the chat's share when something is.
+    let edge = column.x.saturating_add(column.width);
+    let room = edge.saturating_sub(input.x).max(1);
     let w = (want as u16).min(room).max(24.min(room));
     // Whatever is left for the hint once the mark, the name column and the
     // borders have been paid for. Below that it is cut *with* a marker, so a
@@ -12132,6 +12146,51 @@ mod tests {
         assert!(
             wide.contains("nothing remembered yet — /remember writes one"),
             "nothing is cut when nothing needs to be:\n{wide}"
+        );
+    }
+
+    /// A popup stays inside the chat column and off the side panel.
+    ///
+    /// The width was the whole frame minus the box's left edge, which is not
+    /// "the room to the right of the input box" whenever anything sits beside
+    /// the chat. The palette grew past the composer and painted over the rail,
+    /// leaving fragments of it — `8s`, `200k` — and orphaned corners. It
+    /// happened at every width wide enough for the panel to exist and too
+    /// narrow for the chat column to cover the palette on its own.
+    #[test]
+    fn a_popup_stays_inside_the_chat_column() {
+        let mut a = app();
+        for n in 0..6 {
+            a.push(Entry::Notice(format!("something happened, number {n}")));
+        }
+        a.panel = true;
+        a.input = "/".into();
+        a.cursor = 1;
+
+        let frame = rendered(&a, 110, 42);
+        assert!(
+            frame.lines().any(|l| l.contains("mode ")),
+            "the side panel is on screen at all:\n{frame}"
+        );
+
+        // The palette is anchored to the composer's left edge, so its right
+        // edge may not pass the composer's. Measured in columns off the frame
+        // rather than by looking for what is beside it: the panel's own bottom
+        // border legitimately follows the palette on one row, and a test that
+        // called that an overlap would fail on correct output.
+        let right_edge = |needle: &str| -> usize {
+            let line = frame
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("expected a row containing {needle}:\n{frame}"));
+            line.chars().position(|c| c == '\u{2510}').unwrap_or(usize::MAX)
+        };
+        let palette = right_edge("Tab completes");
+        let composer = right_edge("\u{250c} you");
+        assert!(
+            palette <= composer,
+            "the palette ends at column {palette} and the composer at {composer}, \
+             so it is drawn over whatever sits beside the chat:\n{frame}"
         );
     }
 
