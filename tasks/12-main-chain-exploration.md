@@ -360,6 +360,173 @@ AGY.
 
 ---
 
+## X7. Changing a role's harness leaves the conversation's old model in place, and every turn then fails
+Status: **open** · Severity: critical · Owner: —
+
+Setting the `main` role's harness to `agy` in the roles panel — the supported
+path, done with the keyboard, exactly as the panel invites — breaks the main
+chat completely. Every turn afterwards dies before the model is even reached:
+
+```
+invalid model selection (--model "opencode/deepseek-v4-flash-free" --effort ""):
+model opencode/deepseek-v4-flash-free is not recognized as a known model or
+custom model in settings
+```
+
+The harness moved. The model did not. The pinned main conversation still had
+`model = opencode/deepseek-v4-flash-free` stored on it, and that name means
+nothing to AGY.
+
+**The mechanism is two rungs of the precedence ladder acting on different
+fields.** `apply_role` (`core/src/service.rs:464`) fills the harness from the
+role row. `prefer_conversation_settings` (`core/src/service.rs:396`) then runs
+and does this, unconditionally:
+
+```rust
+pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conversation) {
+    if let Some(model) = &conversation.model {
+        req.model = Some(model.clone());
+    }
+```
+
+There is no check that the stored model belongs to the harness the request is
+now on. `apply_role`'s own doc comment lays out a clean four-rung order — tool
+call argument, then the conversation's `/harness` or `/model`, then the role,
+then the harness default — and that order is right for any *one* field. The
+failure is across fields: the role wins on harness while the conversation wins
+on model, and the pair that results was never valid together.
+
+**Jod already knows this is a hazard and guards it on the other path.**
+`docs/harness-config.md` says so outright:
+
+> Model names do not survive `/harness`. `claude-sonnet-4-5` means nothing to
+> OpenCode or AGY, so switching harness drops the requested model back to `None`
+> and lets the new harness pick its own default — otherwise the switch would
+> look like it simply had not worked.
+
+That is exactly this situation, and the protection exists only for the
+`/harness` command. A harness change that arrives through a role row gets none
+of it.
+
+**Observed twice, identically**, against `~/.jod` with the `main` role set to
+`agy` from the panel and nothing else changed:
+
+```
+$ jod main --wait "In one line only, say which model you are."
+$ jod main --wait "Say hello in one word."
+```
+
+Both produced `agy | failed` runs with the message above.
+
+**A smaller thing visible in the same line, worth fixing alongside:** the
+command line carries `--effort ""`. An empty string is being passed as a flag
+value rather than the flag being omitted.
+
+**This is reachable in two keystrokes from a working console and leaves it
+unusable**, which is what makes it critical rather than merely wrong. The panel
+says "a role decides what is spawned next — the runs already going are
+untouched", which reads as a promise that the next turn will simply use the new
+harness.
+
+Fix shape: when a role changes the harness for a conversation whose stored model
+belongs to the harness being left, drop the model the same way `/harness` drops
+it. The alternative — refuse the role change — is worse, because the person
+setting it has clearly said what they want.
+
+Check: set a conversation's model to a name from harness A, set its role's
+harness to B, and take a turn. Green is a turn that runs on B with B's default
+model.
+
+---
+
+## X8. `jod main --wait` reports a failed run as success, and prints nothing at all
+Status: **open** · Severity: high · Owner: —
+
+The runs in X7 failed. This is what the operator saw:
+
+```
+$ jod main --wait "In one line only, say which model you are."
+$ echo $?
+0
+```
+
+No output on stdout, none on stderr, and exit 0. Meanwhile the run row says
+`failed` and carries a precise, actionable error naming the rejected model and
+listing every model AGY does accept. None of that reaches the person who typed
+the command.
+
+Both halves are wrong and they compound. Silence alone would be survivable if
+the exit code were non-zero, because a script would stop. Exit 0 alone would be
+survivable if the error were printed, because a person would read it. Together
+they mean a failed main turn is indistinguishable from a successful one, by a
+human at a terminal and by anything automating it.
+
+This is what made X7 take as long as it did to find: two consecutive turns
+appeared to work fine and the store had to be read directly before anything
+looked wrong.
+
+**Reproduced twice**, once per X7 run. Contrast with a healthy store, where the
+same command prints the answer and exits 0 — so the exit code carries no
+information either way.
+
+Check: point a conversation's model at a name its harness rejects and run
+`jod main --wait`. Green is the harness's error on stderr and a non-zero exit.
+
+---
+
+## X9. The console's status bar names a harness the conversation is not running on
+Status: **open** · Severity: medium · Owner: —
+
+The console keeps its own preferred harness, and shows *that* on the status bar
+and uses it to fetch the model list. It is not the harness the conversation in
+front of you is running on, and the two drift apart the moment a role changes
+one of them.
+
+**Observed.** After the `main` role was set to `agy` and a turn had run
+successfully on AGY:
+
+```
+pinned conversation:  harness = agy,  model = None
+last run:             agy, completed, "I am Gemini 3.7 Flash."
+status bar:           ● auto · OpenCode · ready
+```
+
+Restarting the console did not correct it; it opened on the main chat and still
+read `OpenCode`. Only launching with `jod tui -H agy` moved it.
+
+This is the root of the user-visible half of X6. The roles panel asks the
+console for its model list, so a console that believes it is on OpenCode offers
+OpenCode's names for every row regardless of what those rows say. Fixing the
+panel to ask per row — which is what PR #237 does — fixes the list. It does not
+fix the status bar, which will still name the wrong harness for the chat.
+
+There is a real design question underneath, and it should be answered
+deliberately rather than by whichever value happens to be to hand. A console
+preference is a sensible thing to have: it decides what a *new* conversation
+starts on, and `jod tui -H` exists to set it. But while the console is
+displaying an existing conversation, the status bar is read as a description of
+*that conversation*, not of a preference for the next one. The codebase already
+worries about exactly this class of mismatch — `core/src/service.rs:405`
+introduces `role_harness` precisely because "a spawn that switched harness
+afterwards would leave the row naming a program the run is not on", and fixes
+it for the doorman alone.
+
+Worth noting the panel is *good* at this elsewhere, which is why the status bar
+stands out. Selecting a field on an unset row says, in plain words:
+
+> agy on gpt-oss-120b-medium is what Jod starts this on unless you say
+> otherwise — nothing is set here, and choosing a value replaces it
+
+and a configured row is marked `●` against an inheriting row's `○`. That is
+exactly the right treatment, and it is what the status bar is missing.
+
+Check: set a conversation's harness to one thing and the console's preference to
+another, and read the status bar. Green is the status bar naming what the
+conversation runs on, or naming the preference in a way that cannot be mistaken
+for it.
+
+---
+
 ## Checked and not a bug
 
 Recorded because both looked like findings and both cost real time to
@@ -399,3 +566,11 @@ twice in one afternoon.
 | S07 | Press `m` on that agy row | AGY's model names | **fail** — OpenCode's names, no caveat shown. Filed as X6 |
 | S08 | `/harness agy` in the chat box | chat crosses to AGY | **fail** — summariser errored, reported as an empty summary, stayed on OpenCode. Filed as X5 |
 | S09 | `/harness agy` again | same or a clearer error | **fail** — reproduced identically |
+| S10 | `/new`, then a first message | a fresh conversation | **pass** — `/new` leaves the main chat by design; the new conversation is not pinned and is not main, so the `main` role correctly does not apply to it |
+| S11 | `jod main --wait` after setting `main` to agy from the panel | answers on AGY | **fail** — run failed, AGY rejected the conversation's stale OpenCode model; command exited 0 in silence. Filed as X7 and X8 |
+| S12 | Same again | same | **fail** — reproduced identically |
+| S13 | `/model` to clear, then a turn in the console | runs on AGY | **fail** — ran on OpenCode. A role's harness only applies to a *fresh* session, and a console turn resumes. OpenCode then failed on its own with `UnknownError`, which is the trap X5 describes: you cannot leave a broken harness |
+| S14 | `jod main --wait` after clearing the model | answers on AGY | **pass** — "I am Gemini 3.7 Flash.", run `agy completed` |
+| S15 | `/roles` with the console launched `-H agy` | AGY's model names on an AGY row | **pass** — the workaround works; `gemini-3.7-flash-medium` selectable |
+| S16 | Set manager and engineer to Claude Code, opus, high | values stick | **pass** — panel wrote all four columns correctly |
+| S17 | Unset row explains its default | says what it would use | **pass** — "agy on gpt-oss-120b-medium is what Jod starts this on unless you say otherwise" |
