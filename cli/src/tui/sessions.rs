@@ -1,25 +1,16 @@
-//! Conversations, branches, and the work a revert left behind.
+//! Conversations and the threads behind the fleet's runs.
 //!
-//! `core::conversation` already holds a full message DAG — a head pointer, real
-//! parent edges, forks that share a prefix instead of copying it — and none of
-//! it reached a user. The wiring audit said so plainly: `tips`, `branch_at`,
-//! `children` and `sibling_pager` had no production call site at all. A graph
-//! nobody can see is a graph nobody can use, and the specific thing it was
-//! failing to deliver is the promise `Store::revert_to` makes in its own doc
-//! comment — *"destroy nothing"*. Nothing was destroyed, and nothing was
-//! findable either, which to the person who reverted is the same outcome.
-//!
-//! So the rule this module is written to: **after a revert, the abandoned work
-//! is on screen with a name.** Not an integer to remember, not "it's still in
-//! the database" — a line that says what that branch was about and how to get
-//! back onto it. That is what [`tip_rows`] is for.
+//! `core::conversation` holds a full message DAG — a head pointer, real parent
+//! edges, forks that share a prefix instead of copying it. This module is the
+//! part of it a user can reach: resolving whatever id a screen has into a
+//! conversation, listing a thread, and forking one.
 //!
 //! Everything below is either a plain function over `&Store` or a pure function
 //! over rows. Nothing here touches the terminal, so all of it is testable
 //! against `Store::in_memory()` — the same seam `data.rs` keeps, and the same
 //! reason: the screens have to be provable without a TTY.
 
-use jod_core::conversation::{Message, NewMessage, Role};
+use jod_core::conversation::Role;
 use jod_core::store::Store;
 
 use super::short;
@@ -60,53 +51,6 @@ pub struct ThreadRow {
     /// at all — and it is readable on the turn *above* the fork, which is where
     /// you are looking when you are trying to find one.
     pub branches: usize,
-}
-
-/// A leaf of the DAG, named well enough to go back to.
-///
-/// The naming is the whole point, and it is why this is not just
-/// `Store::tips` reformatted. A tip's *own* text is usually the least useful
-/// thing about it — the last message of an abandoned branch is some tool result
-/// or a half-finished sentence. What identifies a branch to the person who
-/// abandoned it is **where it left the thread and what it tried next**, so that
-/// is what [`TipRow::opener`] carries.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TipRow {
-    pub id: i64,
-    /// The tip of the thread you are on now, rather than an abandoned one.
-    pub live: bool,
-    /// The last message this branch and the live thread share. `None` for the
-    /// live tip, and for a branch that diverges at the root — two roots in one
-    /// conversation share nothing.
-    pub diverged_at: Option<i64>,
-    /// The first message *after* the divergence: what this branch tried. This
-    /// is the name a user recognises.
-    pub opener: String,
-    /// The last message on it, for "how far did it get".
-    pub last: String,
-    /// Messages from the divergence down to the tip, inclusive.
-    pub turns: usize,
-    pub at_ms: i64,
-}
-
-impl TipRow {
-    /// The one-line name this branch is offered under.
-    ///
-    /// `opener` first and in quotes, because that is the sentence the user
-    /// wrote or read and the only part of the line they will actually scan.
-    pub fn label(&self) -> String {
-        if self.live {
-            return format!("#{} on this thread · “{}”", self.id, self.last);
-        }
-        format!(
-            "#{} abandoned · “{}” · {} turn{} · ended “{}”",
-            self.id,
-            self.opener,
-            self.turns,
-            if self.turns == 1 { "" } else { "s" },
-            self.last,
-        )
-    }
 }
 
 // ---- loading -----------------------------------------------------------
@@ -153,98 +97,6 @@ pub fn thread_rows(store: &Store, conversation_id: &str) -> Vec<ThreadRow> {
             id: m.id,
         })
         .collect()
-}
-
-/// Every leaf, with the abandoned ones named by where they left the thread.
-///
-/// Ordered live-tip-first, then most recent abandonment first — you are most
-/// likely to want back what you just gave up on, which is the case OpenCode
-/// ships `unrevert` for.
-pub fn tip_rows(store: &Store, conversation_id: &str) -> Vec<TipRow> {
-    let live: Vec<Message> = store.thread(conversation_id).unwrap_or_default();
-    let live_ids: Vec<i64> = live.iter().map(|m| m.id).collect();
-    let live_tip = live_ids.last().copied();
-
-    let mut rows: Vec<TipRow> = store
-        .tips(conversation_id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tip| tip_row(store, &tip, &live_ids, live_tip))
-        .collect();
-    // The tie-break is `Reverse(id)`, not `id`, and it is the difference
-    // between an undo/redo pair that works and one that does not. Two tips
-    // abandoned in the same millisecond sort by insertion order, so ascending
-    // ids made `u` offer back the *oldest* branch immediately after `v` had set
-    // aside the newest — pressing undo then redo landed somewhere the user had
-    // never been. `Store::conversations` breaks its own tie the same way and
-    // says why: at millisecond resolution, insertion order is the only truth
-    // available.
-    rows.sort_by_key(|r| (!r.live, std::cmp::Reverse(r.at_ms), std::cmp::Reverse(r.id)));
-    rows
-}
-
-fn tip_row(store: &Store, tip: &Message, live_ids: &[i64], live_tip: Option<i64>) -> TipRow {
-    if Some(tip.id) == live_tip {
-        return TipRow {
-            id: tip.id,
-            live: true,
-            diverged_at: None,
-            opener: one_line(&tip.text, SNIPPET),
-            last: one_line(&tip.text, SNIPPET),
-            turns: live_ids.len(),
-            at_ms: tip.at_ms,
-        };
-    }
-
-    // Walk up from the leaf until we step onto the live thread. The message we
-    // were standing on when that happened is what this branch tried first, and
-    // the one we stepped onto is where the two threads part company.
-    let mut opener = tip.clone();
-    let mut diverged_at = None;
-    let mut turns = 1;
-    let mut at = tip.parent_id;
-    while let Some(parent_id) = at {
-        if live_ids.contains(&parent_id) {
-            diverged_at = Some(parent_id);
-            break;
-        }
-        let Some(parent) = store.message(parent_id).ok().flatten() else {
-            break;
-        };
-        at = parent.parent_id;
-        opener = parent;
-        turns += 1;
-    }
-
-    TipRow {
-        id: tip.id,
-        live: false,
-        diverged_at,
-        opener: one_line(&opener.text, SNIPPET),
-        last: one_line(&tip.text, SNIPPET),
-        turns,
-        at_ms: tip.at_ms,
-    }
-}
-
-/// The message the head should go back to when the last turn is undone.
-///
-/// "Undo my last turn" means the head lands on the message *before* the newest
-/// user turn — where the thread stood when that question had not been asked
-/// yet. Returns `None` at the first question of a conversation, because there
-/// is no state before it to go back to and reverting to the root would silently
-/// mean something else.
-pub fn rewind_target(store: &Store, conversation_id: &str) -> Option<i64> {
-    let thread = store.thread(conversation_id).ok()?;
-    let last_user = thread.iter().rposition(|m| m.role == Role::User)?;
-    thread.get(last_user)?.parent_id
-}
-
-/// The abandoned leaf to offer back first — the most recent one.
-pub fn restore_target(store: &Store, conversation_id: &str) -> Option<TipRow> {
-    tip_rows(store, conversation_id)
-        .into_iter()
-        .find(|t| !t.live)
 }
 
 /// Turn whatever the caller has into a conversation id.
@@ -297,38 +149,11 @@ pub fn resolve(store: &Store, needle: &str) -> Result<String, String> {
 /// refusal — is testable without a terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    /// One conversation: its thread, and every branch hanging off it.
+    /// One conversation, as a listing of its turns. What the conversation
+    /// search lands on when a hit is opened.
     Open(String),
-    /// Undo the last turn. Moves the head back; destroys nothing.
-    Rewind(String),
-    /// Put the head back on the branch a rewind abandoned — `unrevert`.
-    ///
-    /// The `String` is a **conversation**, not a message: which branch is
-    /// decided here, by [`restore_target`], and it is always the newest
-    /// abandoned tip. To name a specific one, use [`Request::GoTo`].
-    Restore(String),
-    /// Put the head on the branch the user names by the `#id` beside it.
-    ///
-    /// Two fields rather than one, and the reason is a bug this shape prevents:
-    /// a message id passed alone has to be resolved against *something*, and
-    /// feeding it to a conversation resolver means a numeric id can prefix-match
-    /// a uuid — conversation ids are hex — and silently act on a different
-    /// thread. Carrying the conversation explicitly means the store's
-    /// `shares_root` check has something to check against, so a message outside
-    /// this graph is refused rather than grafted on.
-    ///
-    /// `branch` is the raw typed line, not a parsed id, so that the `#`
-    /// stripping and the sentence said when it is not a number live here and
-    /// are tested, rather than in a key handler that no test can reach.
-    GoTo {
-        conversation: String,
-        branch: String,
-    },
     /// A new conversation starting from this one's head.
     Fork(String),
-    /// Ask the last question again, as a second answer rather than a
-    /// replacement — ChatGPT's "regenerate", and the reason `branch_at` exists.
-    Retry(String),
     /// What became of the reply a run owed somebody — see [`super::delivery`].
     ///
     /// Here rather than in an `Action` of its own, and the reason is a seam
@@ -354,14 +179,7 @@ pub fn apply(store: &Store, request: &Request, now_ms: i64) -> Vec<String> {
             Ok(id) => render_open(store, &id),
             Err(said) => vec![said],
         },
-        Request::Rewind(needle) => on_conversation(store, needle, |id| rewind(store, id)),
-        Request::Restore(needle) => on_conversation(store, needle, |id| restore(store, id)),
-        Request::GoTo {
-            conversation,
-            branch,
-        } => on_conversation(store, conversation, |id| goto(store, id, branch)),
         Request::Fork(needle) => on_conversation(store, needle, |id| fork(store, id)),
-        Request::Retry(needle) => on_conversation(store, needle, |id| retry(store, id)),
         Request::Delivery(run_id) => super::delivery::about_run(store, run_id, now_ms),
     }
 }
@@ -378,137 +196,6 @@ fn on_conversation(
 }
 
 // ---- the verbs ---------------------------------------------------------
-
-/// Undo the last turn, and immediately say how to undo the undo.
-///
-/// The second sentence is not politeness. A revert that says only "done" is
-/// indistinguishable from a delete to the person who just pressed it, and the
-/// whole reason `revert_to` keeps the rows is so that it is not one. Naming the
-/// branch in the same breath is the cheapest possible proof.
-fn rewind(store: &Store, id: &str) -> Vec<String> {
-    let Some(target) = rewind_target(store, id) else {
-        return vec![format!(
-            "{} has nothing before its first question to go back to",
-            short(id)
-        )];
-    };
-    if let Err(e) = store.revert_to(id, target) {
-        return vec![format!("could not rewind {}: {e}", short(id))];
-    }
-    let mut said = vec![format!("{} rewound to #{target}", short(id))];
-    match restore_target(store, id) {
-        Some(tip) => said.push(format!("  kept: {}", tip.label())),
-        // Only reachable when the rewind moved onto a branch that already had
-        // no children — nothing was left behind, so nothing is claimed.
-        None => said.push("  nothing was left behind".to_string()),
-    }
-    said
-}
-
-fn restore(store: &Store, id: &str) -> Vec<String> {
-    let Some(tip) = restore_target(store, id) else {
-        return vec![format!(
-            "{} has no abandoned branch to go back to",
-            short(id)
-        )];
-    };
-    // Not `tip.label()`: that line calls the branch abandoned, which stops
-    // being true the instant this succeeds.
-    match store.move_head(id, tip.id) {
-        Ok(()) => vec![format!(
-            "{} back on “{}” — #{}, {} turn{}",
-            short(id),
-            tip.opener,
-            tip.id,
-            tip.turns,
-            if tip.turns == 1 { "" } else { "s" }
-        )],
-        Err(e) => vec![format!("could not restore #{}: {e}", tip.id)],
-    }
-}
-
-/// Go to a branch the user named off the screen.
-///
-/// Everything the typed line can be wrong about is answered here rather than
-/// let through to the store, because the store's refusals are written for a
-/// caller and this one is read by a person who has just typed a number.
-///
-/// Any message in the graph is a legal target, not only a tip. That is what
-/// `move_head` is for, and "put me back partway along that branch" is a real
-/// request; going to a tip is only the common case, because tips are what the
-/// branch list prints.
-fn goto(store: &Store, id: &str, branch: &str) -> Vec<String> {
-    // The `#` is optional because it is printed on the screen the number was
-    // read off, and making someone retype punctuation they can see is not a
-    // form. Trimmed either side of it, so `# 57` works too.
-    let typed = branch.trim().trim_start_matches('#').trim();
-    let Ok(message) = typed.parse::<i64>() else {
-        return vec![format!(
-            "“{typed}” is not a branch number — the branch list prints them as #57"
-        )];
-    };
-    let Some(target) = store.message(message).ok().flatten() else {
-        return vec![format!("there is no message #{message}")];
-    };
-    // `move_head` checks the target shares a root with the current head. That
-    // check is the reason this request carries its conversation: without one,
-    // a bare number has to be resolved against something, and resolving it as a
-    // conversation lets a numeric id prefix-match a uuid and move the head of a
-    // thread the user was not looking at.
-    match store.move_head(id, message) {
-        Ok(()) => vec![format!(
-            "{} now on #{message} — “{}”",
-            short(id),
-            one_line(&target.text, SNIPPET)
-        )],
-        Err(e) => vec![format!("could not go to #{message}: {e}")],
-    }
-}
-
-/// Ask the last question again, beside the answer it already got.
-///
-/// `Store::branch_at` in one call, and the reason it is one call rather than a
-/// revert followed by an append: the two have to be the same act. A retry that
-/// reverted, failed to append, and left the head parked before a question
-/// nobody could see would look exactly like a delete.
-///
-/// The new question lands as a *sibling* of the old one, which is ChatGPT's
-/// model: editing appends a node under the same parent instead of mutating the
-/// old one, and the answer you did not like stays in the export. So this is
-/// non-destructive too, and the sentence says where the first answer went.
-fn retry(store: &Store, id: &str) -> Vec<String> {
-    let Some(thread) = store.thread(id).ok() else {
-        return vec![format!("could not read {}", short(id))];
-    };
-    let Some(asked) = thread.iter().rev().find(|m| m.role == Role::User) else {
-        return vec![format!("{} has no question to ask again", short(id))];
-    };
-    let Some(target) = asked.parent_id else {
-        return vec![format!(
-            "{}'s first question has nothing before it to branch from",
-            short(id)
-        )];
-    };
-    let text = asked.text.clone();
-    match store.branch_at(id, target, NewMessage::user(&text)) {
-        Ok(new_id) => {
-            let mut said = vec![format!(
-                "{} asking again: “{}” — #{new_id}",
-                short(id),
-                one_line(&text, SNIPPET)
-            )];
-            // Named off the tip rather than off the old question, because the
-            // thing the user wants back is the *answer* they are replacing and
-            // the question id points at both branches equally.
-            match restore_target(store, id) {
-                Some(tip) => said.push(format!("  kept: {}", tip.label())),
-                None => said.push("  the first attempt had not answered yet".to_string()),
-            }
-            said
-        }
-        Err(e) => vec![format!("could not ask {} again: {e}", short(id))],
-    }
-}
 
 /// Fork the conversation at its head into a thread of its own.
 ///
@@ -538,7 +225,7 @@ fn fork(store: &Store, id: &str) -> Vec<String> {
 
 // ---- rendering ---------------------------------------------------------
 
-/// One conversation: the live thread, then every branch off it.
+/// One conversation: the live thread, oldest turn first.
 pub fn render_open(store: &Store, id: &str) -> Vec<String> {
     let thread = thread_rows(store, id);
     if thread.is_empty() {
@@ -568,29 +255,6 @@ pub fn render_open(store: &Store, id: &str) -> Vec<String> {
             out.push(format!("         ⑂ {} lines leave this turn", row.branches));
         }
     }
-    out.extend(render_tips(&tip_rows(store, id)));
-    out
-}
-
-/// The branch list. Written to be readable on its own, because this is what a
-/// user is looking at when they are trying to get something back.
-pub fn render_tips(tips: &[TipRow]) -> Vec<String> {
-    let abandoned = tips.iter().filter(|t| !t.live).count();
-    if abandoned == 0 {
-        return vec!["  no abandoned branches".to_string()];
-    }
-    let mut out = vec![format!(
-        "  {abandoned} abandoned branch{}",
-        if abandoned == 1 { "" } else { "es" }
-    )];
-    for tip in tips.iter().filter(|t| !t.live) {
-        let mut line = format!("    {}", tip.label());
-        if let Some(at) = tip.diverged_at {
-            line.push_str(&format!(" · left the thread at #{at}"));
-        }
-        out.push(line);
-    }
-    out.push("    U goes back to the newest of these".to_string());
     out
 }
 
@@ -607,6 +271,7 @@ fn one_line(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jod_core::conversation::NewMessage;
     use jod_core::HarnessKind;
 
     fn store() -> Store {
@@ -625,270 +290,6 @@ mod tests {
         store
             .append_message(id, NewMessage::new(role, text))
             .expect("an appended message")
-    }
-
-    /// The failure this whole module exists to prevent: reverting, and then
-    /// having no way back except remembering an integer.
-    #[test]
-    fn a_reverted_branch_is_listed_by_name_and_can_be_walked_back_onto() {
-        let store = store();
-        let id = conversation(&store, "the parser");
-        say(&store, &id, Role::User, "fix the parser");
-        let keep = say(&store, &id, Role::Assistant, "fixed it");
-        say(&store, &id, Role::User, "now rewrite it in one pass");
-        let abandoned = say(&store, &id, Role::Assistant, "rewritten, tests pass");
-
-        store.revert_to(&id, keep).expect("a revert");
-
-        // Named on screen, not merely present in the database.
-        let tips = tip_rows(&store, &id);
-        let lost = tips
-            .iter()
-            .find(|t| !t.live)
-            .expect("the abandoned branch is listed");
-        assert_eq!(lost.id, abandoned);
-        assert_eq!(
-            lost.opener, "now rewrite it in one pass",
-            "a branch is named by what it tried, not by its last tool result"
-        );
-        assert_eq!(lost.last, "rewritten, tests pass");
-        assert_eq!(lost.diverged_at, Some(keep));
-        assert_eq!(lost.turns, 2);
-        assert!(
-            lost.label().contains("now rewrite it in one pass"),
-            "the line a user reads has to carry the name: {}",
-            lost.label()
-        );
-
-        // And reachable: the offer the label makes is one the store honours.
-        let said = apply(&store, &Request::Restore(id.clone()), 0);
-        assert!(
-            said[0].contains(&format!("#{abandoned}")),
-            "restore says where it went: {said:?}"
-        );
-        assert_eq!(
-            store
-                .conversation(&id)
-                .expect("the conversation")
-                .expect("it exists")
-                .head_id,
-            Some(abandoned),
-            "the head is back on the work that was abandoned"
-        );
-    }
-
-    #[test]
-    fn rewinding_undoes_the_last_question_and_says_what_it_kept() {
-        let store = store();
-        let id = conversation(&store, "the parser");
-        say(&store, &id, Role::User, "fix the parser");
-        let before = say(&store, &id, Role::Assistant, "fixed it");
-        say(&store, &id, Role::User, "now break it");
-        let lost = say(&store, &id, Role::Assistant, "broken");
-
-        let said = apply(&store, &Request::Rewind(id.clone()), 0);
-
-        assert_eq!(
-            store
-                .conversation(&id)
-                .expect("the conversation")
-                .expect("it exists")
-                .head_id,
-            Some(before),
-            "the head stands where the last question had not been asked"
-        );
-        assert!(said[0].contains(&format!("#{before}")), "{said:?}");
-        assert!(
-            said[1].contains("now break it") && said[1].contains(&format!("#{lost}")),
-            "the undo names its own undo in the same breath: {said:?}"
-        );
-    }
-
-    /// `v` then `u` has to land exactly where `v` started, even when the
-    /// conversation already had older branches lying around — which is the
-    /// common case, because reverting is a thing people do more than once.
-    ///
-    /// It did not, at first. Tips abandoned inside the same millisecond sorted
-    /// by ascending id, so `u` offered back the oldest branch and undo/redo
-    /// walked the user into a thread they had never seen.
-    #[test]
-    fn undo_then_redo_lands_back_where_it_started_even_among_older_branches() {
-        let store = store();
-        let id = conversation(&store, "the parser");
-        say(&store, &id, Role::User, "port the parser");
-        let fork_point = say(&store, &id, Role::Assistant, "done");
-        say(&store, &id, Role::User, "now rewrite it in one pass");
-        say(&store, &id, Role::Assistant, "rewritten");
-        store.revert_to(&id, fork_point).expect("an older revert");
-        say(&store, &id, Role::User, "actually just add a test");
-        let was_here = say(&store, &id, Role::Assistant, "added tests/lexer.rs");
-
-        let rewound = apply(&store, &Request::Rewind(id.clone()), 0);
-        assert!(
-            rewound[1].contains("actually just add a test"),
-            "the rewind keeps the branch it just left, not an older one: {rewound:?}"
-        );
-
-        apply(&store, &Request::Restore(id.clone()), 0);
-
-        assert_eq!(
-            store
-                .conversation(&id)
-                .expect("the conversation")
-                .expect("it exists")
-                .head_id,
-            Some(was_here),
-            "redo returns to the branch undo set aside"
-        );
-    }
-
-    /// `U` takes the newest abandoned branch; `g` takes the one you name. With
-    /// three lying around, only the second can reach the middle one — which is
-    /// the whole reason the branch list prints an id beside each.
-    #[test]
-    fn going_to_a_named_branch_reaches_the_one_that_u_never_would() {
-        let store = store();
-        let id = conversation(&store, "the parser");
-        say(&store, &id, Role::User, "port the parser");
-        let point = say(&store, &id, Role::Assistant, "ported");
-        say(&store, &id, Role::User, "attempt one");
-        let first = say(&store, &id, Role::Assistant, "did it badly");
-        store.revert_to(&id, point).expect("a revert");
-        say(&store, &id, Role::User, "attempt two");
-        say(&store, &id, Role::Assistant, "did it worse");
-        store.revert_to(&id, point).expect("a second revert");
-        say(&store, &id, Role::User, "attempt three");
-        say(&store, &id, Role::Assistant, "did it fine");
-
-        // `U` offers the newest, which is not the one we want back.
-        assert_ne!(
-            restore_target(&store, &id).map(|t| t.id),
-            Some(first),
-            "the premise: the first attempt is not what `U` would reach"
-        );
-
-        let said = apply(
-            &store,
-            &Request::GoTo {
-                conversation: id.clone(),
-                // The `#` is optional, because it is printed on the screen the
-                // number was read off.
-                branch: format!("#{first}"),
-            },
-            0,
-        );
-
-        assert!(said[0].contains("did it badly"), "{said:?}");
-        assert_eq!(
-            store
-                .conversation(&id)
-                .expect("the conversation")
-                .expect("it exists")
-                .head_id,
-            Some(first),
-            "the head is on the branch that was named, not the newest one"
-        );
-        // And the other two attempts are still there, still named, still
-        // reachable the same way — going to one branch abandons none of them.
-        let tips = tip_rows(&store, &id);
-        assert_eq!(
-            tips.iter().filter(|t| !t.live).count(),
-            2,
-            "the branches not chosen are still listed: {tips:?}"
-        );
-    }
-
-    /// The hazard the two-field shape exists to make impossible.
-    ///
-    /// The first cut of `g` passed the typed message id to `Request::Restore`,
-    /// which takes a *conversation*. Conversation ids are uuids and uuids are
-    /// hex, so a number can prefix-match one — and the key would then move the
-    /// head of a thread the user was not even looking at. Carrying the
-    /// conversation means `move_head`'s `shares_root` check has something to
-    /// check against.
-    #[test]
-    fn a_branch_number_cannot_move_the_head_of_another_conversation() {
-        let store = store();
-        let mine = conversation(&store, "mine");
-        say(&store, &mine, Role::User, "my question");
-        let my_head = say(&store, &mine, Role::Assistant, "my answer");
-
-        let theirs = conversation(&store, "theirs");
-        say(&store, &theirs, Role::User, "their question");
-        let their_message = say(&store, &theirs, Role::Assistant, "their answer");
-
-        let said = apply(
-            &store,
-            &Request::GoTo {
-                conversation: mine.clone(),
-                branch: their_message.to_string(),
-            },
-            0,
-        );
-
-        assert!(
-            said[0].contains("could not go to"),
-            "a message from another thread is refused: {said:?}"
-        );
-        assert_eq!(
-            store
-                .conversation(&mine)
-                .expect("the conversation")
-                .expect("it exists")
-                .head_id,
-            Some(my_head),
-            "and nothing moved"
-        );
-        assert_eq!(
-            store
-                .conversation(&theirs)
-                .expect("the conversation")
-                .expect("it exists")
-                .head_id,
-            Some(their_message),
-            "in either thread"
-        );
-    }
-
-    #[test]
-    fn a_branch_number_that_is_not_a_number_says_what_one_looks_like() {
-        let store = store();
-        let id = conversation(&store, "the parser");
-        say(&store, &id, Role::User, "port the parser");
-
-        let said = apply(
-            &store,
-            &Request::GoTo {
-                conversation: id.clone(),
-                branch: "the second one".into(),
-            },
-            0,
-        );
-        assert!(said[0].contains("prints them as #57"), "{said:?}");
-
-        let said = apply(
-            &store,
-            &Request::GoTo {
-                conversation: id,
-                branch: "#99999".into(),
-            },
-            0,
-        );
-        assert!(said[0].contains("there is no message #99999"), "{said:?}");
-    }
-
-    #[test]
-    fn the_first_question_of_a_conversation_has_nothing_to_rewind_to() {
-        let store = store();
-        let id = conversation(&store, "fresh");
-        say(&store, &id, Role::User, "hello");
-
-        let said = apply(&store, &Request::Rewind(id.clone()), 0);
-
-        assert!(
-            said[0].contains("nothing before its first question"),
-            "{said:?}"
-        );
     }
 
     #[test]
@@ -988,53 +389,6 @@ mod tests {
         // It shares the prefix rather than copying it, which is the reason Jod
         // keeps its own graph at all.
         assert_eq!(thread_rows(&store, &forked.id).len(), 2);
-    }
-
-    #[test]
-    fn asking_again_puts_the_second_answer_beside_the_first_rather_than_over_it() {
-        let store = store();
-        let id = conversation(&store, "the parser");
-        say(&store, &id, Role::User, "port the parser");
-        say(&store, &id, Role::Assistant, "ported");
-        let asked = say(&store, &id, Role::User, "now add a test");
-        let first_answer = say(&store, &id, Role::Assistant, "added a bad test");
-
-        let said = apply(&store, &Request::Retry(id.clone()), 0);
-
-        assert!(said[0].contains("now add a test"), "{said:?}");
-        assert!(
-            said[1].contains(&format!("#{first_answer}")) && said[1].contains("added a bad test"),
-            "the retry names the answer it replaced, not the question both share: {said:?}"
-        );
-
-        // The question was asked again, not edited: two of it now hang off the
-        // same parent, and the old answer is a findable branch rather than an
-        // overwrite.
-        assert_eq!(store.sibling_pager(asked).expect("a pager"), Some((1, 2)));
-        let tips = tip_rows(&store, &id);
-        assert!(
-            tips.iter().any(|t| t.id == first_answer && !t.live),
-            "the first answer survives as a branch: {tips:?}"
-        );
-        assert_eq!(
-            store.thread(&id).expect("the thread").len(),
-            3,
-            "the live thread carries the new question, not both"
-        );
-    }
-
-    #[test]
-    fn a_conversation_with_nothing_before_its_first_question_cannot_ask_it_again() {
-        let store = store();
-        let id = conversation(&store, "fresh");
-        say(&store, &id, Role::User, "hello");
-
-        let said = apply(&store, &Request::Retry(id.clone()), 0);
-
-        assert!(
-            said[0].contains("nothing before it to branch from"),
-            "{said:?}"
-        );
     }
 
     #[test]

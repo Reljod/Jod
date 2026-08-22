@@ -114,9 +114,6 @@ pub struct TreeState {
     /// Closed works the user explicitly expanded, which is the exception to
     /// their being collapsed by default.
     pub opened: HashSet<NodeId>,
-    /// Whether closed works appear at all. Off hides them entirely; on shows
-    /// them collapsed, below the live ones.
-    pub show_closed: bool,
 }
 
 impl TreeState {
