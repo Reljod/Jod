@@ -22,6 +22,7 @@ use super::todo;
 use super::mention::Mention;
 use super::picker::Picker;
 use super::rail::{self, RailState};
+use super::roles::Choosing;
 use super::secret::Typed;
 use super::workspace::{matches, ListState, Workspace};
 use jod_core::cards::Card;
@@ -29,7 +30,8 @@ use jod_core::commands::Discovered;
 use jod_core::projects::{How, Project};
 use jod_core::roots::Root;
 use jod_core::secrets::Scope;
-use jod_core::tree::{Node, NodeId, NodeKind};
+use jod_core::store::RoleRow;
+use jod_core::tree::{Node, NodeId, NodeKind, ScratchLane};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -831,7 +833,24 @@ pub struct App {
     /// The run each agent's row answers for. The fold leaves no run rows, so
     /// this is where `s`, `a` and `t` find the process to act on.
     pub run_of: HashMap<NodeId, String>,
+    /// Which of the loose pane's rows are hidden, archived or held, keyed by
+    /// run id because that is what a loose row is.
+    ///
+    /// Core's answer under the same filter the tree was read with, so `z`
+    /// reveals a closed work and an archived scratch row in one press rather
+    /// than needing a switch of its own.
+    pub scratch: ScratchLane,
     pub tree: TreeState,
+
+    // ---- the roles panel --------------------------------------------------
+    /// What has been configured for each layer of the chain of command.
+    ///
+    /// Only the roles with a row in `roles`, which on a machine whose owner has
+    /// never opened the panel is none of them. The panel draws all six either
+    /// way — see [`super::roles::rows`].
+    pub roles: Vec<RoleRow>,
+    /// The list of values open over the roles panel, while one is.
+    pub choosing: Option<Choosing>,
 
     // ---- the fleet's panes ----------------------------------------------
     /// Whether the pane beside the rows has the keyboard rather than the rows
@@ -1436,7 +1455,10 @@ impl App {
             work_of: HashMap::new(),
             tree_runs: HashSet::new(),
             run_of: HashMap::new(),
+            scratch: ScratchLane::default(),
             tree: TreeState::default(),
+            roles: Vec::new(),
+            choosing: None,
             preview_focused: false,
             preview_scroll: 0,
             tree_mark: None,
@@ -2572,6 +2594,15 @@ impl App {
             Workspace::Tasks => self.task_rows().iter().map(|t| t.id.clone()).collect(),
             Workspace::Activity => self.activity_rows().iter().map(|a| a.id.clone()).collect(),
             Workspace::Team => self.tasks.iter().map(|t| t.id.clone()).collect(),
+            // The role's own name, which is also its primary key in `roles` —
+            // the six are fixed, so there is nothing here for a cursor to lose
+            // its place in, and keying on the name keeps this list the same
+            // shape as every other.
+            Workspace::Roles => self
+                .role_rows()
+                .iter()
+                .map(|r| r.role.as_str().to_string())
+                .collect(),
             Workspace::Chat | Workspace::MemoryGraph => Vec::new(),
         }
     }
@@ -2705,6 +2736,13 @@ impl App {
             // pane were housekeeping, and the runs it exists to show were the
             // ones scrolled out of sight.
             .filter(|a| !jod_core::works::is_housekeeping_run(&a.name))
+            // A scratch row whose conversation has been archived, on a fleet
+            // that was not asked for the archives. Core decides which of
+            // `hidden` and `archived` an archived row lands in, from the same
+            // filter `z` toggles — so this pane never has to work out whether
+            // the archives are being shown, and a held row is never in here at
+            // all. See `jod_core::tree::ScratchLane`.
+            .filter(|a| !self.scratch.hidden.contains(&a.id))
             .collect()
     }
 
@@ -2872,6 +2910,22 @@ impl App {
         self.memory.iter().find(|n| n.id == self.graph.focus)
     }
 
+    /// The six layers of the chain of command, with whatever has been
+    /// configured for each joined on.
+    ///
+    /// Always six, and always in the chain's own order. There is no filter and
+    /// no sort here: the shape *is* the screen, and a `/` that could hide
+    /// `manager` while leaving `engineer` indented under it would be drawing a
+    /// tree with a hole in it.
+    pub fn role_rows(&self) -> Vec<super::roles::Row> {
+        super::roles::rows(&self.roles)
+    }
+
+    pub fn selected_role(&self) -> Option<super::roles::Row> {
+        let id = self.list(Workspace::Roles).selected.as_deref()?;
+        self.role_rows().into_iter().find(|r| r.role.as_str() == id)
+    }
+
     pub fn selected_schedule(&self) -> Option<&ScheduleRow> {
         let id = self.list(Workspace::Schedules).selected.as_deref()?;
         self.schedules.iter().find(|s| s.name == id)
@@ -3028,6 +3082,15 @@ impl App {
             Workspace::Activity => match self.unread() {
                 0 => "nothing new".to_string(),
                 n => format!("{n} unread"),
+            },
+            // How many of the six have been said something about, rather than
+            // how many rows there are: the answer is always six, and "6 roles"
+            // would tell you nothing you could not read off the screen. Nothing
+            // configured is the state of every machine until somebody opens
+            // this panel, and saying so is what makes the number mean something.
+            Workspace::Roles => match self.role_rows().iter().filter(|r| r.configured).count() {
+                0 => "every role inherits".to_string(),
+                n => format!("{n} of {} set", jod_core::harness::Role::ALL.len()),
             },
             Workspace::Team => match &self.team {
                 None => "no team — start one with --team".to_string(),

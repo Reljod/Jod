@@ -22,6 +22,11 @@ pub enum Workspace {
     Tasks,
     Activity,
     Team,
+    /// What each layer of the chain of command is spawned on. Reached by
+    /// `/roles` and by no digit, because the nine digits are spoken for and a
+    /// settings screen is somewhere you go once a month rather than every
+    /// minute.
+    Roles,
 }
 
 use Workspace::*;
@@ -42,7 +47,7 @@ impl Workspace {
     }
 
     /// Every workspace, including the ones with no digit of their own.
-    pub const ALL: [Workspace; 10] = [
+    pub const ALL: [Workspace; 11] = [
         Chat,
         Fleet,
         Memory,
@@ -53,6 +58,7 @@ impl Workspace {
         Tasks,
         Activity,
         Team,
+        Roles,
     ];
 
     /// The which-key menu, in the order it is drawn. This is also the order the
@@ -76,7 +82,7 @@ impl Workspace {
             Tasks => 't',
             Activity => 'a',
             Team => 'w',
-            MemoryGraph => return None,
+            MemoryGraph | Roles => return None,
         })
     }
 
@@ -111,6 +117,7 @@ impl Workspace {
             Tasks => "tasks",
             Activity => "activity",
             Team => "team",
+            Roles => "roles",
         }
     }
 
@@ -131,6 +138,7 @@ impl Workspace {
             Tasks => "tasks",
             Activity => "activity",
             Team => "team",
+            Roles => "roles",
         }
     }
 
@@ -156,6 +164,11 @@ impl Workspace {
             Tasks => &["state", "name", "age"],
             Activity => &["newest", "unread first", "source"],
             Team => &["name", "status"],
+            // One order, and it is the point of the screen: the chain of
+            // command, drawn as the edge that delegates. Sorting it any other
+            // way would throw away the only thing the panel knows that
+            // `Store::role_list` does not.
+            Roles => &["chain of command"],
             Chat | MemoryGraph => &["—"],
         }
     }
@@ -300,6 +313,17 @@ mod tests {
             assert_eq!(ws.letter(), None, "{ws:?}");
             assert_eq!(ws.digit(), None, "{ws:?}");
         }
+    }
+
+    /// The roles panel is reached by `/roles` and by nothing else. All nine
+    /// digits are already spoken for, and a settings screen somebody opens once
+    /// a month is not the one to take a digit off a screen they open every
+    /// minute.
+    #[test]
+    fn the_roles_panel_is_reached_by_its_command_rather_than_by_a_digit() {
+        assert_eq!(Workspace::Roles.letter(), None);
+        assert_eq!(Workspace::Roles.digit(), None);
+        assert!(Workspace::Roles.is_list(), "its letters are commands");
     }
 
     #[test]

@@ -1280,22 +1280,23 @@ impl Store {
         Ok((folded, closed))
     }
 
-    /// What the loose pane needs to know about the scratch lane, under the same
-    /// filter the tree was read with.
+    /// What the loose pane needs to know about the scratch lane.
     ///
-    /// **The reveal is the filter, not a second switch.** `z` on the fleet is
-    /// already the difference between [`Filter::Live`] and [`Filter::All`], and
-    /// that is the flag that decides whether an archived scratch row is missing
-    /// from the pane or present and marked. Giving the scratch lane a toggle of
-    /// its own would be a second thing to press for the same intention, and the
-    /// two would drift apart the first time one of them was forgotten.
+    /// **The reveal is a filter, and it is now the lane's own.** This used to
+    /// be read with whatever filter the tree was read with, because `z` on the
+    /// fleet widened the *works* query from [`Filter::Live`] to [`Filter::All`]
+    /// and archived scratch rows came back on the same switch — one key for one
+    /// intention, which was right while both halves existed. The fleet's
+    /// closed-works toggle has since been removed, so there is no shared switch
+    /// left to ride on and the console asks for this lane separately: the works
+    /// are always live, and `z` decides only whether an archived scratch row is
+    /// missing from the pane or present and marked.
     ///
     /// [`Filter::Closed`] reveals the archives here exactly as [`Filter::All`]
-    /// does, and does not additionally hide the live rows. The fleet screen
-    /// never asks for it — `z` toggles between `Live` and `All` — so narrowing
-    /// the lane to archives alone would be behaviour invented for a caller that
-    /// does not exist, and the reading that keeps a row on the screen is the
-    /// one to guess wrong in.
+    /// does, and does not additionally hide the live rows. The console only
+    /// ever asks for `Live` or `All`, so narrowing the lane to archives alone
+    /// would be behaviour invented for a caller that does not exist, and the
+    /// reading that keeps a row on the screen is the one to guess wrong in.
     ///
     /// One query, joined the same way [`Store::forest_of`] joins its runs: there
     /// is no column saying which conversation a run wrote into, so

@@ -30,14 +30,14 @@ use jod_core::HarnessKind;
 use jod_core::projects::{How, Project};
 use jod_core::rank;
 use jod_core::roots::Root;
-use jod_core::tree::{Node, NodeId};
+use jod_core::tree::{Node, NodeId, ScratchLane};
 use jod_core::works::Filter;
 use jod_core::schedule::{
     Fire, FireOutcome, Goal, GoalState as StoredGoalState, Schedule,
     ScheduleState as StoredScheduleState,
 };
 use jod_core::activity as core_activity;
-use jod_core::store::{Edge, Fact, Origin, Store, StoredRun};
+use jod_core::store::{Edge, Fact, Origin, RoleRow, Store, StoredRun};
 use jod_core::team::TeamTask;
 use jod_core::webhook::{Delivery as StoredDelivery, DeliveryStatus, Rule};
 use jod_core::Jod;
@@ -837,6 +837,19 @@ fn trust(origin: Origin) -> f64 {
     }
 }
 
+/// What has been configured for each layer of the chain of command.
+///
+/// Only the roles somebody has said something about, which on most machines is
+/// none of them. The panel walks its own tree of all six and looks each one up
+/// here — the shape of the chain is a fact about the code, and the table
+/// deliberately does not know it.
+pub fn roles(jod: &Arc<Jod>) -> Vec<RoleRow> {
+    let Some(store) = jod.store() else {
+        return Vec::new();
+    };
+    store.role_list().unwrap_or_default()
+}
+
 /// Every schedule, with its next fire and its last seven outcomes.
 pub fn schedules(jod: &Arc<Jod>) -> Vec<ScheduleRow> {
     let Some(store) = jod.store() else {
@@ -1431,41 +1444,49 @@ pub fn search(jod: &Arc<Jod>, query: &str, limit: usize) -> Vec<Hit> {
 /// from a label would be guessing.
 ///
 /// Only the live works are asked for: a tree that opens as a list of everything
-/// ever done is one people stop reading.
+/// ever done is one people stop reading. There is no longer a key that says
+/// otherwise — the fleet's closed-works toggle is gone — so this asks for
+/// [`Filter::Live`] and never anything else.
+///
+/// `show_archived_scratch` is the one reveal that survived, and it is the
+/// scratch lane's alone. `z` on the fleet used to widen the *works* filter and
+/// bring archived scratch rows back as a side effect of that; with the works
+/// toggle gone there is nothing left for it to ride on, so the lane is read
+/// again under its own filter and the flag means only what it says. The works
+/// are unaffected either way.
 ///
 /// What comes back is [`fleet::condense`]d: core answers with the whole forest,
 /// and the fleet screen shows two levels of it. This is the one place the fold
 /// happens, so every reader of `App::forest` — the rows, the cursor, the detail
 /// pane, the keys — is looking at the same tree the screen is.
-pub fn forest(jod: &Arc<Jod>) -> Condensed {
+pub fn forest(jod: &Arc<Jod>, show_archived_scratch: bool) -> Condensed {
     let Some(store) = jod.store() else {
-        return Condensed {
-            nodes: Vec::new(),
-            works: HashMap::new(),
-            run_of: HashMap::new(),
-            runs: HashSet::new(),
-            closed: HashSet::new(),
-        };
+        return Condensed::default();
     };
-    let Ok((folded, closed)) = store.fleet(Filter::Live) else {
-        return Condensed {
-            nodes: Vec::new(),
-            works: HashMap::new(),
-            run_of: HashMap::new(),
-            runs: HashSet::new(),
-            closed: HashSet::new(),
-        };
+    let Ok((mut folded, closed)) = store.fleet(Filter::Live) else {
+        return Condensed::default();
     };
+    // Read a second time rather than threaded through `fleet`, because the two
+    // filters no longer agree: the works are always live and the lane is not.
+    // A failure here leaves the lane `fleet` already computed, which is the
+    // hidden-by-default one — the same answer the flag being off would give.
+    if show_archived_scratch {
+        if let Ok(lane) = store.scratch_lane(Filter::All) {
+            folded.scratch = lane;
+        }
+    }
     Condensed {
         nodes: folded.nodes,
         works: folded.works,
         run_of: folded.run_of,
         runs: folded.runs,
+        scratch: folded.scratch,
         closed,
     }
 }
 
 /// What one refresh of the fleet tree hands the app.
+#[derive(Default)]
 pub struct Condensed {
     pub nodes: Vec<Node>,
     /// The work each row belongs to, for the keys that act on a work.
@@ -1476,6 +1497,13 @@ pub struct Condensed {
     /// The runs the tree accounts for, which is what keeps them out of the
     /// pane of loose runs below it.
     pub runs: HashSet<String>,
+    /// What the pane of loose runs needs to know about the scratch lane:
+    /// which of its rows are hidden, archived or held.
+    ///
+    /// Keyed by **run**, because that is what a loose row is. A scratch
+    /// conversation belongs to no work, so `Store::forest_of` never reads it and
+    /// it has no node to key against — see [`jod_core::tree::ScratchLane`].
+    pub scratch: ScratchLane,
     /// Which works are closed, which is what makes an archive open shut.
     pub closed: HashSet<NodeId>,
 }
