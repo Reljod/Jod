@@ -103,8 +103,90 @@ unit suite.
 
 ---
 
+## R3b. The return leg only ran inside a daemon nobody was running
+Status: **fix open on `worktree-tui-delivers-main-mail`** · Owner: Reljod ·
+Severity: high
+
+Observed live, from the console, on 22 Aug 2026. Reljod asked the main chat for
+the weather in Manila. The chat delegated the lookup to a one-shot run, the run
+fetched it from `wttr.in`, sent the answer to `main`, and said in its own panel
+"Reported back to `main`." Nothing appeared in the chat. The screenshots are the
+report; the database says the same thing.
+
+R3's fix (#134) is not the problem — every part of it worked. The message was on
+the bus, correctly addressed, with `main` on the run's roster pointing at the
+pinned conversation:
+
+```
+team_messages id=4  team=01965778…  sender=manila-weather  recipient=main
+                    state=queued  delivered=0
+```
+
+**The only thing that moves that row is `Ticker::tick_mail`, and the only caller
+of `tick_mail` is `core/src/daemon.rs:121`.** No `jod daemon` was running — just
+`jod tui`. So the mail sat queued, and nothing on screen said so. Two older
+reports were queued the same way, from 20 and 21 Aug, along with ten card
+answers (see R3c).
+
+Two things had to be true at once for this to be invisible for days. The run
+truthfully reported success, because `send_message` genuinely succeeded; and the
+console cannot show a turn it did not take, because it draws the chat from
+entries held in memory and never reads them back. So even with a daemon running,
+the daemon's own delivery would have resumed the chat's session in another
+process, written the turn to the database, and left the screen blank. **Whoever
+holds the chat has to take the turn** — that is the part R3 did not cover.
+
+Fix: `Store::collect_main_chat_mail` lifts the main-chat drain out of the tick,
+and `jod tui` runs it on its own tick and hands the result to the orchestrator
+as a turn of its own, echoed as a routing line rather than as something Reljod
+typed. The daemon keeps its copy for headless boxes; both settle in one
+transaction each, so whichever arrives first takes the message.
+
+Evidence: run against a copy of the live database with the chat made resumable,
+the drain moves all four stranded messages and the injection leads with the
+weather report Reljod never saw.
+
+Check: `cargo test -p jod-core --lib team::` and `cargo test -p jod-cli --bin
+jod tui::tests::a_report` — the console delivers when idle and looking at the
+chat, holds under a turn in flight, holds while watching another agent, and
+never draws a delivered report as Reljod's own line.
+
+---
+
+## R3c. Card answers reach nobody without a daemon either
+Status: open · Owner: — · Severity: high
+
+Found while confirming R3b, and not fixed by it. `pending_deliveries` on the
+live database holds **ten** answered cards sitting at `queued`, the oldest from
+13 Aug — every one of them an answer Reljod typed into the rail that the agent
+waiting on it never received. `core/src/delivery.rs` says this path is "the
+thing Reljod asked for most directly", and its own module note says the queue
+"now has a caller". It does: `Ticker::tick_deliveries`, in the daemon.
+
+R3b deliberately does not cover these. They are addressed to *other agents'*
+conversations, and delivering one means resuming that agent's session in a
+process of its own — which is exactly what a daemon is for and what a console
+should not become.
+
+So the question is not where the code goes but what a console owes the person
+using it. Today `jod tui` says nothing while ten answers rot. It already warns
+"nothing is watching these sessions for stalls — start `jod daemon`" for
+heartbeats; an answered card nobody will ever be told about deserves at least as
+much.
+
+Fix, smallest first: say it on screen — the rail knows a card is answered and
+the queue knows it was never delivered, so a card stuck at `queued` for more
+than a tick or two is a sentence the console can write. Whether the console
+should instead start a daemon itself is a larger question and a separate one.
+
+Check: answer a card with no daemon running and assert the console says the
+answer is waiting rather than showing it as delivered.
+
+---
+
 ## R3. A delegated run has no route back to the orchestrator
-Status: **fix open as #134** · Severity: medium
+Status: **fixed — merged as #134**, then found incomplete: see R3b ·
+Severity: medium
 
 Reljod's ask includes the return leg: the sub-agent communicates back to the
 orchestrator with answers, or to say it has finished. The bus exists —

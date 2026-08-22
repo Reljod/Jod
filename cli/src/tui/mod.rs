@@ -1061,6 +1061,10 @@ async fn event_loop(
                     // is standing arrives on screen. Nothing happens on the
                     // ticks in between — it is a lookup in a set.
                     ensure_launch_root(&jod, &mut app, &mut granted);
+                    // After `bind_rail`, which is what resolves the
+                    // conversation this console is looking at, and that is the
+                    // question deciding whether a report may land here at all.
+                    deliver_reports(&jod, &mut app, &opts, &mut thread).await;
                     refresh_workspaces(&jod, &mut app);
                     if matches!(app.workspace, Workspace::Team | Workspace::Tasks) {
                         refresh_team(&jod, &mut app);
@@ -1400,10 +1404,11 @@ async fn orchestrate(
     opts: &Options,
     thread: &mut Thread,
     instruction: String,
-) {
+    origin: Origin,
+) -> Option<String> {
     // On screen before the await. Handing over talks to a harness process, and
     // a line that appears only once that returns reads as a dropped keystroke.
-    app.push(Entry::You(instruction.clone()));
+    app.push(origin.echo(&instruction));
     app.scroll_to_bottom();
 
     // Cloned rather than taken, so a hand-over that fails leaves the summary
@@ -1459,10 +1464,44 @@ async fn orchestrate(
             // Watched, so the reply lands in the transcript: the whole point of
             // routing through the orchestrator is *which* route it picks, and
             // that arrives as its answer.
-            app.begin_turn(handed.agent.id, app.now_ms);
+            app.begin_turn(handed.agent.id.clone(), app.now_ms);
             app.scroll_to_bottom();
+            return Some(handed.agent.id);
         }
         Err(e) => app.push(Entry::Notice(format!("could not reach the main chat: {e}"))),
+    }
+    None
+}
+
+/// How a turn about to be handed to the orchestrator got here.
+///
+/// The chat echoes the instruction before it hands it over, and the echo has to
+/// say who wrote it. A report arriving from a delegated run is not something
+/// Reljod typed, and drawing it as his line would put words in his mouth that
+/// the transcript then keeps for ever — including through a compaction, where a
+/// summary of "what you asked" would be built partly out of things he never
+/// said.
+enum Origin {
+    /// Typed into the chat box.
+    Typed,
+    /// Carried in from the delivery queue: a delegated run reported back, or a
+    /// card was answered from the rail.
+    Delivered(String),
+}
+
+impl Origin {
+    /// The line that goes on screen above the reply.
+    ///
+    /// A delivered turn shows the routing line rather than its own prompt. The
+    /// prompt is the machine-readable envelope — `[message from … · message
+    /// #7]` and the instructions for replying into the thread — and the part of
+    /// it worth reading arrives a moment later anyway, in what the orchestrator
+    /// says about it.
+    fn echo(self, instruction: &str) -> Entry {
+        match self {
+            Origin::Typed => Entry::You(instruction.to_string()),
+            Origin::Delivered(line) => Entry::Routing(line),
+        }
     }
 }
 
@@ -1491,7 +1530,9 @@ async fn perform(
         Action::RunCommand { prompt, command } => {
             send_turn(jod, app, opts, thread, prompt, command).await
         }
-        Action::Orchestrate(instruction) => orchestrate(jod, app, opts, thread, instruction).await,
+        Action::Orchestrate(instruction) => {
+            orchestrate(jod, app, opts, thread, instruction, Origin::Typed).await;
+        }
         Action::EnterMain => enter_main(jod, app, opts, thread, false).await,
         Action::EnterManager(conversation) => match jod.store() {
             None => app.push(Entry::Notice(format!("{NO_STORE} — there are no managers"))),
@@ -6725,7 +6766,7 @@ async fn send_turn(
     command: Option<String>,
 ) {
     if thread.in_main(jod.store().map(Arc::as_ref)) {
-        orchestrate(jod, app, opts, thread, prompt).await;
+        orchestrate(jod, app, opts, thread, prompt, Origin::Typed).await;
         return;
     }
 
@@ -6912,6 +6953,113 @@ fn bind_rail(jod: &Arc<Jod>, app: &mut App, thread: &Thread) {
         current_conversation(store, app, thread)
             .or_else(|| store.pinned_conversation().ok().flatten())
     });
+}
+
+/// Whether a report waiting for the main chat may become a turn on this screen.
+///
+/// A value rather than an action, the same shape and for the same reason as
+/// `plan_injection` and `wake_order` in the core: *when* to speak is where the
+/// judgement is, and keeping it out of the delivering means it can be tested
+/// without a store, a harness, or a terminal.
+///
+/// - **`busy`** — a turn is in flight. The running turn's prompt was assembled
+///   before this arrived, so splicing it in answers a question the model has
+///   already moved past. It waits, and nothing is lost.
+/// - **`on_screen`** — the conversation this console is looking at. With an
+///   agent on screen instead, a turn of the orchestrator's would interleave two
+///   conversations in one transcript. `None` is a console bound to nothing yet,
+///   which is not the chat either.
+fn report_may_land(busy: bool, on_screen: Option<&str>, main_chat: &str) -> bool {
+    !busy && on_screen == Some(main_chat)
+}
+
+/// Bring anything waiting for the main chat into the chat on screen.
+///
+/// The return leg, from the console's side. A run the chat delegated something
+/// to sends its answer to `main`; that lands on the bus, and
+/// [`Store::collect_main_chat_mail`] moves it onto the chat's delivery queue.
+/// This turns the queue into a turn.
+///
+/// **Why the console does this and not the daemon.** `jod daemon` already has a
+/// step that delivers to any conversation, and for every conversation but one it
+/// is the right place: it resumes the session in a process of its own and the
+/// agent's own panel shows the result. The main chat is the exception, because
+/// `jod tui` draws it from entries held in memory and never reads them back. A
+/// turn taken against it in another process is written to the database and never
+/// appears in front of the person who asked the question — which is exactly the
+/// fault this closes. Reljod asked the chat for the weather, it delegated the
+/// lookup, the run answered and said so, and his screen showed nothing.
+///
+/// Both processes doing it is safe rather than merely tolerated: the drain and
+/// the queue settle in one transaction each, so whichever gets there first takes
+/// the message and the other finds nothing.
+///
+/// Three refusals, each the same one the tick makes:
+///
+/// - **Not under a turn in flight.** The running turn's prompt was assembled
+///   before this arrived, so splicing it in answers a question the model has
+///   moved past. It waits, and nothing is lost.
+/// - **Not unless this console is looking at the chat the mail is for.** With an
+///   agent on screen, a turn of the orchestrator's would interleave two
+///   conversations in one transcript.
+/// - **Not until the hand-over has actually started a run.** The queue is marked
+///   delivered only once something is carrying it, so a hand-over that fails is
+///   retried on the next tick rather than silently swallowed.
+async fn deliver_reports(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: &mut Thread) {
+    let Some(store) = jod.store() else {
+        return;
+    };
+    let Some(pinned) = store.pinned_conversation().ok().flatten() else {
+        return;
+    };
+    if !report_may_land(app.busy, app.conversation.as_deref(), &pinned) {
+        return;
+    }
+    if let Err(e) = store.collect_main_chat_mail() {
+        app.push(Entry::Notice(format!(
+            "could not read what the delegated runs reported: {e}"
+        )));
+        return;
+    }
+    // `false`, because the line above already established that this console is
+    // not mid-turn, and it is the authority on that: `conversation_is_busy`
+    // reads run rows written by other processes and would not know about a turn
+    // this one is streaming.
+    let injection = match store.plan_injection(&pinned, false) {
+        Ok(Some(injection)) => injection,
+        Ok(None) => return,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not read the chat's delivery queue: {e}"
+            )));
+            return;
+        }
+    };
+    let ids: Vec<i64> = injection.items.iter().map(|p| p.id).collect();
+    let line = match ids.len() {
+        1 => "← a delegated run reported back — handing it to the chat".to_string(),
+        n => format!("← {n} replies came back — handing them to the chat"),
+    };
+    let carried = orchestrate(
+        jod,
+        app,
+        opts,
+        thread,
+        injection.prompt,
+        Origin::Delivered(line),
+    )
+    .await;
+    // Nothing started, so nothing was delivered. Left queued on purpose: the
+    // next tick tries again, and marking it delivered to a run that does not
+    // exist is how an answer disappears without anybody being told.
+    let Some(run) = carried else {
+        return;
+    };
+    if let Err(e) = store.mark_deliveries_delivered(&ids, Some(&run)) {
+        app.push(Entry::Notice(format!(
+            "the report was handed over but the queue still lists it: {e}"
+        )));
+    }
 }
 
 /// Hand the directory `jod tui` was launched in to the conversation on screen,
@@ -8948,6 +9096,52 @@ mod tests {
         assert!(!Thread::default().in_main(Some(&s)));
         // And with no database there is no main chat to be in.
         assert!(!inside.in_main(None));
+    }
+
+    /// The measured failure, as an assertion. Reljod asked the chat for the
+    /// weather, it delegated the lookup, the run answered and said it had
+    /// reported back — and his screen showed nothing, because the only thing
+    /// that turned that answer into a turn lived in a daemon he was not running.
+    /// An idle console looking at the chat is exactly the state the report has
+    /// to land in.
+    #[test]
+    fn a_report_lands_in_an_idle_console_looking_at_the_chat() {
+        assert!(report_may_land(false, Some("main-chat"), "main-chat"));
+    }
+
+    /// Never under a turn in flight. The running turn's prompt was assembled
+    /// before the report arrived, so splicing it in answers a question the model
+    /// has moved past — the rule the whole delivery queue exists for. It waits.
+    #[test]
+    fn a_report_waits_for_the_turn_on_screen_to_finish() {
+        assert!(!report_may_land(true, Some("main-chat"), "main-chat"));
+    }
+
+    /// With somebody else's agent on screen, a turn of the orchestrator's would
+    /// interleave two conversations in one transcript. An unbound console is not
+    /// the chat either. Both hold rather than drop: the mail stays queued and
+    /// arrives when the chat is back on screen.
+    #[test]
+    fn a_report_does_not_land_on_a_console_watching_something_else() {
+        assert!(!report_may_land(false, Some("some-agent"), "main-chat"));
+        assert!(!report_may_land(false, None, "main-chat"));
+    }
+
+    /// A report is not something Reljod typed, and drawing it as his line would
+    /// put words in his mouth that the transcript then keeps — including through
+    /// a compaction, where a summary of what he asked would be built partly out
+    /// of things he never said.
+    #[test]
+    fn a_delivered_report_is_not_echoed_as_the_persons_own_line() {
+        assert!(matches!(
+            Origin::Typed.echo("what's the weather"),
+            Entry::You(said) if said == "what's the weather"
+        ));
+        assert!(matches!(
+            Origin::Delivered("← a delegated run reported back".into())
+                .echo("[message from manila-weather · message #4]\nit is 30C"),
+            Entry::Routing(said) if said == "← a delegated run reported back"
+        ));
     }
 
     fn press(app: &mut App, code: KeyCode) -> Option<Action> {

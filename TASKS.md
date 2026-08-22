@@ -15,7 +15,7 @@ area file over this table and correct the table when you notice it drifting.
 | Area | File | Findings | Done | Open | Owner |
 |---|---|---|---|---|---|
 | Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L10 | 5 | 4 + 1 blocked | — |
-| Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7 | 4 | 3 | — |
+| Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7, R3b, R3c | 4 | 4 | — |
 | The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1–T7 | 1 + 37 shipped | 6 | — |
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
 | Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | 1 | 0 | — |
@@ -228,6 +228,8 @@ work is the same failure this list keeps documenting.
 | high | Re-adding a root you already hold silently revokes write access | `00-launch-and-roots.md` L7 | open |
 | high | A goal whose stop condition is already true never stops — claimed and released every tick, for ever | `50-goals.md` G4 | open |
 | high | A goal with no cap and a non-deterministic check has no ceiling at all | `50-goals.md` G5 | open |
+| high | A delegated run reports back, the console shows nothing — the return leg only ran inside a daemon nobody was running | `01-routing.md` R3b | fix open, `worktree-tui-delivers-main-mail` |
+| high | Ten answered cards never reached the agents waiting on them, for the same reason | `01-routing.md` R3c | open |
 | high | It busy-waits on its own child with `sleep`, which the design forbids | `01-routing.md` R4 | open, now small |
 | high | The orchestrator will not answer, or will — it is a coin flip nothing decides | `01-routing.md` R1 | in flight |
 | high | "Stop an agent and everything it started" does not stop what it started | `20-fleets.md` F5 | in flight |
