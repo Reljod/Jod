@@ -19,7 +19,7 @@ area file over this table and correct the table when you notice it drifting.
 | The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1–T8 | 2 + 37 shipped | 6 | — |
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
 | Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | 1 | 0 | — |
-| The main → assistant → manager → engineer chain | [`tasks/12-main-chain-exploration.md`](tasks/12-main-chain-exploration.md) | X1–X15 | 1 | 14 | — |
+| The main → assistant → manager → engineer chain | [`tasks/12-main-chain-exploration.md`](tasks/12-main-chain-exploration.md) | X1–X15 | 3 | 12 | — |
 | Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F9 | 5 | 4 | — |
 | Project managers | [`tasks/30-project-managers.md`](tasks/30-project-managers.md) | P1–P5; T1–T7 **shipped**; M1–M6 | 4 + T1–T7 | 7 | — |
 | Scheduling | [`tasks/40-scheduling.md`](tasks/40-scheduling.md) | S1–S6 | 5 | 1 | — |
