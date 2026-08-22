@@ -58,8 +58,8 @@ the ones that were not, and the gaps here are larger than the coverage.
   subject reuses a warm engineer, and whether a different subject correctly
   opens a new one, is the whole of `worktree-engineer-reuse-rules` (#236, merged)
   and none of it was driven.
-- **~~The doorman's judgement~~ — since tested, and it is broken. See X14 and
-  X15.** This entry originally said the assistant had never been asked to decide
+- **~~The doorman's judgement~~ — since tested, and it is broken. See X14,
+  X15 and X16.** This entry originally said the assistant had never been asked to decide
   and that `interrupt_main` had never been seen to fire. Both were true when it
   was written and neither is true now: a later run put an urgent message into a
   busy chat, a doorman read it, judged it correctly, called `interrupt_main`
@@ -1073,7 +1073,7 @@ returns to `queued` rather than sticking.
 
 ---
 
-## X15. A doorman that starts and then dies strands its message for ever, and later messages go unjudged
+## X15. A doorman that starts and then dies strands its message for ever
 Status: **open** · Severity: critical · Owner: —
 
 The mechanism behind half of X14, established from the code and confirmed
@@ -1136,24 +1136,35 @@ ordinary queue drain. They were not lost. The correction matters because "the
 message vanishes" and "the message arrives late and unjudged" call for different
 urgency, and only the second is true of the messages after the first.
 
-What they did lose is the doorman. **Exactly one doorman run exists in the
-store**, for delivery 12, despite two later messages arriving while main was
-busy — which is precisely when a doorman should read them. So those two never
-got the judgement the tier exists to provide: nobody decided whether they could
-wait, and they waited by default. For a message that says "STOP, drop the essay,
-answer me now", waiting for the essay to finish is the wrong answer arrived at
-by not deciding.
+**And nothing was wrong with those two either — a second correction.** An
+earlier draft said they "went unjudged" and treated that as damage. Checked
+properly: delivery 15 waited 38 seconds and delivery 16 waited 23 seconds, and
+then main's turn ended and both were delivered. No tick landed in that window,
+which is ordinary rather than a fault. `reviewed_at_ms` is `NULL` on both, which
+also rules out the other candidate — that a failed spawn had stamped them as
+seen. They were simply short waits that resolved on their own.
 
-**The causal link is probable rather than proven.** A row sitting in `reviewing`
-is a claim, and the natural reading is that it suppresses further doorman starts
-for that conversation. That fits what was seen — one doorman, two unjudged
-messages — but it was not isolated from the alternative, which is that the
-ticker simply did not find main busy at the moment it looked. Whoever fixes this
-should establish which, because if it is the claim then one failure degrades the
-tier until the conversation is restarted, and if it is timing then the stranding
-of row 12 is the whole of the bug.
+Two candidate explanations for their not being judged were considered and both
+are now dead: the "claim blocks later doormen" theory was disproved in code by
+the session that owns this feature — a claim is per *row*, not per conversation,
+so rows behind a stranded one still plan `Judge` — and the "stamped after a
+failed spawn" theory is ruled out by the `NULL`. What is left is that the turn
+ended first, and that is not a bug.
 
-Either way delivery 12 itself is genuinely lost, and that part is certain.
+So the damage from this finding is **one lost message**, delivery 12, and
+nothing more. That is still worth fixing, and the reason it could never be
+recovered turns out to be a second fault: see **X16**, where the compaction that
+followed orphaned it onto a conversation nobody reads. But the tier is not
+degraded, later messages are not lost, and this finding claimed both at
+different times before being checked.
+
+**Three drafts, three corrections, and the pattern is worth naming**, because it
+is the same each time: generalising from one observation taken at one moment. A
+twenty-second poll for twenty minutes settled the part that was real; a single
+`SELECT reviewed_at_ms` settled the part that was not. Both were cheap and
+neither was done until after the claim had been written down.
+
+The stranding of row 12 is the whole of the bug, and that part is certain.
 
 **Fix shape, and it is genuinely small.** Call `under_review_for` on the tick
 and requeue anything whose doorman run is no longer alive. The comments above
