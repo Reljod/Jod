@@ -4246,3 +4246,37 @@ two rules agree instead of contradicting each other.
 [`SPEC.md`](../SPEC.md); the code still says the old thing in
 `core/src/mcp.rs`, `core/src/orchestrator.rs` and the decision above. Anyone
 reading those before the spec ships is reading the behaviour being replaced.
+
+## `jod chat` is the console without a screen, so it takes the console's settings
+
+`jod chat` built its spawn with no `role` on it, and `apply_role` returns on its
+first line when a request carries none. The whole roles panel was therefore
+invisible to a chat: with `main` set to AGY and Gemini, `jod chat` still opened
+Claude Code, while `jod main` on the same database answered as Gemini.
+
+Two readings were open, and they lead to opposite fixes. A chat could be a bare
+harness conversation on purpose — no orchestrator framing, nothing configured,
+the plainest thing the binary can do — in which case the code was right and the
+help was wrong. Or a chat is the console on a terminal that has no room for the
+full screen, in which case the help was right and the code was wrong.
+
+The help won, because it is the promise people have already been given. It calls
+the command *"the console without a screen — you `cd` into a repository and
+start talking"*, and a command that says it is the console and then ignores every
+setting the console obeys is the kind of difference nobody discovers until they
+are confused by an answer. So a chat that named no harness is tagged
+`Role::Main`, and the harness, model, thinking level and permission ceiling in
+the `main` row reach it the same way they reach `jod main`.
+
+**Reversing this is small.** It is one `then_some(Role::Main)` in
+`cli/src/main.rs` plus a sentence of help text. If a bare, unconfigured chat is
+what was wanted, drop the tag and say so in the help instead.
+
+**The flag had to stop carrying a default first.** `--harness` was declared
+`default_value_t = HarnessArg::Claude`, so clap handed the same value back
+whether or not anybody typed it, and the role could never tell "nobody chose"
+from "somebody chose Claude Code". That is exactly the distinction `jod tui`
+already protects, for the same reason and in the same words — the flag has no
+default and the default lives at the point of use — and `SpawnRequest::role`
+asks every caller to drop its role tag when a harness was named, so that an
+explicit flag stays the top rung of the precedence.
