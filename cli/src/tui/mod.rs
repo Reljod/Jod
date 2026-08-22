@@ -51,13 +51,17 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
+// Aliased: this file already has a `delivery` module of its own, which is
+// about drawing what arrived rather than about the queue it arrived from.
+use jod_core::delivery as queue;
 use jod_core::harness::{Role, ToolAccess};
 use jod_core::schedule::{GoalState, ScheduleState};
 use jod_core::service::{AgentStatus, RunConversation};
@@ -182,6 +186,23 @@ pub enum Action {
     /// set in the key handler, so the session survives whether or not the kill
     /// succeeds.
     Interrupt(String),
+    /// End every turn in flight anywhere, and keep every conversation.
+    ///
+    /// [`Action::Interrupt`] applied to the whole fleet at once, and deliberately
+    /// not a shutdown: every process dies, every conversation survives, and each
+    /// one carries on the moment somebody says what to do instead. Reached by
+    /// `Shift-Esc` and by `/stop`, which are equals — most terminals will not
+    /// report a modified Escape at all, so a machine where the key never arrives
+    /// still has the whole gesture.
+    StopEverything,
+    /// Hold what was typed into a conversation whose turn is still running.
+    ///
+    /// The queue is the store's `pending_deliveries`, not a list in this
+    /// process, which is what lets an assistant read the message and decide
+    /// whether it can wait — see `jod_core::delivery`. A second copy here would
+    /// be a queue only this screen could see, and the doorman would be judging
+    /// messages it never gets shown.
+    Enqueue(String),
     /// Put an agent's output on screen and follow it.
     Watch(String),
     /// Arm or disarm a run's heartbeat — see [`command::Slash::Heartbeat`].
@@ -605,6 +626,21 @@ fn enter() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
+    // Ask the terminal to report modified keys, which is the only way
+    // `Shift-Esc` ever arrives: without the enhancement protocol a terminal
+    // sends the same bare `\x1b` for Escape whatever is held down with it, so
+    // crossterm has nothing to tell them apart by.
+    //
+    // **Asked for, never required.** Plenty of terminals decline, and a startup
+    // that failed because one of them did would be trading the whole console
+    // for one shortcut. The error is dropped on purpose: `/stop` does exactly
+    // what `Shift-Esc` does and is named beside it on the key bar, so a
+    // terminal that refuses this loses a keystroke and nothing else.
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+
     // A panic past this point would otherwise leave the shell in raw mode with
     // no echo — effectively broken until the user blindly types `reset`.
     let hook = std::panic::take_hook();
@@ -618,7 +654,15 @@ fn enter() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    // Popped before the screen is given back, and unconditionally: a terminal
+    // that never took the flags ignores this, and one that did would otherwise
+    // be left reporting modified keys to whatever shell comes next.
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
 }
 
 /// The transcript line a delegation leaves behind.
@@ -961,7 +1005,16 @@ async fn event_loop(
                         // refused earlier and forgotten. Mid-*switch* counts:
                         // the queue is why the switch could take the screen at
                         // all without losing what was typed over it.
-                        if let Some(next) = app.next_queued() {
+                        //
+                        // Drained here as well as by the daemon's tick, and the
+                        // duplication is deliberate. The tick runs once a
+                        // minute, which is the right cadence for a card
+                        // answered while nobody was watching and an absurd one
+                        // for a sentence somebody is sitting in front of. Both
+                        // go through the same rows, and `plan_injection` only
+                        // ever speaks about a conversation that is not busy, so
+                        // the two cannot both take the same message.
+                        if let Some(next) = take_queued(&jod, &mut app, &thread) {
                             perform(&jod, &mut app, &opts, &mut thread, Action::Send(next)).await;
                         } else {
                             // Nothing waiting, so the screen is genuinely idle:
@@ -1740,6 +1793,94 @@ async fn perform(
                 ));
             }
         }
+        // Written to the store rather than held here, because the whole point
+        // of the queue is that something other than this screen can read it: an
+        // assistant judges whether the message can wait, and the daemon
+        // delivers it if the terminal is closed before the turn ends.
+        Action::Enqueue(text) => {
+            let Some(store) = jod.store() else {
+                app.push(Entry::Notice(
+                    "there is no database, so there is nowhere to queue this — it is lost".into(),
+                ));
+                app.set_queued(0);
+                return;
+            };
+            let Some(conversation) = current_conversation(store, app, thread) else {
+                app.push(Entry::Notice(
+                    "this screen is not in a conversation, so there is nothing to queue \
+                     this against"
+                        .into(),
+                ));
+                app.set_queued(0);
+                return;
+            };
+            match store.enqueue_delivery(&conversation, queue::Kind::Human, "typed", &text) {
+                Ok(_) => {
+                    // The real number, over the optimistic one the keypress
+                    // counted. They agree unless something else is also filling
+                    // this queue, which is exactly when the screen should say so.
+                    app.set_queued(store.pending_for(&conversation).map(|p| p.len()).unwrap_or(0));
+                    // Started here as well as on the daemon's tick, and this is
+                    // the copy that matters: the tick runs once a minute, and a
+                    // correction typed to stop a turn going the wrong way is
+                    // worth nothing a minute late.
+                    judge_now(jod, app, &conversation).await;
+                }
+                Err(e) => {
+                    app.push(Entry::Notice(format!(
+                        "could not queue that, so it was not kept: {e}"
+                    )));
+                    app.set_queued(0);
+                }
+            }
+        }
+        // Every run, everywhere, and every conversation left standing. The
+        // fleet-wide form of `Interrupt` — see [`Action::StopEverything`].
+        Action::StopEverything => {
+            let running: Vec<String> = jod
+                .agents()
+                .await
+                .into_iter()
+                .filter(|a| a.status == AgentStatus::Running)
+                .map(|a| a.id)
+                .collect();
+            if running.is_empty() {
+                app.push(Entry::Notice("nothing was running".into()));
+                return;
+            }
+            let mut stopped = 0;
+            let mut refused = 0;
+            for id in &running {
+                match jod.kill_agent(id).await {
+                    Ok(()) => stopped += 1,
+                    Err(_) => refused += 1,
+                }
+            }
+            // The turn on this screen is one of the ones that just died, so the
+            // box has to come back the same way Escape gives it back.
+            if app.busy {
+                app.push(Entry::Done {
+                    text: match app.elapsed() {
+                        Some(t) => format!("interrupted after {t}"),
+                        None => "interrupted".to_string(),
+                    },
+                    failed: false,
+                });
+                app.busy = false;
+                app.turn_started_ms = None;
+            }
+            app.interrupting = None;
+            app.push(Entry::Notice(match refused {
+                0 => format!(
+                    "stopped {stopped} run(s) — every conversation is kept, so each one \
+                     carries on when you say what to do instead"
+                ),
+                _ => format!(
+                    "stopped {stopped} run(s); {refused} would not stop and may still be \
+                     writing — Ctrl-X kills one outright"
+                ),
+            }));
+        }
         Action::Interrupt(id) => {
             if let Err(e) = jod.kill_agent(&id).await {
                 // Only a stop that genuinely failed reaches here now: a group
@@ -2242,6 +2383,98 @@ fn current_conversation(store: &Store, app: &App, thread: &Thread) -> Option<Str
         .conversation_for_run(app.watching.as_deref()?)
         .ok()
         .flatten()
+}
+
+/// Start an assistant on what was just typed, if a turn is still in flight.
+///
+/// The console's copy of what `Ticker::tick_deliveries` does, and it exists for
+/// the cadence rather than for the behaviour: the daemon ticks once a minute,
+/// and a correction typed to stop a turn that is going the wrong way is worth
+/// very little sixty seconds later. Both go through `plan_injection` and both
+/// claim the rows before spawning, so whichever gets there first is the only
+/// one that starts anything.
+///
+/// Silent about everything except a failure worth acting on. A doorman that
+/// cannot be started leaves the message queued, which is what happened before
+/// any of this existed — the turn ends and the message goes in.
+async fn judge_now(jod: &Jod, app: &mut App, conversation: &str) {
+    let Some(store) = jod.store() else {
+        return;
+    };
+    let busy = store.conversation_is_busy(conversation).unwrap_or(false);
+    let Ok(queue::Plan::Judge { items, .. }) = store.plan_injection(conversation, busy) else {
+        return;
+    };
+    let ids: Vec<i64> = items.iter().map(|p| p.id).collect();
+    if !matches!(store.claim_for_review(&ids), Ok(n) if n > 0) {
+        return;
+    }
+    let Ok(Some(flight)) = store.in_flight_turn(conversation) else {
+        let _ = store.finish_review(&ids);
+        return;
+    };
+    if let Err(e) = jod_core::orchestrator::start_doorman(
+        jod,
+        conversation,
+        &items,
+        &flight,
+        PermissionPolicy::default(),
+    )
+    .await
+    {
+        let _ = store.finish_review(&ids);
+        app.push(Entry::Notice(format!(
+            "nobody could be started to read that, so it waits for this turn to end: {e}"
+        )));
+    }
+}
+
+/// Everything queued for the conversation on screen, as one prompt to send.
+///
+/// **The turn has just ended, so this is the moment the queue is allowed to
+/// speak.** `plan_injection` is the one thing that decides that, and it is
+/// asked here exactly as the daemon's tick asks it — same rows, same rule, one
+/// judgement. What is different is the cadence: the tick runs once a minute,
+/// which is right for a card answered while nobody was watching and absurd for
+/// a sentence somebody is sitting in front of.
+///
+/// Batched into one turn rather than sent one at a time, for the reason
+/// `render_injection` gives: three lines typed in quick succession are usually
+/// one thought, and answering them separately invites two answers that
+/// disagree.
+///
+/// The bodies are sent as an ordinary prompt rather than as a framed
+/// injection, because from the chair they *are* one — Reljod typed them into
+/// this box, and a transcript that announced them as `[message from Reljod]`
+/// would be Jod narrating his own words back at him.
+fn take_queued(jod: &Jod, app: &mut App, thread: &Thread) -> Option<String> {
+    let store = jod.store()?;
+    let conversation = current_conversation(store, app, thread)?;
+    let injection = store
+        .plan_injection(&conversation, false)
+        .ok()?
+        .speak()
+        .filter(|i| i.items.iter().all(|p| p.kind == queue::Kind::Human))?;
+    let ids: Vec<i64> = injection.items.iter().map(|p| p.id).collect();
+    // Marked before the send, not after: a message marked delivered by a send
+    // that then fails is one line lost, and a message left queued by a send
+    // that worked is one line said twice. The first is recoverable by typing it
+    // again and the second is not.
+    if let Err(e) = store.mark_deliveries_delivered(&ids, None) {
+        app.push(Entry::Notice(format!(
+            "could not take what was queued out of the queue, so nothing was sent: {e}"
+        )));
+        return None;
+    }
+    app.set_queued(store.pending_for(&conversation).map(|p| p.len()).unwrap_or(0));
+    Some(
+        injection
+            .items
+            .iter()
+            .map(|p| p.body.trim())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
 }
 
 /// What `/harness <to>` turns out to mean.
@@ -5991,13 +6224,17 @@ fn on_chat_key(
             // Queued rather than refused. The old behaviour left the sentence
             // sitting in the box with a scolding, so the box stayed blocked and
             // the only thing to do while an agent worked was to sit still.
+            //
+            // The notice no longer promises delivery at the end of the turn,
+            // because that is no longer the only thing that can happen: an
+            // assistant reads what was typed and may stop the turn instead.
             if app.busy {
-                app.queue(prompt);
+                app.queue();
                 app.push(Entry::Notice(format!(
-                    "queued — sends when this turn ends ({} waiting)",
-                    app.queued.len()
+                    "queued — an assistant is reading it ({} waiting)",
+                    app.queued
                 )));
-                return None;
+                return Some(Action::Enqueue(prompt));
             }
             return Some(Action::Send(prompt));
         }
@@ -6055,6 +6292,27 @@ fn on_chat_key(
         // has the service. Marking the turn over here rather than there is
         // deliberate: the reader gets the input box back on the keypress rather
         // than after a round trip through the supervisor.
+        // **Stop everything, and keep everything.** Escape applied to the whole
+        // fleet: every run dies, every conversation survives, and each one
+        // carries on the moment somebody says what to do instead.
+        //
+        // Above the single-run arm, so it wins on a screen that is busy — which
+        // is the only screen anybody presses it on.
+        //
+        // A separate key rather than a second meaning for Escape, because a key
+        // that sometimes stops one thing and sometimes stops forty is one
+        // nobody presses confidently. No confirmation, for the opposite reason:
+        // stopping is reversible here, and a stop you have to confirm is not
+        // one you can reach for in the two seconds you have.
+        //
+        // **It will not arrive on every terminal.** Reporting a modified Escape
+        // needs the keyboard-enhancement protocol, which `run` asks for and
+        // plenty of terminals decline. That is why `/stop` does exactly the
+        // same thing and is named beside this on the key bar: it is the equal
+        // path, not the lesser one.
+        KeyCode::Esc if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            return Some(Action::StopEverything);
+        }
         KeyCode::Esc if app.busy && app.watching.is_some() => {
             let id = app.watching.clone().expect("just checked");
             // Recorded as what it was. A partial turn silently dropped would
@@ -6351,6 +6609,7 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
         }
         Slash::EnterMain => return Some(Action::EnterMain),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
+        Slash::StopEverything => return Some(Action::StopEverything),
         Slash::Heartbeat { which, on } => {
             return resolve_agent(app, &which).map(|id| Action::Heartbeat { id, on })
         }
@@ -7104,7 +7363,7 @@ async fn deliver_reports(jod: &Arc<Jod>, app: &mut App, opts: &Options, thread: 
     // not mid-turn, and it is the authority on that: `conversation_is_busy`
     // reads run rows written by other processes and would not know about a turn
     // this one is streaming.
-    let injection = match store.plan_injection(&pinned, false) {
+    let injection = match store.plan_injection(&pinned, false).map(queue::Plan::speak) {
         Ok(Some(injection)) => injection,
         Ok(None) => return,
         Err(e) => {
@@ -9249,6 +9508,20 @@ mod tests {
         )
     }
 
+    /// The same, with a modifier held. Its own helper rather than a second
+    /// argument on [`press`], because 200-odd call sites want the plain form and
+    /// exactly one shortcut in this program is reached by holding Shift.
+    fn press_with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        on_key(
+            app,
+            &mut Thread::default(),
+            KeyEvent::new(code, modifiers),
+            20,
+            40,
+            ui::Preview::default(),
+        )
+    }
+
     fn type_line(app: &mut App, text: &str) {
         for c in text.chars() {
             press(app, KeyCode::Char(c));
@@ -9803,15 +10076,68 @@ mod tests {
 
     /// The old behaviour left the line sitting in a blocked box with a
     /// scolding, so the only thing to do while an agent worked was to sit still.
+    ///
+    /// It now leaves as an `Enqueue` rather than as nothing at all. The
+    /// difference is where the words go: into the store, where an assistant can
+    /// read them and decide whether they can wait, instead of into a `Vec` only
+    /// this screen could see.
     #[test]
     fn a_prompt_typed_mid_turn_is_queued_rather_than_refused() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.busy = true;
         type_line(&mut app, "and then deploy it");
 
-        assert_eq!(press(&mut app, KeyCode::Enter), None, "not sent yet");
-        assert_eq!(app.queued, vec!["and then deploy it".to_string()]);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::Enqueue("and then deploy it".into())),
+            "not sent, but written down somewhere something else can read it"
+        );
+        assert_eq!(app.queued, 1);
         assert_eq!(app.input, "", "and the box is clear for the next thought");
+    }
+
+    /// Escape stops the turn in front of you. `Shift-Esc` stops everything, and
+    /// the two must not be the same key doing different things depending on
+    /// what is running — that is a key nobody can press confidently.
+    #[test]
+    fn shift_escape_stops_the_fleet_where_plain_escape_stops_one_turn() {
+        let watching = || {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            app.busy = true;
+            app.watching = Some("run-1".into());
+            app
+        };
+
+        let mut fleet = watching();
+        assert_eq!(
+            press_with(&mut fleet, KeyCode::Esc, KeyModifiers::SHIFT),
+            Some(Action::StopEverything)
+        );
+        assert!(
+            fleet.busy,
+            "the fleet stop settles the screen in the handler, not here"
+        );
+
+        let mut one = watching();
+        assert_eq!(
+            press(&mut one, KeyCode::Esc),
+            Some(Action::Interrupt("run-1".into())),
+            "and a plain Escape still stops only what is on screen"
+        );
+        assert!(!one.busy, "which gives the box back on the keypress");
+    }
+
+    /// The key needs the terminal's permission and `/stop` does not, so they are
+    /// equals rather than a shortcut and its fallback.
+    #[test]
+    fn slash_stop_with_no_argument_stops_the_fleet() {
+        assert_eq!(command::parse("/stop"), Some(command::Slash::StopEverything));
+        assert_eq!(command::parse("/stop all"), Some(command::Slash::StopEverything));
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        assert_eq!(
+            apply_slash(&mut app, command::Slash::StopEverything),
+            Some(Action::StopEverything)
+        );
     }
 
     #[test]
@@ -9907,7 +10233,7 @@ mod tests {
             press(&mut app, KeyCode::Enter),
             Some(Action::Send("go".into()))
         );
-        assert!(app.queued.is_empty());
+        assert_eq!(app.queued, 0);
     }
 
     /// The key that makes several jobs at once possible without leaving the UI
@@ -12618,10 +12944,10 @@ mod tests {
                 app.row_ids(Workspace::Roles),
                 [
                     "main",
-                    "assistant",
                     "scratch",
                     "manager",
                     "engineer",
+                    "assistant",
                     "housekeeping"
                 ]
             );

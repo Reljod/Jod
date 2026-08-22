@@ -3542,7 +3542,7 @@ mod tests {
 
         let injection = s
             .plan_injection(&main, false)
-            .unwrap()
+            .unwrap().speak()
             .expect("the chat must have a turn waiting");
         assert!(
             injection.prompt.contains("it is 30C and cloudy"),
@@ -3672,7 +3672,7 @@ mod tests {
 
         let injection = s
             .plan_injection(&main, false)
-            .unwrap()
+            .unwrap().speak()
             .expect("the main chat must have a turn waiting");
         assert!(injection.prompt.contains("the answer is 42"), "{}", injection.prompt);
         assert!(

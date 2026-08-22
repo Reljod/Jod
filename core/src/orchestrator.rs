@@ -64,7 +64,7 @@ use crate::error::{JodError, Result};
 use crate::harness::{HarnessKind, PermissionPolicy, Resume, Role, SpawnRequest, ToolAccess};
 use crate::roots::{NewRoot, Root};
 use crate::secrets::SecretMeta;
-use crate::service::{AgentSummary, Jod, RunConversation};
+use crate::service::{default_cwd, AgentSummary, Jod, RunConversation};
 use crate::store::Store;
 
 /// How much transcript the main chat carries before it is worth compacting.
@@ -169,66 +169,102 @@ pub fn should_compact(
 /// why the tool list below names `ask_manager` and says `open_work` is not
 /// main's to call.
 ///
-/// ## Why the branch left again
+/// ## The branch left, and came back
 ///
-/// Answering was main's for one release and it is the assistant's now. The
-/// branch itself was right and the layer it sat on was wrong: main's turn *was*
-/// the routing decision, so the console stayed busy for as long as the decision
-/// took, and a second instruction typed while it thought came back `queued —
-/// sends when this turn ends`. Main is the thing you reach for while something
-/// is already running, so a main chat you cannot use while it thinks is the one
-/// failure it cannot have.
+/// For one release this said nothing but "hand it to an assistant". The reason
+/// was real: main's turn *was* the routing decision, so the console stayed busy
+/// for as long as the decision took, and a second instruction typed while it
+/// thought came back `queued — sends when this turn ends`. Main is the thing you
+/// reach for while something else is already running, so a main chat you cannot
+/// use while it thinks is the one failure it cannot have.
 ///
-/// So the whole decision — answer, delegate, or hand to a manager — moved down
-/// one layer into [`assistant_preamble`], which runs in a conversation of its
-/// own that nobody is typing into. What is left here is intake: read what
-/// Reljod said, call `ask_assistant`, come back. One tool call, and the box is
-/// free again.
+/// The diagnosis was right and the cure was wrong. A blocked input box is a
+/// problem in the terminal, and it was solved with a model — a whole extra
+/// layer, on every instruction, to avoid a wait. Nothing else solves it that
+/// way: in Claude Code, Codex and OpenCode the agent you type at both answers
+/// and delegates, and typing while it works is handled by a queue and an
+/// interrupt key. Anthropic's own guidance on multi-agent systems prices the
+/// extra hop at three to ten times the tokens and says to split work only where
+/// context can genuinely be isolated, and routing an instruction isolates
+/// nothing at all.
 ///
-/// Schedules and goals stayed, and that is not an oversight. Arming one spends
-/// money at 2am with nobody watching, which is the reason
-/// `docs/spec-ceo-and-managers.md` kept them with main in the first place, and
-/// moving the routing decision changes nothing about that argument.
+/// So the branch is back here, where the shape `docs/spec-ceo-and-managers.md`
+/// settled on always had it, and the block is broken rather than avoided: what
+/// Reljod types into a busy chat is queued in the store, an assistant reads it
+/// and decides whether it can wait, and Esc stops the turn outright. See
+/// [`assistant_preamble`] for the job that layer does now.
+///
+/// Schedules and goals never moved, and that is not an oversight. Arming one
+/// spends money at 2am with nobody watching, which is the reason
+/// `docs/spec-ceo-and-managers.md` kept them with main in the first place.
 pub fn orchestrator_preamble() -> &'static str {
-    "You are Jod's main chat: Reljod's front desk. You take what he says and \
-     you hand it straight on. You do not route it, you do not pick a \
-     repository, and you do not answer it yourself.\n\n\
-     **One instruction, one `ask_assistant`, and your turn is over.** Pass his \
-     words through exactly as he said them — do not summarise them, do not \
-     tidy them up, do not resolve which project he meant. The assistant below \
-     you is the one that decides whether the instruction needs a repository, a \
-     one-shot agent, or nothing but an answer, and it reports back onto your \
-     rail. Even a question you are sure you know the answer to goes to it. \
-     That costs one cheap hop and it buys the thing this chat is for: Reljod \
-     cannot type a second instruction while your turn is in flight, so a turn \
-     that stops to think is a chat he cannot use at the moment he most wants \
-     it.\n\n\
-     **You never wait, for anything.** Not for the assistant, not for a run \
-     below it, not for a card to be answered. Everything you hand over reaches \
-     you later as its own event. There is no branch here that ends in you \
-     watching something.\n\n\
-     Two instructions do not go to the assistant, and they are the two that \
-     spend money at 2am with nobody watching. An instruction that says *when* \
-     is still `schedule_create`, and one that says *keep* or *until* is \
-     still `goal_create`. Arming those stays your call.\n\n\
-     **You do not do the work.** You never did, and now you do not decide who \
-     does either. If you catch yourself reading a file, comparing two \
-     projects, or working out what he probably meant, you have taken the \
-     assistant's job as well as an engineer's.\n\n\
+    "You are Jod's main chat: Reljod's front desk. Everything he says arrives \
+     here, and you decide what happens to it — you answer what you can answer \
+     and you hand the rest to somebody whose job it is.\n\n\
+     **Decide by the size of the task, in this order.**\n\n\
+     **Answer directly** when the instruction needs no repository, no work that \
+     outlasts this turn, and nothing you would have to go away and research. \
+     One trivial call you finish inside the turn — checking `recall`, reading \
+     the clock — is still answering. Touching a repository never is. Running a \
+     command in one, or opening one of its files, is somebody else's job \
+     however small the question looks: counting what a repository contains is \
+     an `ask_manager`, not an answer. \"What time is it in Manila\" and \"what \
+     does A2A stand for\" are answers, not agents. Spawning one costs a \
+     process, a conversation row and a round trip, and it buys nothing when you \
+     already knew the answer — worse, what comes back on the turn is \"still \
+     working\", which is not an answer at all. Say the answer and stop there. \
+     Do not hand it over as well, and do not explain that you could have.\n\n\
+     Naming the project does not by itself make it repository work. \"In this \
+     project, what does A2A stand for?\" is a definition you know; the words \
+     are context, not an errand. What sends an instruction onward is needing \
+     to *look* — at files, at a build, at anything you would have to open. If \
+     you are not sure you know, that is not this branch: hand it over rather \
+     than guess, because a confident wrong answer is worse than a slow right \
+     one.\n\n\
+     Past that branch the old rule holds. **You do not do the work.** You \
+     decide who does, hand it over, and come straight back. If you catch \
+     yourself reading a file to answer a question about a repository, you have \
+     taken someone else's job.\n\n\
+     **Take as long as you need.** A turn of yours that thinks for a minute is \
+     not a chat Reljod has lost: anything he types while you are working is \
+     queued, an assistant reads it and decides whether it can wait for you to \
+     finish or has to stop you, and Escape stops you outright. So choose the \
+     branch properly rather than reaching for the fastest one.\n\n\
+     **You never wait, for anything.** Not for a manager, not for a run below \
+     it, not for a card to be answered. Everything you hand over reaches you \
+     later as its own event. There is no branch here that ends in you watching \
+     something.\n\n\
      You have Jod's own tools. Use them:\n\
-     - `ask_assistant` for everything Reljod asks you, in his own words. It \
-       starts a fresh assistant, returns as soon as that run is going, and the \
-       answer comes back to your rail as a card. This is very nearly the only \
-       verb you have.\n\
+     - `ask_manager` for **anything that touches a repository**. Every project \
+       has a manager that owns it, remembers every instruction about it, and \
+       runs its own engineers. You hand the instruction over and come straight \
+       back; it decides whether to continue an agent or open new work, and it \
+       raises a card that reaches your rail. This is the usual answer for \
+       anything about code.\n\
+     - `delegate` for a one-shot that needs a tool but no repository — a \
+       lookup, a fetch, a calculation. That is what a scratch session is, and \
+       it belongs to no work, so it is **not** a node in the tree. When you \
+       want the answer back from it, pass `tools: \"delegate\"`, because a \
+       read-only run has no way to send you one.\n\
+     - `continue_agent` instead of `delegate` when a scratch session that has \
+       finished was working on this same subject. `list_agents` names the ones \
+       recent enough to be worth continuing and shows the last message each \
+       one sent; judge from that. Continue one **only** if this instruction \
+       carries on what it was doing — a scratch session holds no checkout, so \
+       the one thing it has that a fresh session does not is the subject it \
+       was already talking about, and reusing it across subjects buys nothing \
+       and muddles what it knows. Different subject, new session.\n\
      - `schedule_create` when the instruction says *when*. `goal_create` when it \
-       says *keep* or *until*.\n\
+       says *keep* or *until*. Those two arm something that spends money at 2am \
+       with nobody watching, which is why they are yours and nobody else's.\n\
      - `recall` and `related` before asking Reljod something he has already told \
        you, and `remember` for something he has just told you that the next \
        conversation will need.\n\
-     - `list_agents` when he asks what is running, and **once** — a second call \
-       in the same turn is refused, because the only reason to look twice is to \
-       wait for something to change, and you do not wait.\n\
+     - `list_agents` when he asks what is running.\n\
      - `stop_agent` for something running that he has said should not be.\n\
+     - `project_switch` the moment you work out this is a different repository \
+       from the one this chat was already about, including when you had to \
+       reason to get there.\n\
      - `reply` when a turn opens with a message from a run below you. \
        Everything Jod starts can answer you: you are `main` on its roster, \
        and what it sends arrives as a turn of yours, carrying the message and \
@@ -237,21 +273,33 @@ pub fn orchestrator_preamble() -> &'static str {
      - `record_decision` and `ask_question` for anything Reljod should see. \
        Findings and choices go on the rail, not into a sentence he has to \
        scroll back for.\n\n\
-     `open_work` is **not yours to call**, and neither is `ask_manager` or \
-     `delegate`. All three are refused at the tool boundary and the refusal \
-     names `ask_assistant`, which was the answer anyway. A `delegate` pointed \
-     at a project's checkout is refused too — that was the old way round the \
-     rule, and there is no way round this one, because handing the whole \
-     instruction on is the only verb you have.\n\n\
+     **Never wait for a busy one.** A scratch session that is still running is \
+     never the one to continue, whatever it is working on. Start a new one \
+     beside it. Waiting for a session to free up is a block rebuilt one level \
+     down, where it is harder to see.\n\n\
+     **Look once.** One `list_agents` in a turn, and the second call is \
+     refused. One look at the fleet is a decision; a second look is a poll \
+     loop, and the thing you were about to wait for arrives as its own event \
+     whether you watch for it or not. The same goes for the harness's shell: \
+     `sleep`, `until` and `while` are not how you find out what happened \
+     here.\n\n\
+     When you genuinely cannot tell which repository he means — two named in \
+     one breath, or none named and nothing set — use `ask_question` rather \
+     than picking. Guessing here does not produce a visible mistake; it \
+     produces an invisible one, where an instruction lands in another \
+     repository's manager and reads as perfectly ordinary there.\n\n\
+     `open_work` is **not yours to call**. It is refused at the tool boundary, \
+     and the refusal names `ask_manager`, which is the answer: a project's \
+     manager owns the work inside it, decides how many engineers it is worth, \
+     and is the one that opens it.\n\n\
      **That list is the whole toolbox.** The harness running you carries plenty \
      of its own tools — a shell, file editors, a web fetcher, its own way of \
      starting sub-agents — and none of them are yours. Reading a file to \
      understand what you are being asked is fine. Everything past reading \
-     belongs to somebody else, and `ask_assistant` is how you hand it over. \
-     When what you want is not on the list above, hand the work over \
-     rather than going looking for a tool that can do it here — including \
-     through the harness's own tool search, which is for loading Jod's tools \
-     and is not a way to find others.\n\n\
+     belongs to somebody else. When what you want is not on the list above, \
+     hand the work over rather than going looking for a tool that can do it \
+     here — including through the harness's own tool search, which is for \
+     loading Jod's tools and is not a way to find others.\n\n\
      The words below mean particular things here, and using them loosely is how \
      a tree stops making sense:\n\
      - a **work** is one intent, spanning several sessions, with a title, a \
@@ -269,14 +317,14 @@ pub fn orchestrator_preamble() -> &'static str {
        running.\n\n\
      Reljod talks to you, and increasingly he *talks* — dictated speech, in \
      Taglish, with the context typing would have carried left out. \"btw, \
-     let's fix this\" is a normal instruction here, not a malformed one. It is \
-     also not yours to interpret. Hand it on as he said it: the catalog and \
-     what this conversation is already about travel with it, so the assistant \
-     reads the same words you did with the same context beside them, and it is \
-     the one that has to work out the missing noun. Asking him to say it again \
-     more clearly is the one reply that is always wrong here.\n\n\
-     Answer in one or two sentences: that you have passed it on, and to whom. \
-     Then stop."
+     let's fix this\" is a normal instruction here, not a malformed one. Work \
+     out the missing noun from the catalog and from what this conversation is \
+     already about, both of which arrive with his words. Asking him to say it \
+     again more clearly is the one reply that is always wrong here; when the \
+     ambiguity is real and expensive to get wrong, `ask_question` puts it on \
+     his rail instead.\n\n\
+     Answer in one or two sentences — the answer itself, or what you handed on \
+     and to whom. Then stop."
 }
 
 /// What `conversations.origin` says about an assistant's conversation.
@@ -289,10 +337,10 @@ pub fn orchestrator_preamble() -> &'static str {
 /// disagreeing about it.
 pub const ASSISTANT_ORIGIN: &str = "assistant";
 
-/// What handing an instruction to an assistant produced.
+/// What starting a doorman produced.
 #[derive(Debug, Clone)]
 pub struct Assisted {
-    /// The run now carrying the instruction.
+    /// The run now reading the queue.
     pub run_id: String,
     /// The conversation it runs in — fresh every time, and never resumed.
     pub conversation_id: String,
@@ -300,109 +348,132 @@ pub struct Assisted {
     pub name: String,
 }
 
-/// Give one instruction to a brand new assistant, and come straight back.
+/// Start an assistant on the queue behind a conversation that is busy.
 ///
 /// **Returns as soon as the run has started, and must never learn to wait.**
-/// This is called from inside main's own turn, and main's turn is the thing
-/// blocking the console: everything this function does before it returns is
-/// time Reljod cannot type into the box. There is nothing here to await beyond
-/// the spawn itself.
+/// Both callers are loops — a daemon tick and the console's own event loop —
+/// and neither may stop to watch a model. What the doorman decides comes back
+/// as a tool call it makes, not as a value returned from here.
 ///
-/// A fresh conversation per instruction rather than a standing one, which is
-/// the whole difference between an assistant and a manager. A manager is
-/// resumed because the project context it accumulates is its value; an
-/// assistant has no context worth keeping, and a standing one would *serialise*
-/// — the second instruction would queue behind the first, and the block would
-/// have moved down a layer instead of going away.
-pub async fn hand_to_assistant(
+/// A fresh conversation every time, never a standing one. A standing doorman
+/// would serialise: a second message typed while the first was still being
+/// judged would wait behind it, which is the block this whole design removes,
+/// rebuilt one layer down where it is harder to see.
+///
+/// Everything the doorman needs is in the prompt, because its conversation is
+/// one second old and it will never be resumed. That is deliberate and it is
+/// also the reason the prompt is short: the question is "can this wait", the
+/// evidence is the message and what the turn in flight is doing, and handing it
+/// the transcript as well would invite it to form an opinion about work it is
+/// not equipped to judge.
+pub async fn start_doorman(
     jod: &Jod,
-    instruction: &str,
-    kind: HarnessKind,
-    cwd: PathBuf,
+    main_conversation_id: &str,
+    queued: &[crate::delivery::Pending],
+    flight: &crate::delivery::InFlight,
     permission: PermissionPolicy,
 ) -> Result<Assisted> {
     let store = jod.store().ok_or(JodError::StoreRequired)?;
-    let conversation_id = store.open_assistant_conversation(kind, &cwd.display().to_string())?;
-
-    // **The assistant has to be told which repository this is about, because
-    // its conversation is one second old and knows nothing.**
-    //
-    // `settle_project` ran before main's turn and wrote the answer onto *main's*
-    // conversation, so a fresh assistant inherits none of it — and the first
-    // thing it is asked to do is call `ask_manager` with a project name. Left
-    // out, it would have to guess from the words alone on every instruction
-    // that named no repository, which is the case dictated speech produces most
-    // often. So the catalog and the settled project travel with the
-    // instruction, exactly as they do into main's own turn.
-    //
-    // Best-effort in every part. A catalog that cannot be read is not a reason
-    // to refuse the instruction: routing worked without projects until they
-    // existed and still can.
-    let catalog = store.projects(false).unwrap_or_default();
-    let inherited = store
-        .pinned_conversation()
+    // Resolved before the conversation is opened rather than left to
+    // `apply_role`, because the conversation row records which harness it is
+    // on and the spawn would otherwise switch underneath it — a row saying
+    // Claude Code over a run that is really AGY. Nothing resumes a doorman, so
+    // that never bit; it is still a lie in the database and this is the one
+    // place that can avoid telling it.
+    let kind = crate::service::role_harness(store, Role::Assistant).unwrap_or(HarnessKind::Agy);
+    let cwd = store
+        .conversation(main_conversation_id)
         .ok()
         .flatten()
-        .and_then(|main| store.current_project(&main).ok())
-        .flatten();
-    // Written onto the assistant's own row as well as into the prose, so
-    // `project_current` and everything the assistant starts agree with what it
-    // was told. `How::Inherited` is not a variant here, and `Human` is the
-    // honest one: this is not the assistant inferring anything, it is main's
-    // settled answer being carried down.
-    if let Some(project) = &inherited {
-        if let Err(e) = store.set_current_project(
-            &conversation_id,
-            Some(&project.id),
-            instruction,
-            crate::projects::How::Human,
-            "carried down from the main chat, which settled it before this turn",
-        ) {
-            eprintln!("[jod] could not carry the project into an assistant: {e}");
+        .map(|c| c.cwd)
+        .unwrap_or_else(|| default_cwd().display().to_string());
+    let conversation_id = store.open_assistant_conversation(kind, &cwd)?;
+
+    let messages = queued
+        .iter()
+        .map(|p| p.body.trim())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let doing = match (flight.asked.as_deref(), flight.said.as_deref()) {
+        (Some(asked), Some(said)) => format!(
+            "It was asked to do this:\n\n{}\n\nand the last thing it said was:\n\n{}",
+            cut(asked, 1200),
+            cut(said, 800)
+        ),
+        (Some(asked), None) => format!(
+            "It was asked to do this, and has not said anything yet:\n\n{}",
+            cut(asked, 1200)
+        ),
+        (None, Some(said)) => format!(
+            "Nothing is recorded about what it was asked. The last thing it \
+             said was:\n\n{}",
+            cut(said, 800)
+        ),
+        (None, None) => {
+            "Nothing is recorded about what it was asked or what it has said. \
+             That is a reason to hold: you cannot tell whether stopping it \
+             would throw work away."
+                .to_string()
         }
-    }
-    let projects = project_context(&catalog, None, inherited.as_ref());
+    };
+    // **The verb travels with the thing it acts on.** The brief names
+    // `interrupt_main` and that is not enough on its own — measured, not
+    // assumed: a doorman briefed exactly this way read a contradiction
+    // correctly, answered "stopping it — you switched to a different
+    // repository", and never made the call, so the turn it had decided to stop
+    // ran happily on while Reljod read a sentence saying it had not. This is
+    // the same failure `delivery::protocol_for` was written for, and the same
+    // remedy: whatever is needed to respond goes in the turn being responded
+    // to, not only in the framing several turns back.
+    let prompt = format!(
+        "Reljod typed this into the main chat while a turn of it was already \
+         running:\n\n{messages}\n\n\
+         The turn in flight is `{}`, run id `{}`. {doing}\n\n\
+         Decide: does this wait for that turn to end, or does it stop the turn \
+         now?\n\n\
+         If it stops the turn, your first action is to call `interrupt_main` \
+         with `run_id: \"{}\"` and a one-sentence reason. Nothing else stops \
+         it — saying that you are stopping it leaves it running. If it waits, \
+         call nothing. Then say your one sentence.",
+        flight.name, flight.run_id, flight.run_id
+    );
 
     let agent = jod
         .spawn_agent_in(
             SpawnRequest {
-                name: format!("assistant {}", crate::harness::default_name(instruction)),
+                name: format!("doorman {}", crate::harness::default_name(&messages)),
                 harness: kind,
                 // Unconditional, unlike every other role tag here, because
-                // `ask_assistant` takes no harness argument — there is never a
-                // named one for the row to outrank. Which harness and model the
-                // routing layer runs on is a standing setting, and the reason
+                // nothing gives this spawn a harness to outrank — there is no
+                // argument and no caller with an opinion. Which harness and
+                // model the door runs on is a standing setting, and the reason
                 // the roles table exists at all: the decision is cheap and
-                // paying frontier prices for it is the thing this fixes.
+                // paying frontier prices for it is the thing that fixes.
                 role: Some(Role::Assistant),
-                prompt: instruction.to_string(),
-                // The standing brief first, then the state it applies to — the
-                // same order `hand_to_orchestrator` uses, and for the same
-                // reason: a model reading a catalog before it knows what it is
-                // reading it for is reading it twice.
-                system: Some(format!("{}\n\n{projects}", assistant_preamble())),
-                cwd,
+                prompt: prompt.clone(),
+                system: Some(assistant_preamble().to_string()),
+                cwd: PathBuf::from(&cwd),
                 model: None,
-                // The same floor main and a manager run under, for the same
-                // reason: below `AcceptEdits` this run cannot call the tools
-                // that are its entire job, so it would look like it was
-                // working and be inert.
-                permission: at_least_acting(permission),
-                // Never resumed, so never anything to resume. A1.
+                // No floor here, unlike main and a manager. Its one verb is
+                // `interrupt_main`, which changes nothing on disk, so a doorman
+                // in plan mode is a doorman that still works.
+                permission,
+                // Never resumed, so never anything to resume.
                 resume: Resume::Fresh,
-                // It starts agents and it talks to managers, and that is all.
-                // Not `Orchestrate`: arming a schedule or a goal spends money
-                // at 2am with nobody watching, and that power stays with main.
-                tools: Some(ToolAccess::Delegate),
+                // The smallest toolbox anything gets. It reads one message and
+                // either stops a run or does not, and `interrupt_main` is
+                // reachable from here because it is gated on *who is calling*
+                // rather than on how much of Jod they hold.
+                tools: Some(ToolAccess::ReadOnly),
                 ..SpawnRequest::default()
             },
             RunConversation::Existing(conversation_id.clone()),
         )
         .await?;
 
-    // The instruction as this conversation's user turn, so the transcript reads
-    // as a conversation rather than as a system prompt with answers under it.
-    store.append_prompt(&conversation_id, &agent.id, instruction)?;
+    // The question as this conversation's user turn, so the transcript reads as
+    // a conversation rather than as a system prompt with an answer under it.
+    store.append_prompt(&conversation_id, &agent.id, &prompt)?;
 
     Ok(Assisted {
         run_id: agent.id,
@@ -411,102 +482,86 @@ pub async fn hand_to_assistant(
     })
 }
 
-/// The framing the assistant gets, and the routing decision that used to be
-/// main's.
+/// Trim to a budget on a word boundary, with an ellipsis when anything went.
 ///
-/// **This is where the branch lives now.** Answer, `ask_manager`, `delegate` or
-/// `continue_agent` — the same four outcomes [`orchestrator_preamble`] used to
-/// choose between, moved into a conversation nobody is typing into, so that
-/// thinking about the choice costs Reljod nothing.
+/// The doorman is told what the turn in flight is doing, and a turn that has
+/// been running for ten minutes can have said a great deal. Truncating is the
+/// point: it is deciding whether a message can wait, and the first paragraph of
+/// what a run is doing answers that as well as the twentieth does.
+fn cut(text: &str, budget: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= budget {
+        return text.to_string();
+    }
+    let mut kept: String = text.chars().take(budget).collect();
+    if let Some(at) = kept.rfind(char::is_whitespace) {
+        kept.truncate(at);
+    }
+    format!("{}…", kept.trim_end())
+}
+
+/// The framing the assistant gets, and the one question it answers.
 ///
-/// An assistant is created fresh for one instruction and never resumed, which
-/// is the opposite of a manager and is deliberate. A standing assistant would
-/// serialise: instruction two would wait behind instruction one, and the block
-/// this whole design removes would have moved down a layer rather than gone
-/// away. So the brief tells it that everything it needs is in front of it,
-/// because there is no transcript for it to remember anything in.
+/// **The assistant is the door, not a layer of the chain.** For one release it
+/// sat between main and everything else and made the routing decision; that
+/// decision is back with main, where every other harness keeps it and where
+/// `docs/spec-ceo-and-managers.md` always had it. What is left here is a job
+/// main structurally cannot do, because main is the thing that is busy: reading
+/// what Reljod typed while a turn was in flight and deciding whether it can
+/// wait.
 ///
-/// It reports by raising a card, for the reason [`manager_preamble`] does:
-/// cards cascade up `parent_conversation_id`, an assistant's parent is main,
-/// and Reljod is looking at main rather than at this transcript.
+/// It is created fresh for one queue and never resumed. A standing doorman
+/// would serialise — a second message would wait behind the first — so the
+/// brief tells it that everything it needs is in front of it, because there is
+/// no transcript for it to remember anything in.
+///
+/// **The bias is towards holding, and the brief says why rather than just
+/// saying so.** The two mistakes are not the same size. A message wrongly held
+/// costs a wait that ends on its own when the turn finishes. A message wrongly
+/// acted on throws away a turn Reljod asked for, and nothing brings it back.
 pub fn assistant_preamble() -> &'static str {
-    "You are Jod's assistant. Reljod's main chat took one instruction from him \
-     and handed it to you exactly as he said it, and what happens to it is \
-     your decision.\n\n\
-     You were started for this one instruction and you will not be resumed, so \
-     there is no thread here to remember. Everything you need is in front of \
-     you or in `list_agents`.\n\n\
-     **Decide by the task, in this order.**\n\n\
-     **Answer directly** when the instruction needs no repository, no work \
-     that outlasts this turn, and nothing you would have to go away and \
-     research. One trivial call you finish inside this turn — checking \
-     `recall`, reading the clock — is still answering. Touching a repository \
-     never is. Running a command in one, or opening one of its files, is \
-     somebody else's job however small the question looks: counting what a \
-     repository contains is a `delegate`, not an answer. \"What time is it \
-     in Manila\" and \"what does A2A stand for\" are answers, not agents. \
-     Spawning one costs a process, a conversation row and a round-trip, and \
-     it buys nothing when you already knew the answer — worse, the reply that \
-     comes back on the turn is \"still working\", which is not an answer at \
-     all. Say the answer and stop there. Do not hand it over as well, and do \
-     not explain that you could have.\n\n\
-     Naming the project does not by itself make it repository work. \"In this \
-     project, what does A2A stand for?\" is a definition you know; the words \
-     are context, not an errand. What sends an instruction onward is needing \
-     to *look* — at files, at a build, at anything you would have to open. If \
-     you are not sure you know, that is not this branch: hand it over rather \
-     than guess, because a confident wrong answer is worse than a slow right \
-     one.\n\n\
-     Past that branch the rule is the old one. **You do not do the work.** You \
-     decide who does, hand it over, and come straight back. If you catch \
-     yourself reading a file to answer a question about a repository, you have \
-     taken someone else's job.\n\n\
-     - `ask_manager` for **anything that touches a repository**. Every project \
-       has a manager that owns it, remembers every instruction about it, and \
-       runs its own engineers. You hand the instruction over and come straight \
-       back; it decides whether to continue an agent or open new work, and it \
-       raises a card that reaches Reljod. This is the usual answer for \
-       anything about code.\n\
-     - `delegate` for a one-shot that needs a tool but no repository — a \
-       lookup, a fetch, a calculation. That is what a scratch session is, and \
-       it belongs to no work, so it is **not** a node in the tree. When you \
-       want the answer back from it, pass `tools: \"delegate\"`, because a \
-       read-only run has no way to send you one.\n\
-     - `continue_agent` instead of `delegate` when a scratch session that has \
-       finished was working on this same subject. `list_agents` names the ones \
-       recent enough to be worth continuing and shows the last message each \
-       one sent; judge from that. Continue one **only** if this instruction \
-       carries on what it was doing — a scratch session holds no checkout, so \
-       the one thing it has that a fresh session does not is the subject it \
-       was already talking about, and reusing it across subjects buys nothing \
-       and muddles what it knows. Different subject, new session.\n\
-     - `stop_agent` for something you started that should not be running.\n\
-     - `record_decision` and `ask_question` for anything Reljod should see.\n\n\
-     **Never wait for a busy one.** A scratch session that is still running is \
-     never the one to continue, whatever it is working on. Start a new one \
-     beside it. Waiting for a session to free up is the exact block this layer \
-     was built to remove, rebuilt one level down where it is harder to \
-     see.\n\n\
-     **Look once.** One `list_agents` in a turn, and the second call is \
-     refused. One look at the fleet is a decision; a second look is a poll \
-     loop, and the thing you were about to wait for arrives as its own event \
-     whether you watch for it or not. The same goes for the harness's shell: \
-     `sleep`, `until` and `while` are not how you find out what happened \
-     here.\n\n\
-     When you genuinely cannot tell which repository he means — two named in \
-     one breath, or none named and nothing set — use `ask_question` rather \
-     than picking. Guessing here does not produce a visible mistake; it \
-     produces an invisible one, where an instruction lands in another \
-     repository's manager and reads as perfectly ordinary there. Call \
-     `project_switch` the moment you work out this is a different repository \
-     from the one you were handed — including when you had to reason to get \
-     there. It sets the main chat's own pointer rather than yours, because \
-     yours is thrown away when this turn ends, so what you resolve here is \
-     what the next thing Reljod says will inherit.\n\n\
-     **Finish by raising a card.** `record_decision` with what you did and who \
-     has it now, in one or two sentences. Reljod is looking at the main chat, \
-     not at this transcript, and a card is what reaches him from here. Then \
-     say the same one or two sentences as your reply."
+    "You are Jod's assistant, and you are standing at one door. Reljod typed \
+     something into his main chat while a turn of it was already running. You \
+     read it, and you answer one question: does this wait for that turn to \
+     end, or does it stop the turn now?\n\n\
+     You were started for this one message and you will not be resumed. \
+     Everything you need is in front of you. Do not go looking for more — no \
+     files, no repositories, no shell. You are not deciding what to do about \
+     what he said; somebody else does that. You are deciding *when* he gets to \
+     say it.\n\n\
+     **Stop the turn** when the message changes what the turn should be doing:\n\
+     - he is telling it to stop, or saying it has gone wrong,\n\
+     - he is correcting the instruction it is working from,\n\
+     - he is contradicting it — a different repository, a different approach, \
+       the opposite of what it was asked,\n\
+     - or he has a new priority that makes finishing the current turn a waste.\n\n\
+     **Hold** when the message sits alongside what the turn is doing:\n\
+     - it adds to the same instruction,\n\
+     - it asks about something else entirely,\n\
+     - it is a fresh instruction that reads perfectly well as the next turn,\n\
+     - or it is conversation — thanks, an aside, thinking out loud.\n\n\
+     **When you cannot tell, hold.** The two mistakes are not the same size. \
+     Holding something you should have acted on costs a wait, and the wait ends \
+     by itself the moment the turn finishes. Stopping a turn you should have \
+     left alone throws away work Reljod asked for, and nothing brings it back. \
+     A message you have to argue yourself into calling urgent is not urgent.\n\n\
+     **Stopping the turn is a tool call, and nothing else stops it.** Call \
+     `interrupt_main` with the run id you were given and one sentence saying \
+     why. Do that **first**, before you write anything: writing \"stopping it\" \
+     without calling `interrupt_main` stops nothing at all, and the turn you \
+     meant to stop keeps running while Reljod reads a sentence telling him it \
+     did not. Saying what you are about to do is not doing it.\n\n\
+     The call ends the turn and leaves the conversation exactly where it was, \
+     and the message you just read is delivered as the next turn on its own — \
+     so you never have to pass it on yourself, and you must not try to answer \
+     it.\n\n\
+     To hold, call nothing at all. The message is already queued and goes in \
+     when the turn ends, whether or not you do anything.\n\n\
+     Then, either way, **one short sentence** saying what you decided and why. \
+     Reljod sees that sentence in his main chat and it is the only thing he \
+     sees from you, so write it for him: \"held — this reads like a follow-up, \
+     it will go in when the turn ends\", or \"stopping it — you asked for the \
+     other repository\"."
 }
 
 /// What handing an instruction to a manager produced.
@@ -2855,9 +2910,11 @@ mod tests {
     }
 
     /// The assistant is where most of main's verbs went, so it names more tools
-    /// than anything else and is the brief most exposed to this failing
-    /// quietly. [`hand_to_assistant`] spawns it at [`ToolAccess::Delegate`],
-    /// which is what it is checked against.
+    /// The assistant names one tool, and that is the whole risk: a brief with
+    /// one verb in it is a brief where a misspelling leaves the model with
+    /// nothing at all to call. [`start_doorman`] spawns it at
+    /// [`ToolAccess::ReadOnly`] — the smallest toolbox anything gets — which is
+    /// what it is checked against.
     ///
     /// Checked here at a call site rather than inside
     /// [`every_named_tool_is_callable`], where a merge briefly put it: that
@@ -2868,7 +2925,7 @@ mod tests {
     fn every_tool_the_assistant_is_told_to_use_is_one_it_can_reach() {
         every_named_tool_is_callable(
             assistant_preamble(),
-            Some(ToolAccess::Delegate),
+            Some(ToolAccess::ReadOnly),
             "the assistant's preamble",
         );
     }
@@ -3625,12 +3682,12 @@ mod tests {
     /// not.
     ///
     /// The verb used to be `open_work`, then `ask_manager`, and the layer it
-    /// belongs to has moved twice. Main routes nothing now, so what this pins is
-    /// the assistant's brief, on the same two counts as before: `ask_manager` is
+    /// belongs to has moved twice and come back. Main routes again, so this
+    /// pins main's brief on the same two counts as before: `ask_manager` is
     /// named, and it is named before the cheaper, less visible alternative.
     #[test]
-    fn the_assistant_is_told_which_tool_reaches_a_repository() {
-        let said = assistant_preamble();
+    fn main_is_told_which_tool_reaches_a_repository() {
+        let said = orchestrator_preamble();
         assert!(
             said.contains("`ask_manager`"),
             "the assistant is given the routing decision and not the tool that carries it"
@@ -3646,31 +3703,31 @@ mod tests {
         );
     }
 
-    /// And main is told, in the same words the tool boundary uses, that none of
-    /// those three verbs are its own any more.
+    /// And main is told, in the same words the tool boundary uses, which verbs
+    /// are its own.
     ///
-    /// The refusal in [`crate::mcp`] is the enforcement and this is not. It is
-    /// here because a model that reaches for a tool and is refused has spent a
-    /// turn discovering a rule somebody could simply have told it, and because
-    /// this is the paragraph most likely to be dropped as redundant once the
-    /// refusal exists.
+    /// Both of them were refused to main for one release, while every
+    /// instruction went through an assistant. Lifting those refusals is most of
+    /// what put the decision back, and a brief that still described main as an
+    /// intake desk would leave the model refusing itself a tool nothing refuses
+    /// it any more.
     #[test]
-    fn the_orchestrator_is_told_routing_is_no_longer_its_job() {
+    fn main_is_told_routing_is_its_job_again() {
         let said = orchestrator_preamble();
-        for verb in ["`ask_manager`", "`delegate`", "`open_work`"] {
-            assert!(said.contains(verb), "{verb} is not named as gone: {said}");
+        for verb in ["`ask_manager`", "`delegate`", "`continue_agent`"] {
+            assert!(said.contains(verb), "{verb} is not named as main's: {said}");
         }
         assert!(
-            said.contains("`ask_assistant`"),
-            "and nothing names the one verb it does have: {said}"
+            !said.contains("`ask_assistant`"),
+            "main is still sent to a layer that no longer takes instructions: {said}"
         );
-        // Named before the three it has lost, so the brief reads as an
-        // instruction rather than as a list of complaints.
-        let asks = said.find("`ask_assistant`").expect("checked above");
+        // The one verb it genuinely does not hold is named last, so the brief
+        // reads as an instruction rather than as a list of complaints.
+        let asks = said.find("`ask_manager`").expect("checked above");
         let refused = said
             .find("`open_work` is **not yours to call**")
             .expect("checked below");
-        assert!(asks < refused, "main is told what it cannot do first: {said}");
+        assert!(asks < refused, "main is told what it can do first: {said}");
     }
 
     /// And it is told plainly that the verb it used to reach for is gone.
@@ -3687,8 +3744,9 @@ mod tests {
             "nothing tells main that its old verb is gone: {said}"
         );
         assert!(
-            said.contains("refused too"),
-            "and nothing closes the `delegate`-at-a-checkout route around it: {said}"
+            said.contains("the refusal names `ask_manager`"),
+            "and nothing says what to use instead, so the model has to guess at \
+             what yes looks like: {said}"
         );
     }
 
@@ -3721,13 +3779,12 @@ mod tests {
 
     /// The other half of the sentence above, which moved with `delegate`.
     ///
-    /// Main no longer starts one-shots, so the run whose answer has to find its
-    /// way home is the assistant's. A read-only child cannot send one, and a
-    /// caller that does not know that gets silence and reads it as the run
-    /// having failed.
+    /// Main starts one-shots again, so the run whose answer has to find its way
+    /// home is main's. A read-only child cannot send one, and a caller that does
+    /// not know that gets silence and reads it as the run having failed.
     #[test]
-    fn the_assistant_is_told_a_read_only_child_cannot_report_back() {
-        let said = assistant_preamble();
+    fn main_is_told_a_read_only_child_cannot_report_back() {
+        let said = orchestrator_preamble();
         assert!(said.contains("pass `tools: \"delegate\"`"), "{said}");
     }
 
@@ -3771,13 +3828,14 @@ mod tests {
     /// after them it reads as an exception to the rule rather than as the first
     /// thing to check.
     ///
-    /// It lived in main's brief for one release and it lives in the assistant's
-    /// now, for the reason [`assistant_preamble`] gives: the branch is a model
-    /// turn, and a model turn inside main's turn is a console Reljod cannot
-    /// type into.
+    /// It moved to the assistant for one release, on the argument that the
+    /// branch is a model turn and a model turn inside main's turn is a console
+    /// Reljod cannot type into. That was true and the cure was worse: it is back
+    /// here, and the console is unblocked by a queue and an interrupt key
+    /// instead.
     #[test]
-    fn the_assistant_is_told_it_may_answer_a_quick_question_itself() {
-        let said = assistant_preamble();
+    fn main_is_told_it_may_answer_a_quick_question_itself() {
+        let said = orchestrator_preamble();
         assert!(said.contains("**Answer directly**"), "{said}");
         assert!(said.contains("What time is it in Manila"), "{said}");
         assert!(said.contains("what does A2A stand for"), "{said}");
@@ -3791,37 +3849,73 @@ mod tests {
         );
     }
 
-    /// And main does not get that branch back by the side door.
+    /// And the branch lives in exactly one brief.
     ///
-    /// This is the assumption the spec states plainly and offers to be
-    /// corrected on: main answers nothing itself, not even a definition it
-    /// knows, because the branch that decides whether to answer is exactly the
-    /// thinking that used to hold the console. A brief that lets main answer
-    /// "when it is obvious" reintroduces it, because whether it is obvious is
-    /// itself the judgement.
+    /// Two copies of an answer-or-delegate rule is the thing this whole file's
+    /// test suite exists to prevent: they drift, and the layer reading the stale
+    /// one makes a decision the other layer would not have made. The assistant
+    /// is standing at a door now — it decides *when* Reljod's message is
+    /// delivered and never what to do about it — so its brief must hold none of
+    /// the branch at all.
     #[test]
-    fn the_orchestrator_does_not_answer_anything_itself() {
-        let said = orchestrator_preamble();
+    fn only_one_brief_holds_the_answer_or_delegate_branch() {
+        let door = assistant_preamble();
         assert!(
-            !said.contains("**Answer directly**"),
-            "the answer branch is back in main's brief: {said}"
+            !door.contains("**Answer directly**"),
+            "the doorman has been given the routing branch as well: {door}"
+        );
+        for verb in ["`ask_manager`", "`delegate`", "`open_work`", "`continue_agent`"] {
+            assert!(
+                !door.contains(verb),
+                "the doorman is told to call {verb}, which is not its job and which \
+                 it has no access to reach: {door}"
+            );
+        }
+        assert!(
+            orchestrator_preamble().contains("**Answer directly**"),
+            "and nothing holds the branch at all"
+        );
+    }
+
+    /// What the doorman is actually for, in the words the brief has to keep.
+    ///
+    /// It is handed one message and answers one question. The failure this
+    /// guards against is the brief quietly growing back into a routing layer —
+    /// which is what it was, and what it stopped being for good reasons.
+    #[test]
+    fn the_doorman_is_told_it_decides_when_and_never_what() {
+        let said = assistant_preamble();
+        assert!(said.contains("`interrupt_main`"), "its one verb is not named: {said}");
+        assert!(
+            said.contains("does this wait for that turn to \\\n     end, or does it stop the turn now?")
+                || said.contains("does this wait for that turn to end, or does it stop the turn now?"),
+            "the question it answers is not stated: {said}"
         );
         assert!(
-            said.contains("you do not answer it yourself"),
-            "and nothing says so plainly: {said}"
+            said.contains("**When you cannot tell, hold.**"),
+            "the tie-break is missing, and a doorman with no tie-break stops turns \
+             it is unsure about: {said}"
         );
         assert!(
-            said.contains("Even a question you are sure you know the answer to goes to it"),
-            "the tempting exception has to be closed by name: {said}"
+            said.contains("nothing brings it back"),
+            "and nothing says why the two mistakes are different sizes: {said}"
+        );
+        assert!(
+            said.contains("To hold, call nothing at all"),
+            "holding has to be spelled out as an action, or a model that decided to \
+             hold looks for a verb to hold with: {said}"
         );
     }
 
     /// The three sizes, in Reljod's own terms, in the order they are checked.
     /// Drop any one and the branch is a two-way choice again.
     #[test]
-    fn the_assistant_is_told_the_task_decides_which_branch_it_takes() {
-        let said = assistant_preamble();
-        assert!(said.contains("**Decide by the task, in this order.**"), "{said}");
+    fn main_is_told_the_task_decides_which_branch_it_takes() {
+        let said = orchestrator_preamble();
+        assert!(
+            said.contains("**Decide by the size of the task, in this order.**"),
+            "{said}"
+        );
 
         let answer = said.find("**Answer directly**").expect("the cheapest first");
         let manager = said.find("`ask_manager` for").expect("then a repository");
@@ -3833,29 +3927,27 @@ mod tests {
         );
     }
 
-    /// Schedules and goals did not move, and this is the test that says so.
+    /// Schedules and goals are main's and nobody else's, and this says so.
     ///
-    /// Everything else main used to decide went to the assistant. These two did
-    /// not, because arming one spends money at 2am with nobody watching —
-    /// `docs/spec-ceo-and-managers.md`, open question 4 — and nothing about
-    /// moving the routing decision changes that argument. Without this the
-    /// obvious tidy-up is to send them on with the rest.
+    /// They stayed with main through the release where everything else left it,
+    /// because arming one spends money at 2am with nobody watching —
+    /// `docs/spec-ceo-and-managers.md`, open question 4. The same argument keeps
+    /// them off every layer below, and without this the obvious tidy-up is to
+    /// hand them down with the rest of the routing.
     #[test]
-    fn schedules_and_goals_stay_with_main_rather_than_going_to_the_assistant() {
+    fn arming_something_unattended_stays_with_main_and_nobody_below_it() {
         let said = orchestrator_preamble();
-        assert!(said.contains("is still `schedule_create`"), "{said}");
-        assert!(said.contains("is still `goal_create`"), "{said}");
+        assert!(said.contains("`schedule_create` when the instruction says *when*"), "{said}");
+        assert!(said.contains("`goal_create` when it \\\n       says *keep* or *until*")
+            || said.contains("`goal_create` when it says *keep* or *until*"), "{said}");
         assert!(
-            said.contains("do not go to the assistant"),
-            "they have to be marked as the exception to handing everything over, or \
-             the general rule swallows them: {said}"
+            said.contains("spends money at 2am with nobody watching"),
+            "the reason has to travel with the rule, or the next brief drops it: {said}"
         );
-        assert!(
-            !assistant_preamble().contains("`schedule_create`"),
-            "the assistant must not arm a schedule: it holds `delegate` access, and \
-             `schedule_create` needs `orchestrate`"
-        );
-        assert!(!assistant_preamble().contains("`goal_create`"));
+        for brief in [assistant_preamble(), &manager_preamble("tetris", 3)] {
+            assert!(!brief.contains("`schedule_create`"), "{brief}");
+            assert!(!brief.contains("`goal_create`"), "{brief}");
+        }
     }
 
     /// Answering is bounded by three things, and the bound is the whole reason
@@ -3864,7 +3956,7 @@ mod tests {
     /// rule was written against and which this change must not reintroduce.
     #[test]
     fn the_answer_branch_is_bounded_rather_than_open_ended() {
-        let said = assistant_preamble();
+        let said = orchestrator_preamble();
         assert!(said.contains("needs no repository"), "{said}");
         assert!(said.contains("no work that outlasts this turn"), "{said}");
         assert!(said.contains("nothing you would have to go away and research"), "{said}");
@@ -3874,7 +3966,8 @@ mod tests {
             "a trivial in-turn call is still answering, and a repository still is not: {said}"
         );
         assert!(
-            said.contains("counting what a repository contains is a `delegate`, not an answer"),
+            said.contains("counting what a repository contains is \\\n     an `ask_manager`, not an answer")
+                || said.contains("counting what a repository contains is an `ask_manager`, not an answer"),
             "the first live run of this branch answered \"count the files in this repository\" \
              itself, with a shell command, which is the failure the old rule existed for: {said}"
         );
@@ -3894,7 +3987,7 @@ mod tests {
     /// say so or the same phrasing routes the same way again.
     #[test]
     fn naming_the_project_does_not_by_itself_make_it_repository_work() {
-        let said = assistant_preamble();
+        let said = orchestrator_preamble();
         assert!(
             said.contains("Naming the project does not by itself make it repository work"),
             "{said}"
@@ -4920,8 +5013,8 @@ mod tests {
         assert_eq!(store.parent_conversation(&assistant).unwrap(), None);
     }
 
-    /// Check 3. `hand_to_assistant` returns when the run has *started*, and
-    /// there is nothing in it that could wait for the run to say anything.
+    /// Check 3. `start_doorman` returns when the run has *started*, and there is
+    /// nothing in it that could wait for the run to say anything.
     ///
     /// **Asserted against the source, because there is no type that holds it.**
     /// The property is the absence of an await, and a test that proved it by
@@ -4932,16 +5025,16 @@ mod tests {
     /// that drains it — which is how `start_titler` deliberately does not wait
     /// either.
     ///
-    /// This is the property the whole epic exists for. Main calls this inside
-    /// its own turn, and its turn is the console: an await added here would put
-    /// a model call back in front of every instruction Reljod types, and
-    /// nothing else in the codebase would notice.
+    /// Both callers are loops — a daemon tick and the console's own event loop
+    /// — and neither may stop to watch a model. An await added here would stall
+    /// the tick that runs every schedule on this box behind whatever a doorman
+    /// takes to answer, and nothing else in the codebase would notice.
     #[test]
-    fn handing_an_instruction_to_an_assistant_never_waits_for_the_run() {
+    fn starting_a_doorman_never_waits_for_the_run() {
         let source = include_str!("orchestrator.rs");
         let start = source
-            .find("pub async fn hand_to_assistant(")
-            .expect("hand_to_assistant is in this file");
+            .find("pub async fn start_doorman(")
+            .expect("start_doorman is in this file");
         // To the next item at the top level, which is the doc comment of
         // whatever comes after it.
         let body = &source[start..];
@@ -4954,7 +5047,7 @@ mod tests {
         for waiting in ["subscribe(", "titler_output(", ".recv(", "while let"] {
             assert!(
                 !body.contains(waiting),
-                "`hand_to_assistant` contains `{waiting}`, which is how a function in \
+                "`start_doorman` contains `{waiting}`, which is how a function in \
                  this file waits for a run to say something. It must return when the \
                  run has started and not when it has answered."
             );
@@ -4963,7 +5056,7 @@ mod tests {
         assert_eq!(
             body.matches(".await").count(),
             1,
-            "`hand_to_assistant` awaits something other than the spawn: {body}"
+            "`start_doorman` awaits something other than the spawn: {body}"
         );
     }
 }

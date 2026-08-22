@@ -276,6 +276,13 @@ pub const GLOBAL: &[Key] = &[
 /// because those two are the spine's and this screen's own verbs must not be
 /// what a narrow terminal drops.
 const CHAT: &[Key] = &[
+    // Above everything else this screen has, because it is the key you reach
+    // for when something is going wrong and you have two seconds to stop it.
+    // `/stop` is printed with it deliberately: reporting a modified Escape
+    // needs the keyboard-enhancement protocol and plenty of terminals decline
+    // it, so on those machines the words are the whole of the gesture rather
+    // than a footnote to it.
+    k("Shift-Esc / /stop", "stop every run, keep every chat"),
     k("Ctrl-B", "delegate"),
     k("Ctrl-F", "fleet"),
     k("Ctrl-G", "menu"),
