@@ -12230,24 +12230,35 @@ mod tests {
             "the side panel is on screen at all:\n{frame}"
         );
 
-        // The palette is anchored to the composer's left edge, so its right
-        // edge may not pass the composer's. Measured in columns off the frame
-        // rather than by looking for what is beside it: the panel's own bottom
-        // border legitimately follows the palette on one row, and a test that
-        // called that an overlap would fail on correct output.
-        let right_edge = |needle: &str| -> usize {
-            let line = frame
-                .lines()
-                .find(|l| l.contains(needle))
-                .unwrap_or_else(|| panic!("expected a row containing {needle}:\n{frame}"));
-            line.chars().position(|c| c == '\u{2510}').unwrap_or(usize::MAX)
-        };
-        let palette = right_edge("Tab completes");
-        let composer = right_edge("\u{250c} you");
+        // The bound is the **chat column**, not the composer.
+        //
+        // Asserting `palette <= composer` would be stricter than the truth and
+        // would reject correct output: the composer is capped at a comfortable
+        // reading width, and on a wide terminal the palette rightly runs past
+        // it to the edge of the column. At this size the two happen to
+        // coincide, which is exactly how such an assertion hides — so this
+        // measures the thing that actually matters, which is whether the
+        // palette reaches what sits beside the chat.
+        let palette_end = frame
+            .lines()
+            .find(|l| l.contains("Tab completes"))
+            .and_then(|l| l.chars().position(|c| c == '\u{2510}'))
+            .unwrap_or_else(|| panic!("the palette is drawn:\n{frame}"));
+        // The column where the *panel's* border begins, not the first border on
+        // the row — the palette's own opening corner is further left.
+        let panel_start = frame
+            .lines()
+            .find_map(|l| {
+                let chars: Vec<char> = l.chars().collect();
+                (0..chars.len()).find(|&at| {
+                    chars[at..].starts_with(&['\u{250c}', ' ', 'p', 'r', 'o', 'j'])
+                })
+            })
+            .unwrap_or_else(|| panic!("the side panel is drawn:\n{frame}"));
         assert!(
-            palette <= composer,
-            "the palette ends at column {palette} and the composer at {composer}, \
-             so it is drawn over whatever sits beside the chat:\n{frame}"
+            palette_end < panel_start,
+            "the palette closes at column {palette_end} and the panel opens at \
+             {panel_start}, so it is drawn over what sits beside the chat:\n{frame}"
         );
     }
 
