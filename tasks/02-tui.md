@@ -72,7 +72,7 @@ width from 20 to 120.
 
 ## What this pass fixed
 
-Thirty-four changes, each with a test that fails without it. Driven by running the
+Thirty-five changes, each with a test that fails without it. Driven by running the
 console against real harnesses under a throwaway `JOD_HOME`, on four projects,
 and then re-run end to end on an empty install.
 
@@ -522,11 +522,19 @@ Two pre-existing faults it verified against `main` are fixed here as well.
   beside four visibly matching rows. It counted `row_ids(Fleet)` — the flat
   *agent* list plus a sentinel — while the pane drew tree nodes.
 
-Two more it verified are left open, and one is a gap rather than a break: the
-`Ctrl-P` panel takes a fixed thirty-two columns with no minimum-width guard and
-crushes the chat below seventy, where the rail proper moves itself below instead
-(T2's family); and the fleet does not carry the same-name disambiguation the
-projects panel gained, so two `web` projects are two bare `▪ web` rows.
+The fleet not carrying the projects panel's same-name disambiguation is fixed
+too — both now say `web in one` and `web in two`, because two screens naming one
+thing differently is worse than either name.
+
+One it verified is left open, and it belongs to T2's family rather than to
+itself: the `Ctrl-P` panel takes a fixed thirty-two columns with no
+minimum-width guard, so below about seventy it paints over the chat's border and
+at forty leaves the chat two columns wide. The rail proper already handles this
+— `rail_beside` moves it below the chat under `RAIL_BESIDE` — so the fix is to
+give the panel the same treatment. It is filed with T2 because "what may cover
+what, and what yields first, at a size where not everything fits" wants one
+answer for the whole screen, and three different answers arrived at separately
+is how a layout stops making sense.
 
 **The fix that nearly went in wrong is worth the paragraph.** Bounding the
 palette by the *composer* stops it covering the rail and re-cuts the longest

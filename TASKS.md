@@ -16,7 +16,7 @@ area file over this table and correct the table when you notice it drifting.
 |---|---|---|---|---|---|
 | Launch, roots and the console's directory | [`tasks/00-launch-and-roots.md`](tasks/00-launch-and-roots.md) | L1–L10 | 5 | 4 + 1 blocked | — |
 | Routing: answer it yourself or hand it over | [`tasks/01-routing.md`](tasks/01-routing.md) | R1–R7 | 4 | 3 | — |
-| The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1–T6 | 1 + 34 shipped | 5 | — |
+| The TUI itself | [`tasks/02-tui.md`](tasks/02-tui.md) | T1–T6 | 1 + 35 shipped | 5 | — |
 | Orchestration scenarios | [`tasks/10-orchestration.md`](tasks/10-orchestration.md) | O1–O10, **one critical** | 2 | 8 | — |
 | Orchestration edge cases and bad input | [`tasks/11-orchestration-edge-cases.md`](tasks/11-orchestration-edge-cases.md) | E1 + 14 scenarios | 1 | 0 | — |
 | Fleets and the tree | [`tasks/20-fleets.md`](tasks/20-fleets.md) | F1–F9 | 5 | 4 | — |
