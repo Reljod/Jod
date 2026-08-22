@@ -869,6 +869,77 @@ in the store, and a `delegations` row of kind `ask_manager`. Today you get an
 
 ---
 
+## X14. The doorman decides correctly, main is not interrupted, and the message is stranded in `reviewing` for ever
+Status: **open** · Severity: critical · Owner: —
+
+This is the behaviour Reljod asked for in his own words — *"an assistant read
+queue messages and determining when it will interrupt the main"* — and end to
+end it does not work. The judgement is right. Everything after it fails.
+
+**What happened, in order.** Main was busy writing a long essay. Typed into the
+busy chat:
+
+```
+STOP - urgent, forget the essay, I need to know right now: is the lab project
+on a branch or on main?
+```
+
+1. The message was written to the store correctly: `pending_deliveries` id 12,
+   `kind = human`, `state = reviewing`. The console said
+   `queued — an assistant is reading it (1 waiting)`.
+2. A doorman was started: run `600dee8e`, harness `agy`, 16 events.
+3. **The doorman judged it correctly.** Its final message:
+
+   > stopping it — you urgently asked to abort the essay and need an immediate
+   > answer about the lab project's branch.
+
+4. **Main was not interrupted.** It carried on for another minute and a half.
+5. The doorman run is recorded `failed`, and the console printed
+   `✗ doorman STOP - urgent, forget the failed after 24s — Ctrl-F to open it`.
+6. **The delivery never left `reviewing`.** `run_id` is still `NULL`. It was
+   neither delivered nor returned to the queue.
+
+So the urgent message is gone. Not refused, not deferred, not answered — it sits
+in a state that nothing revisits, while the console simultaneously claims *"an
+assistant is reading it"* and *"doorman … failed"*. Those two lines were on
+screen at the same time and they cannot both be acted on.
+
+**The stranding is the part to fix first, and it is structural rather than
+model-dependent.** E2.S3 makes "under review" a state so that only one doorman
+runs at a time, which is right. But nothing releases the state when the doorman
+does not finish cleanly. A run that dies between claiming the queue and acting
+on it takes the message with it, permanently, and the only visible symptom is a
+console that keeps saying somebody is reading it. Whatever else changes, a
+delivery whose doorman ended without delivering or explicitly deferring must go
+back to `queued`.
+
+**Whether the interrupt itself fired is not yet established**, and the two
+possibilities need telling apart before anyone writes a fix. Either the doorman
+said "stopping it" and never called `interrupt_main` — in which case it narrated
+an action it did not take, which is X10's disease again — or it called it and
+the call failed, in which case the failure is unreported. The run is on AGY, so
+X11 also applies and the `failed` status may be a mislabel rather than a real
+error; that must be ruled out first, because "the doorman failed" and "the
+doorman succeeded and is recorded as failed" lead to opposite fixes.
+
+**A prerequisite nobody is told about.** None of this happens without
+`jod daemon` running, because `Ticker::tick_deliveries` is what starts a
+doorman. There was no daemon on this machine for the whole earlier half of these
+runs, and in that state the assistant tier does not exist at all — messages
+typed into a busy chat were carried by the console's own in-memory queue
+(`App::queued`) and delivered when the turn ended. That works, which is exactly
+why it hides the problem: the queue *looks* fine, and the layer Reljod asked for
+is simply absent. The console does mention it — "nothing is watching these
+sessions for stalls — start `jod daemon`" — but it frames it as a stall-watching
+concern, and says nothing about the assistant.
+
+Check: with `jod daemon` running, type an urgent message into a busy main chat.
+Green is main's turn stopping, the message delivered, and the delivery row
+leaving `reviewing`. Then kill the doorman mid-run and confirm the delivery
+returns to `queued` rather than sticking.
+
+---
+
 ## Checked and not a bug
 
 Recorded because both looked like findings and both cost real time to
