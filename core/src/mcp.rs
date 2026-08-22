@@ -125,8 +125,28 @@ pub struct Tool {
     pub schema: Value,
 }
 
+/// A tool's arguments: the ones it declares, and nothing else.
+///
+/// `additionalProperties: false` is the half that is easy to leave off and
+/// expensive to leave off. Without it a schema says what a tool understands but
+/// not what it refuses, so an argument the tool never heard of is read by
+/// nobody, dropped, and answered with a success. That is not hypothetical: a
+/// manager asked `open_work` for a read-only engineer through a `placement`
+/// argument that did not exist yet, was told it had worked, and got an ordinary
+/// engineer. See `tasks/30-project-managers.md`, M3.
+///
+/// Saying it in the schema is only advice to a client that validates, so
+/// [`Server::undeclared`] enforces the same sentence on the way in. A tool that
+/// one day has to take open-ended arguments builds its schema some other way
+/// rather than turning this off for the whole catalogue, and both the advice
+/// and the enforcement follow the schema it built.
 fn obj(properties: Value, required: &[&str]) -> Value {
-    json!({ "type": "object", "properties": properties, "required": required })
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
 }
 
 fn text(description: &str) -> Value {
@@ -1310,6 +1330,11 @@ impl Server {
                 self.access.as_str()
             )));
         }
+        // For the same reason as the access check above: the schema is advice
+        // to a client that reads it, and this is the control.
+        if let Some(stray) = Self::undeclared(&tool, args) {
+            return Err(ToolError::BadParams(stray));
+        }
         match name {
             "list_agents" => self.list_agents(args).await,
             "ask_assistant" => self.ask_assistant(args).await,
@@ -1354,6 +1379,60 @@ impl Server {
             // what `every_advertised_tool_is_dispatchable` exists to hold.
             other => Err(ToolError::Unknown(other.to_string())),
         }
+    }
+
+    /// Say what a call passed that its tool never declared, if anything.
+    ///
+    /// The point is that a model finds out. An argument nobody reads is a
+    /// sentence the model wrote and believed, and answering it with a success
+    /// tells the model its sentence took effect — which is how a manager came
+    /// to believe it had placed an engineer read-only. A refusal costs one
+    /// turn; a silent success costs the whole run's assumption about what it
+    /// has already done.
+    ///
+    /// The refusal names both halves: what was not understood, and what the
+    /// tool does take. Without the second half the model has to guess the
+    /// spelling, and guessing is what put it here.
+    ///
+    /// Only schemas that say `additionalProperties: false` are held to this,
+    /// so a tool that has to take open-ended arguments opts out where its
+    /// schema is written rather than in this function.
+    fn undeclared(tool: &Tool, args: &Value) -> Option<String> {
+        if tool.schema["additionalProperties"] != json!(false) {
+            return None;
+        }
+        let declared = tool.schema["properties"].as_object()?;
+        let given = args.as_object()?;
+        let mut stray: Vec<&str> = given
+            .keys()
+            .filter(|key| !declared.contains_key(key.as_str()))
+            .map(String::as_str)
+            .collect();
+        if stray.is_empty() {
+            return None;
+        }
+        stray.sort_unstable();
+        let mut takes: Vec<&str> = declared.keys().map(String::as_str).collect();
+        takes.sort_unstable();
+        let name = tool.name;
+        let quoted = |names: &[&str]| {
+            names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+        };
+        Some(if takes.is_empty() {
+            format!(
+                "`{name}` takes no arguments, and this call passed {}. Call it with no \
+                 arguments at all.",
+                quoted(&stray)
+            )
+        } else {
+            format!(
+                "`{name}` does not take {}. It takes {}. Nothing was done — an argument a \
+                 tool does not know is refused rather than ignored, so check the name against \
+                 the tool's schema and call it again.",
+                quoted(&stray),
+                quoted(&takes)
+            )
+        })
     }
 
     // ---- agents ---------------------------------------------------------
@@ -2593,6 +2672,13 @@ impl Server {
     ///    that reached this function would already be in the model's context
     ///    and in the transcript — D3 is about it never getting there, so the
     ///    only useful place to refuse is before it is stored, not after.
+    ///
+    ///    Since [`Server::undeclared`], a call carrying one of those names is
+    ///    turned away by the dispatcher before it reaches this function, so
+    ///    what follows is the second line rather than the first. It stays
+    ///    because this is where the property is stated: whoever reads
+    ///    `request_secret` should not have to read the dispatcher to learn
+    ///    that no argument of it carries a value.
     /// 2. **It returns at once and never waits.** Waiting would be a lie:
     ///    injection happens at *spawn*, so the value cannot reach the run that
     ///    asked for it however long it sits there. Saying so is what turns a
@@ -5387,6 +5473,101 @@ mod tests {
         }
     }
 
+    /// **The reproduction for M3.** A stray argument used to be accepted.
+    ///
+    /// `manager_preamble` described `open_work`'s `placement` argument before
+    /// the argument existed. A manager that asked for a read-only engineer was
+    /// answered with a success and got an ordinary one, because the schema said
+    /// nothing about arguments it had not declared and the dispatcher read only
+    /// the keys it knew. This calls a tool that would otherwise succeed and
+    /// hands it exactly that argument.
+    #[tokio::test]
+    async fn an_argument_a_tool_does_not_know_is_refused_rather_than_ignored() {
+        let answer = call(
+            &server(ToolAccess::Delegate),
+            "remember",
+            json!({
+                "subject": "reljod",
+                "predicate": "prefers",
+                "object": "linear for tasks",
+                "placement": "explore"
+            }),
+        )
+        .await;
+        assert_eq!(
+            error_code(&answer),
+            INVALID_PARAMS,
+            "a stray argument was accepted and answered with a success: {answer}"
+        );
+        let said = answer["error"]["message"].as_str().unwrap();
+        assert!(
+            said.contains("placement"),
+            "the refusal must name the argument it did not understand: {said}"
+        );
+        assert!(
+            said.contains("subject"),
+            "the refusal must list what the tool does take, or the model cannot correct \
+             itself: {said}"
+        );
+    }
+
+    /// The other half of the same rule: a call naming only declared arguments
+    /// still goes through, so the check refuses stray keys and nothing else.
+    #[tokio::test]
+    async fn a_call_that_names_only_declared_arguments_is_still_carried_out() {
+        let answer = call(
+            &server(ToolAccess::Delegate),
+            "remember",
+            json!({
+                "subject": "reljod",
+                "predicate": "prefers",
+                "object": "linear for tasks",
+                "scope": "default"
+            }),
+        )
+        .await;
+        assert!(
+            answer.get("error").is_none() && !is_error_result(&answer),
+            "a well-formed call was refused: {answer}"
+        );
+    }
+
+    /// A tool that declares no arguments at all is the same rule, and it needs
+    /// its own sentence: telling a model what `list_roots` takes instead is
+    /// meaningless when the answer is nothing.
+    #[tokio::test]
+    async fn a_tool_that_takes_no_arguments_says_so_when_it_is_handed_one() {
+        let answer = call(&server(ToolAccess::ReadOnly), "list_roots", json!({ "limit": 3 })).await;
+        assert_eq!(error_code(&answer), INVALID_PARAMS, "{answer}");
+        let said = answer["error"]["message"].as_str().unwrap();
+        assert!(said.contains("takes no arguments"), "{said}");
+        assert!(said.contains("limit"), "{said}");
+    }
+
+    /// Tools that take arguments nobody declared, listed by name.
+    ///
+    /// Empty, and meant to stay that way. It exists so that a tool which one
+    /// day genuinely needs open-ended arguments has to say so here, in one
+    /// place a reader can check, rather than the whole catalogue staying
+    /// permissive because a single tool needed it.
+    const OPEN_ENDED_TOOLS: [&str; 0] = [];
+
+    #[test]
+    fn every_tool_schema_says_it_takes_nothing_it_has_not_declared() {
+        for tool in catalogue() {
+            if OPEN_ENDED_TOOLS.contains(&tool.name) {
+                continue;
+            }
+            assert_eq!(
+                tool.schema["additionalProperties"],
+                json!(false),
+                "{}'s schema leaves the door open to undeclared arguments, so a client that \
+                 validates against it will send them and be answered with a success",
+                tool.name
+            );
+        }
+    }
+
     #[test]
     fn no_two_tools_share_a_name() {
         let mut names: Vec<&str> = catalogue().iter().map(|t| t.name).collect();
@@ -6802,6 +6983,14 @@ mod tests {
             )
             .await;
             assert_eq!(error_code(&answer), INVALID_PARAMS, "{smuggled}: {answer}");
+            // Which argument was refused, not merely that something was. The
+            // dispatcher's undeclared-argument check now answers this call
+            // before `request_secret` runs, and a refusal that does not name
+            // the argument leaves the model guessing which one it was.
+            assert!(
+                answer["error"]["message"].as_str().unwrap().contains(smuggled),
+                "the refusal does not name `{smuggled}`: {answer}"
+            );
         }
         assert!(
             store
@@ -6866,36 +7055,54 @@ mod tests {
     #[tokio::test]
     async fn a_card_is_raised_against_the_calling_run_whatever_the_arguments_say() {
         let (store, server, conversation) = working(ToolAccess::ReadOnly);
+        call(&server, "record_decision", json!({ "title": "chat DB", "chosen": "sqlite" })).await;
+        assert_eq!(only_card(&store, &conversation).run_id.as_deref(), Some("run-1"));
+    }
+
+    /// The attempt itself is now turned away, and this is the second half of
+    /// the property above.
+    ///
+    /// No card tool has an argument for the conversation or the run, so every
+    /// spelling below is an argument the tool never declared. Each used to be
+    /// dropped in silence and answered with a success, which told the agent its
+    /// card had gone where it asked. It goes back as a refusal naming the
+    /// argument, and no card is written anywhere.
+    #[tokio::test]
+    async fn naming_another_conversation_on_a_card_is_refused_and_writes_nothing() {
+        let (store, server, conversation) = working(ToolAccess::ReadOnly);
         let elsewhere = store
             .new_conversation(HarnessKind::ClaudeCode, "/tmp/other", None)
             .unwrap()
             .id;
-        call(
-            &server,
-            "record_decision",
-            json!({
-                "title": "chat DB",
-                "chosen": "sqlite",
-                // Every spelling an agent might try. None is read, and this is
-                // the reason no card tool has an argument for it.
-                "conversation_id": elsewhere,
-                "conversation": elsewhere,
-                "run_id": "run-somebody-else"
-            }),
-        )
-        .await;
-
-        assert_eq!(only_card(&store, &conversation).run_id.as_deref(), Some("run-1"));
-        assert!(
-            store
-                .cards(&Query {
-                    conversation_id: Some(elsewhere),
-                    ..Query::default()
-                })
-                .unwrap()
-                .is_empty(),
-            "an agent named another conversation and Jod put a card on it"
-        );
+        for spelling in ["conversation_id", "conversation", "run_id"] {
+            let answer = call(
+                &server,
+                "record_decision",
+                json!({ "title": "chat DB", "chosen": "sqlite", spelling: elsewhere.clone() }),
+            )
+            .await;
+            assert_eq!(
+                error_code(&answer),
+                INVALID_PARAMS,
+                "`{spelling}` was accepted rather than refused: {answer}"
+            );
+            assert!(
+                answer["error"]["message"].as_str().unwrap().contains(spelling),
+                "the refusal does not name `{spelling}`: {answer}"
+            );
+        }
+        for rail in [&conversation, &elsewhere] {
+            assert!(
+                store
+                    .cards(&Query {
+                        conversation_id: Some(rail.clone()),
+                        ..Query::default()
+                    })
+                    .unwrap()
+                    .is_empty(),
+                "a refused call still put a card on {rail}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -9089,26 +9296,48 @@ mod tests {
     #[tokio::test]
     async fn a_message_is_sent_as_the_run_that_is_calling_whatever_the_arguments_say() {
         let (store, server) = crew(ToolAccess::Delegate);
-        call(
-            &server,
-            "send_message",
-            // Every spelling an agent might try. None of them is read: there is
-            // no argument for the sender, and this is the reason there is not.
-            json!({
-                "to": "scout",
-                "text": "look at the parser",
-                "from": "reljod",
-                "sender": "reljod",
-                "as": "reljod"
-            }),
-        )
-        .await;
+        call(&server, "send_message", json!({ "to": "scout", "text": "look at the parser" }))
+            .await;
         let inbox = store.team_unread("crew", "scout").unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(
             inbox[0].from, "lead",
             "an agent named its own sender and Jod believed it"
         );
+    }
+
+    /// Naming your own sender is turned away rather than dropped in silence.
+    ///
+    /// `send_message` has no argument for the sender, which is the reason an
+    /// agent cannot forge one. Every spelling below is therefore an argument
+    /// the tool never declared: each used to be ignored and answered with a
+    /// success, so an agent that tried it was told the message had gone out
+    /// under the name it chose. Nothing is delivered now, and the refusal says
+    /// which argument was not understood.
+    #[tokio::test]
+    async fn naming_your_own_sender_is_refused_and_delivers_nothing() {
+        for spelling in ["from", "sender", "as"] {
+            let (store, server) = crew(ToolAccess::Delegate);
+            let answer = call(
+                &server,
+                "send_message",
+                json!({ "to": "scout", "text": "look at the parser", spelling: "reljod" }),
+            )
+            .await;
+            assert_eq!(
+                error_code(&answer),
+                INVALID_PARAMS,
+                "`{spelling}` was accepted rather than refused: {answer}"
+            );
+            assert!(
+                answer["error"]["message"].as_str().unwrap().contains(spelling),
+                "the refusal does not name `{spelling}`: {answer}"
+            );
+            assert!(
+                store.team_unread("crew", "scout").unwrap().is_empty(),
+                "a refused call still delivered a message"
+            );
+        }
     }
 
     #[tokio::test]

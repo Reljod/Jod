@@ -625,7 +625,7 @@ Neither is a live fault. Both are the shape that hid six real ones, which is
 the reason to close them rather than the severity.
 
 ### M3. `additionalProperties` is absent from every tool schema
-Status: **open** · Severity: medium · Owner: unclaimed
+Status: **open** · Severity: medium · Owner: m3-additionalprops
 
 `obj()` (`core/src/mcp.rs`) emits `{type, properties, required}` and never
 `additionalProperties: false`, so an argument a tool does not know is accepted,
