@@ -28,6 +28,56 @@ Two of the things that looked like findings were checked and were not, and they
 are recorded at the bottom under "Checked and not a bug" so nobody spends the
 afternoon refiling them.
 
+**Read this before you read anything else in the file.** The title says the
+chain was driven end to end. That is true of `main`, of the queue, and of the
+assistant's queue-reading, and it is **not** true of the rest. Because of X13,
+**the manager tier never ran, in any scenario here.** Main called `ask_manager`
+zero times in thirteen turns; it reached for `open_work` and `delegate` every
+time, and the guard that should have stopped it failed open. So every scenario
+below that looks like it tested main → manager → engineer actually tested
+main → work session. What the engineers did was observed; what a *manager*
+would have done with the same instruction was never seen once.
+
+That matters for how the passes below should be read. A pass here means "main
+did the right thing and the work session did the right thing". It is not
+evidence about planning, about a manager deciding whether an instruction is new
+work or something an agent of its own is already doing, or about the placement
+rules a manager owns. None of that was exercised. The next person to work this
+file should assume the manager and engineer tiers are **untested**, not
+"tested and fine".
+
+## What was not tested, and should be
+
+Named explicitly, because a list of scenarios that were run says nothing about
+the ones that were not, and the gaps here are larger than the coverage.
+
+- **The manager tier, at all.** See above. Everything about `ask_manager`,
+  `manager_preamble` and `plan_work` is unexercised. This is the single biggest
+  gap and it is a consequence of X13 rather than a choice.
+- **Engineer reuse and the roster.** Whether a second instruction on the same
+  subject reuses a warm engineer, and whether a different subject correctly
+  opens a new one, is the whole of `worktree-engineer-reuse-rules` (#236, merged)
+  and none of it was driven.
+- **The doorman's judgement, which is the half of the assistant that matters.**
+  The queue works — a message typed into a busy chat waits and is answered after
+  the turn. But every message queued in these runs was one that could wait, so
+  the assistant was never asked to decide, and `interrupt_main` was never seen
+  to fire. Nothing here tests an *urgent* message cutting a running turn short,
+  which is the behaviour Reljod actually asked for.
+- **Shift-Esc.** `/stop` was tested and works. Its twin was not, and D8 exists
+  because the terminal may not deliver the modified key at all.
+- **Multi-turn work with cards answered.** Cards were raised and left sitting.
+  Nothing here answers one and watches the work resume, so the card→answer→
+  resume loop is unverified from this side.
+- **Schedules, goals, memory and webhooks.** Untouched. They have their own area
+  files and this run added nothing to them.
+- **Concurrency.** One console, one chat. Two consoles on one store, or two
+  works in the same repository at once, were never tried — and the pin drift in
+  X13 suggests that is exactly where more lives.
+- **Recovery.** No harness was killed mid-run, no database was locked, no disk
+  filled *deliberately*. The one disk exhaustion that happened was an accident
+  and is recorded as such.
+
 ---
 
 ## X1. Main on AGY or OpenCode writes its delegations into the wrong database, and its engineers into the wrong directory
@@ -120,7 +170,7 @@ message naming the harness and the reason.
 ---
 
 ## X2. `jod chat` ignores role configuration completely
-Status: **open — fix is PR #251** · Severity: medium · Owner: the pull-request session
+Status: **fixed — PR #251, merged** · Severity: medium · Owner: the pull-request session
 
 `jod chat` is documented as the console without a screen — *"you `cd` into a
 repository and start talking"* (`cli/src/main.rs:4895`). It is not main, and it
@@ -246,7 +296,7 @@ what the limit is for and why it is the number it is.
 ---
 
 ## X5. A summariser run that fails is reported as a summary that came back empty, and it leaves you unable to change harness
-Status: **open — fix in progress, composing with PR #238** · Severity: high · Owner: the pull-request session
+Status: **open — fix is PR #252, open, composed with PR #238** · Severity: high · Owner: the pull-request session
 
 Switching the main chat's harness first summarises the conversation *on the
 harness you are leaving*, and hands that summary to the new one. When the
@@ -816,6 +866,86 @@ Check: with a registered project and main on AGY, ask main for repository work
 in that project. Green is a refusal naming `ask_manager`, a manager conversation
 in the store, and a `delegations` row of kind `ask_manager`. Today you get an
 `open_work` row and no manager at all.
+
+---
+
+## X14. The doorman decides correctly, main is not interrupted, and the message is stranded in `reviewing` for ever
+Status: **open** · Severity: critical · Owner: —
+
+This is the behaviour Reljod asked for in his own words — *"an assistant read
+queue messages and determining when it will interrupt the main"* — and end to
+end it does not work. The judgement is right. Everything after it fails.
+
+**What happened, in order.** Main was busy writing a long essay. Typed into the
+busy chat:
+
+```
+STOP - urgent, forget the essay, I need to know right now: is the lab project
+on a branch or on main?
+```
+
+1. The message was written to the store correctly: `pending_deliveries` id 12,
+   `kind = human`, `state = reviewing`. The console said
+   `queued — an assistant is reading it (1 waiting)`.
+2. A doorman was started: run `600dee8e`, harness `agy`, 16 events.
+3. **The doorman judged it correctly.** Its final message:
+
+   > stopping it — you urgently asked to abort the essay and need an immediate
+   > answer about the lab project's branch.
+
+4. **Main was not interrupted.** It carried on for another minute and a half.
+5. The doorman run is recorded `failed`, and the console printed
+   `✗ doorman STOP - urgent, forget the failed after 24s — Ctrl-F to open it`.
+6. **The delivery never left `reviewing`.** `run_id` is still `NULL`. It was
+   neither delivered nor returned to the queue.
+
+So the urgent message is gone. Not refused, not deferred, not answered — it sits
+in a state that nothing revisits, while the console simultaneously claims *"an
+assistant is reading it"* and *"doorman … failed"*. Those two lines were on
+screen at the same time and they cannot both be acted on.
+
+**Nothing recovers it.** Checked deliberately rather than assumed. Over the
+following minutes: exactly one doorman run was ever created and it was never
+retried; main's turn ended and the delivery did not drain; Esc was pressed and
+the turn was interrupted, and it still did not drain. Ten minutes after it was
+typed the row is unchanged — `state = reviewing`, `run_id = NULL`,
+`reviewed_at_ms = NULL` — and the status bar still reads `1 queued`. The only
+thing that clears the counter is presumably restarting the console, which loses
+the message rather than delivering it.
+
+**The stranding is the part to fix first, and it is structural rather than
+model-dependent.** E2.S3 makes "under review" a state so that only one doorman
+runs at a time, which is right. But nothing releases the state when the doorman
+does not finish cleanly. A run that dies between claiming the queue and acting
+on it takes the message with it, permanently, and the only visible symptom is a
+console that keeps saying somebody is reading it. Whatever else changes, a
+delivery whose doorman ended without delivering or explicitly deferring must go
+back to `queued`.
+
+**Whether the interrupt itself fired is not yet established**, and the two
+possibilities need telling apart before anyone writes a fix. Either the doorman
+said "stopping it" and never called `interrupt_main` — in which case it narrated
+an action it did not take, which is X10's disease again — or it called it and
+the call failed, in which case the failure is unreported. The run is on AGY, so
+X11 also applies and the `failed` status may be a mislabel rather than a real
+error; that must be ruled out first, because "the doorman failed" and "the
+doorman succeeded and is recorded as failed" lead to opposite fixes.
+
+**A prerequisite nobody is told about.** None of this happens without
+`jod daemon` running, because `Ticker::tick_deliveries` is what starts a
+doorman. There was no daemon on this machine for the whole earlier half of these
+runs, and in that state the assistant tier does not exist at all — messages
+typed into a busy chat were carried by the console's own in-memory queue
+(`App::queued`) and delivered when the turn ended. That works, which is exactly
+why it hides the problem: the queue *looks* fine, and the layer Reljod asked for
+is simply absent. The console does mention it — "nothing is watching these
+sessions for stalls — start `jod daemon`" — but it frames it as a stall-watching
+concern, and says nothing about the assistant.
+
+Check: with `jod daemon` running, type an urgent message into a busy main chat.
+Green is main's turn stopping, the message delivered, and the delivery row
+leaving `reviewing`. Then kill the doorman mid-run and confirm the delivery
+returns to `queued` rather than sticking.
 
 ---
 
