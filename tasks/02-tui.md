@@ -559,6 +559,23 @@ run. The honest bound was neither the frame nor the composer but the chat
 column: the whole width when nothing is beside it, the chat's share when
 something is.
 
+## The compaction fix, verified by a compaction nobody asked for
+
+The six-pointer fix above was unit-tested and then held through the real thing.
+While a routing instruction was being sent, main's context reached 76%, it
+compacted itself, and the pin moved to a fresh conversation — the exact event
+that had emptied the rail an hour earlier. Afterwards:
+
+- the rail read **`15 open`**, where the same event previously left
+  `0 open · nothing waiting`;
+- all four managers had followed the pin into the new conversation, in the
+  transaction that moved it.
+
+Worth recording because it is the only kind of evidence that settles this one.
+A test proves the transaction does what it says; a compaction firing on its own
+timer, on a store with four projects and fifteen open cards, proves nothing else
+in the system undoes it.
+
 ## What a daemon left running found
 
 Nothing, which is the point of recording it. Before the compaction fixes the
@@ -595,6 +612,7 @@ the same ground being covered twice.
 | 19 | A follow-up continuing earlier work | the same engineer, continued | one session, one lease, both edits in one worktree | pass |
 | 20 | A new intent on a project with no free engineer | a new engineer | new work opened beside the finished one | pass |
 | 21 | An instruction naming no project | the project carried over | "Routed to gamma (carried over — nothing in that named a project)" | pass |
+| 21b | An instruction naming a project by alias | the alias wins over the ambiguous bare name | "in one web" reached `repos/one/web`, where `web` alone is two projects | pass |
 | 22 | An instruction matching two projects | asked, never guessed | blocking question on the rail, with both paths and numbered options | pass |
 | 23 | Answering that question | routed to the chosen one | refused — no answer could name either. **fixed** | fail |
 | 24 | Enter on a project in the catalog | that project's manager | entered it — but nothing said which. **fixed** | fail |
