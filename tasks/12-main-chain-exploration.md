@@ -922,14 +922,49 @@ console that keeps saying somebody is reading it. Whatever else changes, a
 delivery whose doorman ended without delivering or explicitly deferring must go
 back to `queued`.
 
-**Whether the interrupt itself fired is not yet established**, and the two
-possibilities need telling apart before anyone writes a fix. Either the doorman
-said "stopping it" and never called `interrupt_main` — in which case it narrated
-an action it did not take, which is X10's disease again — or it called it and
-the call failed, in which case the failure is unreported. The run is on AGY, so
-X11 also applies and the `failed` status may be a mislabel rather than a real
-error; that must be ruled out first, because "the doorman failed" and "the
-doorman succeeded and is recorded as failed" lead to opposite fixes.
+**The interrupt did fire, five times, and was refused every time.** This was
+left open when the finding was first written and has since been settled by
+reading the doorman's own event log. It called `interrupt_main` with the correct
+run id and got back, each time:
+
+```
+could not stop `8a93350d-15b1-455e-b2fe-5817564d459d`:
+  no agent with id `8a93350d-15b1-455e-b2fe-5817564d459d`
+```
+
+That run id is right. `8a93350d` is main, it was `running` at the time, and the
+row is in the store. The refusal comes from `Jod::kill_agent`
+(`core/src/service.rs:1466`), which looks the run up in **the calling process's
+in-memory registry** and errors if it is not there:
+
+```rust
+let known = self.state.read().await.agents.contains_key(id);
+if !known { return Err(JodError::UnknownAgent(id.to_string())); }
+```
+
+Main was started by the console; the process serving the doorman's tool call was
+not that process. The comment above that check says it "fails loudly if it is
+not there. That is the existing contract for the run a caller named" — a
+contract written for an in-process caller, which the doorman is not.
+
+Worth noting the same lookup succeeds from a *long-lived* MCP server: calling
+`stop_agent` on a console-started run from a different process worked in this
+same session. So the answer is not simply "cross-process never works", and which
+server the doorman reaches matters — which is X1's territory, since an AGY
+session gets the globally registered server rather than a per-run one.
+
+**And then it reported success anyway.** After five refusals the doorman's final
+message was *"stopping it — you urgently asked to abort the essay…"*. Nothing it
+said was true of the system, and that sentence is what a reader would act on.
+That is the same disease as X10's narration: a layer reporting the action it
+chose rather than the action that happened.
+
+The `failed` status on the run is therefore a real failure and not an X11
+mislabel — though X11 still applies to AGY runs generally and should not be
+ruled out for other doormen.
+
+The stranding half has its own finding and its own mechanism: see **X15**, which
+is separately fixable and should be fixed first.
 
 **A prerequisite nobody is told about.** None of this happens without
 `jod daemon` running, because `Ticker::tick_deliveries` is what starts a
@@ -946,6 +981,74 @@ Check: with `jod daemon` running, type an urgent message into a busy main chat.
 Green is main's turn stopping, the message delivered, and the delivery row
 leaving `reviewing`. Then kill the doorman mid-run and confirm the delivery
 returns to `queued` rather than sticking.
+
+---
+
+## X15. A doorman that starts and then dies strands its message for ever and blocks every doorman after it
+Status: **open** · Severity: critical · Owner: —
+
+The mechanism behind half of X14, established from the code and confirmed
+against a live store. It is small, self-contained, and can be fixed without
+answering any of X14's harder questions.
+
+**`finish_review` is the one way out of `reviewing`, and every one of its
+callers covers a doorman that never started.** All three are in
+`Ticker::tick_deliveries` (`core/src/ticker.rs:2276`, `2283`, `2313`):
+
+1. the turn ended between the busy check and the claim, so there is nothing to
+   interrupt;
+2. the in-flight turn could not be read;
+3. `start_doorman` **failed to spawn**.
+
+The case with no caller is the one that happened: `start_doorman` returned
+`Ok(started)`, the run really began — 16 events, a tool call, a considered
+answer — and then ended badly. From that moment nothing anywhere calls
+`finish_review` for those rows.
+
+**The design anticipated exactly this and the recovery was never wired up.**
+`finish_review`'s own doc comment (`core/src/delivery.rs:696`) names it:
+
+> Every path out of a review comes back through here — a doorman that held, a
+> doorman that interrupted, and **a doorman that died without saying anything.
+> That last one is why this is not folded into the two verdicts: a row left
+> `reviewing` by a crashed run would be invisible to `Store::pending_for` for
+> ever, and Reljod's message would be lost in a state nothing sweeps.**
+
+And the reader written for that sweep, `Store::under_review_for`
+(`core/src/delivery.rs:734`), says in its own comment that it exists because
+"the sweep that puts a crashed doorman's rows back needs to find them". **It has
+no production caller.** Grepping all of `core/` for it finds two call sites,
+both in its own tests. This is the same shape as the `claim_lease` case
+`docs/decisions.md` already records: a function that existed, was tested, and
+had no caller outside the test.
+
+**It is not one lost message — it disables the tier.** Because a row sitting in
+`reviewing` is a claim, no further doorman starts for that conversation. Watched
+live: delivery 12 stuck in `reviewing` from the first attempt; two more urgent
+messages typed later became deliveries 15 and 16, both `queued`; **no second
+doorman run was ever created**, while main was busy and a doorman was exactly
+what should have run. The console counted up — `1 queued`, then `2 queued` —
+and no assistant read any of them.
+
+So a single doorman failure switches off the assistant for that conversation
+permanently, and the only sign is a queue counter that goes up and never down.
+
+**Fix shape, and it is genuinely small.** Call `under_review_for` on the tick
+and requeue anything whose doorman run is no longer alive. The comments above
+describe this sweep as though it exists; making it exist is the whole change.
+Worth stamping the requeued rows the way the failed-spawn path already does, and
+for the same stated reason — a doorman that failed once will probably fail again,
+and a queue that retries it every minute for the length of a long turn is worse
+than one that waits.
+
+**A regression test must exercise a doorman that starts and then dies**, not one
+that fails to spawn. The existing tests cover the second, which is why this
+survived: `start_doorman` returning `Ok` is the boundary the coverage stops at.
+
+Check: start a long main turn, queue a message, kill the doorman run mid-flight,
+and wait a tick. Green is the row back in `queued` and a later doorman reading
+it. Today the row stays `reviewing` and every subsequent message queues behind
+it for ever.
 
 ---
 
