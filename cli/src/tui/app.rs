@@ -128,6 +128,21 @@ pub enum Entry {
         prompt: String,
         dir: String,
     },
+    /// The summary a compaction — or a move to another harness — left behind as
+    /// the seed of the thread that continues the old one.
+    ///
+    /// Its own variant rather than a [`Entry::Notice`], because a notice is a
+    /// remark and this is a handoff document. Main compacts itself when its
+    /// context fills, and the thread it opens contains this and nothing else, so
+    /// replayed as a notice it arrived as several screens of somebody else's
+    /// `## What was asked and what was done` — text the reader did not write,
+    /// the agent did not just say, and could not scroll off. It reads as another
+    /// agent's output pasted into your chat, which is exactly what it is not.
+    ///
+    /// Folds like [`Entry::Diff`] does: the heading line is always drawn, the
+    /// body opens behind `Ctrl-O`. Nothing is lost — a summary the model is
+    /// being handed must stay something the reader can check.
+    Carried { heading: String, body: String },
 }
 
 /// A notice raised somewhere the transcript is not on screen.

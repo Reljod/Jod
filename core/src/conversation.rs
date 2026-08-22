@@ -1728,11 +1728,11 @@ impl Store {
         // be something you can see.
         if !summary.trim().is_empty() {
             let heading = match carrying {
-                Carrying::Switch(_) => format!("context handed over from {from_label}"),
+                Carrying::Switch(_) => format!("{HANDED_OVER}{from_label}"),
                 // Named for what it is rather than where it came from: the
                 // harness has not changed, so "handed over from Claude Code"
                 // while still on Claude Code would read as a bug.
-                Carrying::Compaction => "the conversation so far, compacted".to_string(),
+                Carrying::Compaction => COMPACTED.to_string(),
             };
             self.append_message(
                 &new_id,
@@ -2282,6 +2282,31 @@ fn render_entry(m: &PortableMessage) -> String {
 
 fn framed(label: &str, text: &str) -> String {
     format!("[{label}] {text}")
+}
+
+/// The label on the seed message a compaction leaves in the thread it opens.
+pub const COMPACTED: &str = "the conversation so far, compacted";
+
+/// The start of the label on the seed message a harness switch leaves. The
+/// harness it came from finishes it.
+pub const HANDED_OVER: &str = "context handed over from ";
+
+/// The heading and the summary of a carried-context seed message, if that is
+/// what `text` is.
+///
+/// Carried context is the whole content of a thread that continues another one,
+/// and it is the length of a handoff document rather than of a remark. A reader
+/// opening that thread wants to know one arrived and how big it is; reading it
+/// is a second, deliberate act. Telling the two apart is what this exists for,
+/// and it is done on the label rather than on a bare leading `[` so an ordinary
+/// message that happens to start with a bracket is not mistaken for one.
+///
+/// Only ever asked of a [`Role::System`] message — the only role
+/// [`Store::carry_forward`] writes a seed as.
+pub fn carried(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('[')?;
+    let (label, body) = rest.split_once("] ")?;
+    (label == COMPACTED || label.starts_with(HANDED_OVER)).then_some((label, body))
 }
 
 fn is_error(m: &PortableMessage) -> bool {
@@ -4276,6 +4301,40 @@ mod tests {
                 .unwrap(),
             carried.conversation.id,
             "the next turn goes into the continuation, not the thread behind it"
+        );
+    }
+
+    /// A screen has to be able to tell the one system message that is a handoff
+    /// document from the ones that are remarks, so it can fold the document and
+    /// print the remarks. Both halves matter: the seed this module actually
+    /// writes must be recognised, and nothing else may be.
+    #[test]
+    fn a_carried_summary_is_recognised_and_an_ordinary_message_is_not() {
+        let s = store();
+        let (id, _) = conversation_with(&s, &["one", "two"]);
+        let next = s
+            .continue_as_new(&id, "one and two happened", "context")
+            .unwrap()
+            .conversation
+            .id;
+
+        let seed = s
+            .live_window(&next)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.role == Role::System)
+            .expect("the compaction seeds one");
+        assert_eq!(
+            carried(&seed.text),
+            Some((COMPACTED, "one and two happened")),
+            "the label names what it is and the body comes back whole"
+        );
+
+        assert_eq!(carried("a plain runner error"), None);
+        assert_eq!(
+            carried("[2026-08-22] the harness exited"),
+            None,
+            "a message that merely opens with a bracket is not a handoff"
         );
     }
 
