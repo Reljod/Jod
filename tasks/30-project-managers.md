@@ -642,7 +642,7 @@ to a hard error, so it wants its own change and its own thinking about the
 blast radius.
 
 ### M4. Fifteen git-dependent tests report green without running
-Status: **open** · Severity: low · Owner: unclaimed
+Status: **open** · Severity: low · Owner: m4-silent-tests
 
 `let Some(repo) = fixture_repo(..) else { return; }` appears sixteen times in
 `core/src/leases.rs` and fifteen of them return silently when git is absent.

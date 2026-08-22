@@ -1278,11 +1278,13 @@ fn now_ms() -> i64 {
 /// runs against the real `git`, because a lease *is* a git worktree and a
 /// stubbed one would test the stub.
 ///
-/// Returns `None` when git is not installed, having said so loudly. A test that
-/// quietly passed on a machine with no git would be a test that stopped
-/// checking the thing it exists for.
+/// Panics when git is not installed. Returning `None` for a caller to bail on
+/// used to look like the polite thing to do, but a test that returns early
+/// still reports as a pass, so the suite said "green" on a machine where half
+/// of it never executed. A panic is the truthful answer: git is not an
+/// optional extra for these tests, it is the thing under test.
 #[cfg(test)]
-pub(crate) fn fixture_repo(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn fixture_repo(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).expect("a scratch directory");
     std::fs::write(dir.join("README.md"), "fixture\n").expect("a file to commit");
     let commit: Vec<&str> = vec![
@@ -1310,14 +1312,10 @@ pub(crate) fn fixture_repo(dir: &Path) -> Option<PathBuf> {
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output();
         match run {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!(
-                    "SKIPPING a lease test: `git` is not installed on this machine, and a \
-                     lease is a git worktree. Install git and run the suite again — this \
-                     test checked nothing."
-                );
-                return None;
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => panic!(
+                "`git` is not installed on this machine, and a lease is a git worktree, \
+                 so this test cannot run. Install git and run the suite again."
+            ),
             Err(e) => panic!("could not run `git {}`: {e}", args.join(" ")),
             Ok(out) if !out.status.success() => panic!(
                 "`git {}` failed in the fixture: {}",
@@ -1327,7 +1325,7 @@ pub(crate) fn fixture_repo(dir: &Path) -> Option<PathBuf> {
             Ok(_) => {}
         }
     }
-    Some(roots::normalise(dir))
+    roots::normalise(dir)
 }
 
 /// A scratch directory of this test's own, and `$JOD_HOME` pointed inside it.
@@ -1380,9 +1378,7 @@ mod tests {
     #[test]
     fn claiming_cuts_a_branch_and_leaves_the_checkout_readable_but_not_writable() {
         let (_env, dir) = scratch("claim");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
 
@@ -1425,9 +1421,7 @@ mod tests {
         use crate::tree::NodeKind;
 
         let (_env, dir) = scratch("forest");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
 
@@ -1482,9 +1476,7 @@ mod tests {
     #[test]
     fn a_sibling_session_is_offered_the_lease_rather_than_a_second_branch() {
         let (_env, dir) = scratch("reuse");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, first) = session_on(&s, &repo);
         let sibling = s
@@ -1519,9 +1511,7 @@ mod tests {
     #[test]
     fn a_claim_inside_a_subdirectory_belongs_to_the_repository_that_contains_it() {
         let (_env, dir) = scratch("subdir");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let inner = repo.join("crates/parser");
         std::fs::create_dir_all(&inner).unwrap();
         let s = store();
@@ -1558,9 +1548,7 @@ mod tests {
     #[test]
     fn releasing_a_clean_merged_lease_removes_the_worktree() {
         let (_env, dir) = scratch("release-clean");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
         let lease = s
@@ -1587,9 +1575,7 @@ mod tests {
     #[test]
     fn releasing_a_dirty_lease_keeps_it_and_says_why() {
         let (_env, dir) = scratch("release-dirty");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
         let lease = s
@@ -1617,9 +1603,7 @@ mod tests {
     #[test]
     fn a_clean_but_unmerged_branch_is_kept_too() {
         let (_env, dir) = scratch("release-unmerged");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
         let lease = s
@@ -1644,9 +1628,7 @@ mod tests {
     #[test]
     fn a_leases_condition_is_read_from_git_at_the_moment_it_is_asked() {
         let (_env, dir) = scratch("condition");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
         let lease = s
@@ -1673,9 +1655,7 @@ mod tests {
     #[test]
     fn removing_a_worktree_by_hand_still_refuses_a_dirty_one() {
         let (_env, dir) = scratch("remove-dirty");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
         let lease = s
@@ -1699,9 +1679,7 @@ mod tests {
     #[test]
     fn a_lease_outlives_the_work_that_cut_it() {
         let (_env, dir) = scratch("orphan");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (work, conversation) = session_on(&s, &repo);
         let lease = s
@@ -1828,9 +1806,7 @@ mod tests {
     #[test]
     fn sharing_a_worktree_across_works_adds_a_sharer_rather_than_a_second_lease() {
         let (_env, dir) = scratch("share");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (lender_work, lender) = session_on(&s, &repo);
         let (borrower_work, borrower) = session_on(&s, &repo);
@@ -1885,9 +1861,7 @@ mod tests {
     #[test]
     fn sharing_with_a_work_that_holds_no_worktree_is_refused_rather_than_cutting_one() {
         let (_env, dir) = scratch("share-nothing");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (idle_work, _idle) = session_on(&s, &repo);
         let (borrower_work, borrower) = session_on(&s, &repo);
@@ -1925,9 +1899,7 @@ mod tests {
     #[test]
     fn a_borrower_whose_task_owns_a_file_somebody_in_the_worktree_owns_is_refused() {
         let (_env, dir) = scratch("share-collision");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (lender_work, lender) = session_on(&s, &repo);
         let (borrower_work, borrower) = session_on(&s, &repo);
@@ -1971,9 +1943,7 @@ mod tests {
     #[test]
     fn a_borrower_whose_task_owns_different_files_shares_the_worktree() {
         let (_env, dir) = scratch("share-disjoint");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (lender_work, lender) = session_on(&s, &repo);
         let (borrower_work, borrower) = session_on(&s, &repo);
@@ -2005,9 +1975,7 @@ mod tests {
     #[test]
     fn a_borrower_that_already_holds_its_own_worktree_here_is_refused() {
         let (_env, dir) = scratch("share-two-roots");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (lender_work, lender) = session_on(&s, &repo);
         let (borrower_work, borrower) = session_on(&s, &repo);
@@ -2084,9 +2052,7 @@ mod tests {
     #[test]
     fn a_lease_with_a_sharer_attached_is_kept_and_the_sharer_is_named() {
         let (_env, dir) = scratch("release-shared");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let (lender_work, lender) = session_on(&s, &repo);
         let (borrower_work, borrower) = session_on(&s, &repo);
@@ -2130,9 +2096,7 @@ mod tests {
     #[test]
     fn a_direct_placement_is_refused_with_every_reason_it_failed_not_only_the_first() {
         let (_env, dir) = scratch("direct-refused");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let project = s
             .add_project(crate::projects::NewProject::at(&repo))
@@ -2182,9 +2146,7 @@ mod tests {
     #[test]
     fn a_direct_placement_is_allowed_on_a_clean_first_iteration_with_no_remote() {
         let (_env, dir) = scratch("direct-allowed");
-        let Some(repo) = fixture_repo(&dir.join("repo")) else {
-            return;
-        };
+        let repo = fixture_repo(&dir.join("repo"));
         let s = store();
         let project = s
             .add_project(crate::projects::NewProject::at(&repo))

@@ -5744,9 +5744,7 @@ mod tests {
             store.set_auto_pr(true).unwrap();
             // Already polled in this window, so the sweep is skipped entirely.
             store.set_setting(POLLED_AT_KEY, "1000000").unwrap();
-            let Some((lease, session)) = crate::prs::a_finished_session(&store) else {
-                return;
-            };
+            let (lease, session) = crate::prs::a_finished_session(&store);
 
             ticker_over(&store)
                 .tick_pull_requests(1_000_001)
@@ -5775,9 +5773,7 @@ mod tests {
             let store = Arc::new(Store::in_memory().unwrap());
             store.set_auto_pr(true).unwrap();
             store.set_setting(POLLED_AT_KEY, "1000000").unwrap();
-            let Some((_, session)) = crate::prs::a_finished_session(&store) else {
-                return;
-            };
+            let (_, session) = crate::prs::a_finished_session(&store);
             let ticker = ticker_over(&store);
 
             ticker.tick_pull_requests(1_000_001).await.unwrap();
@@ -5798,9 +5794,7 @@ mod tests {
         async fn the_tick_asks_nobody_while_auto_pr_is_off() {
             let store = Arc::new(Store::in_memory().unwrap());
             store.set_setting(POLLED_AT_KEY, "1000000").unwrap();
-            let Some((lease, session)) = crate::prs::a_finished_session(&store) else {
-                return;
-            };
+            let (lease, session) = crate::prs::a_finished_session(&store);
 
             ticker_over(&store)
                 .tick_pull_requests(1_000_001)
