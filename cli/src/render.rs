@@ -182,13 +182,18 @@ pub fn print_envelope(envelope: &AgentEnvelope, json: bool, show_thinking: bool)
     }
 }
 
-/// What `jod run` should exit with.
+/// What a command that waited for a run should exit with.
 ///
 /// A harness can fail while still exiting 0 — AGY does exactly that when a tool
 /// is auto-denied in headless mode. Trusting its exit code alone would report
 /// success for work that never happened, so a run flagged as an error always
 /// exits non-zero.
-fn exit_status(is_error: bool, exit_code: Option<i32>) -> i32 {
+///
+/// Shared rather than duplicated: `jod run` and `jod watch` exit by this here,
+/// and `jod main --wait` exits by it in `main.rs`. A second rule for the same
+/// question is how the two came to disagree — `jod main --wait` used to report
+/// every failed run as exit 0.
+pub(crate) fn exit_status(is_error: bool, exit_code: Option<i32>) -> i32 {
     match (is_error, exit_code) {
         (true, Some(code)) if code != 0 => code,
         (true, _) => 1,
