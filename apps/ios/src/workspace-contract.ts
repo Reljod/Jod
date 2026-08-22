@@ -146,6 +146,7 @@ export type FireOutcome =
   | "skipped_overlap"
   | "skipped_misfire"
   | "replaced"
+  | "replace_failed"
   | "spawn_failed"
   | "abandoned"
   | "monitor_quiet"

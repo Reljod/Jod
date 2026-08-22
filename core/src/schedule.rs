@@ -191,6 +191,22 @@ pub enum FireOutcome {
     SkippedMisfire,
     /// The previous run was stopped to make room for this one.
     Replaced,
+    /// The previous run could not be stopped, and this fire went ahead anyway,
+    /// so the two may be running at once.
+    ///
+    /// The one thing a `replace` schedule promises is that only one of its runs
+    /// exists at a time, and this is the row that says the promise was not
+    /// kept. It is a separate outcome rather than a `Replaced` with an unhappy
+    /// detail because `Replaced` is read as a fact — `started_a_run`, the
+    /// history strip and the feed all trust it — and a fire that records a stop
+    /// which did not happen is the one lie this table cannot afford.
+    ///
+    /// Whether the schedule *should* fire when it cannot stop its predecessor
+    /// is a separate question, still open, and this outcome does not answer it:
+    /// the fire goes ahead exactly as it did before. The detail carries the
+    /// reason the stop failed, so the two runs can be told apart from the
+    /// ledger alone.
+    ReplaceFailed,
     /// Jod tried to start a run and could not.
     SpawnFailed,
     /// A claimant took the schedule and then died without recording anything.
@@ -221,6 +237,7 @@ impl FireOutcome {
             FireOutcome::SkippedOverlap => "skipped_overlap",
             FireOutcome::SkippedMisfire => "skipped_misfire",
             FireOutcome::Replaced => "replaced",
+            FireOutcome::ReplaceFailed => "replace_failed",
             FireOutcome::SpawnFailed => "spawn_failed",
             FireOutcome::Abandoned => "abandoned",
             FireOutcome::MonitorQuiet => "monitor_quiet",
@@ -233,6 +250,9 @@ impl FireOutcome {
     /// `MonitorQuiet` is deliberately *not* a run: the point of a monitor is
     /// that nothing was spawned. Anything that counts quiet ticks as runs would
     /// report a watchdog as the busiest schedule on the box.
+    ///
+    /// `ReplaceFailed` is not one either. It records how the stop went, and the
+    /// run that went ahead despite it writes its own `Ran` row a moment later.
     pub fn started_a_run(&self) -> bool {
         matches!(self, FireOutcome::Ran | FireOutcome::Replaced)
     }

@@ -275,6 +275,10 @@ fn fire_mark(outcome: FireOutcome, ended: Option<&str>) -> (&'static str, &'stat
     match outcome {
         FireOutcome::Ran => ("✓", GREEN, "ran"),
         FireOutcome::Replaced => ("↻", YELLOW, "replaced"),
+        // Red, and not the replacement glyph: the schedule promised one run at
+        // a time and there may now be two, which is a person's problem rather
+        // than a routine tick.
+        FireOutcome::ReplaceFailed => ("✗", RED, "replace_failed"),
         FireOutcome::SkippedOverlap => ("○", DIM, "skipped_overlap"),
         FireOutcome::SkippedMisfire => ("○", DIM, "skipped_misfire"),
         FireOutcome::SpawnFailed => ("✗", RED, "spawn_failed"),
@@ -759,6 +763,7 @@ mod tests {
             FireOutcome::SkippedOverlap,
             FireOutcome::SkippedMisfire,
             FireOutcome::SpawnFailed,
+            FireOutcome::ReplaceFailed,
             FireOutcome::Abandoned,
             FireOutcome::MonitorQuiet,
         ] {

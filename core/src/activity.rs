@@ -182,12 +182,18 @@ impl Default for Query {
 
 /// Which fire outcomes are silence that nothing else will report.
 ///
-/// A schedule Jod could not start, and one whose claimant died without recording
-/// anything, are both invisible everywhere else in the product. Every other
-/// outcome — including [`FireOutcome::MonitorQuiet`], which is a *success* — is
-/// the system working and does not want a human.
+/// A schedule Jod could not start, one whose claimant died without recording
+/// anything, and one that could not stop the run it was replacing, are all
+/// invisible everywhere else in the product. The last of those is the quietest
+/// of the three: everything looks normal, and the only symptom is a schedule
+/// running twice over. Every other outcome — including
+/// [`FireOutcome::MonitorQuiet`], which is a *success* — is the system working
+/// and does not want a human.
 pub fn fire_needs_you(outcome: FireOutcome) -> bool {
-    matches!(outcome, FireOutcome::SpawnFailed | FireOutcome::Abandoned)
+    matches!(
+        outcome,
+        FireOutcome::SpawnFailed | FireOutcome::Abandoned | FireOutcome::ReplaceFailed
+    )
 }
 
 /// Which delivery outcomes want a human.
@@ -490,12 +496,16 @@ mod tests {
         assert_eq!(goals.iter().filter(|i| i.needs_you).count(), 1);
     }
 
-    /// The two outcomes nothing else reports. Pinned rather than assumed,
+    /// The outcomes nothing else reports. Pinned rather than assumed,
     /// because this predicate is the entire reason the screen exists.
     #[test]
-    fn only_unstartable_and_abandoned_fires_want_a_human() {
+    fn only_the_fires_nothing_else_reports_want_a_human() {
         assert!(fire_needs_you(FireOutcome::SpawnFailed));
         assert!(fire_needs_you(FireOutcome::Abandoned));
+        assert!(
+            fire_needs_you(FireOutcome::ReplaceFailed),
+            "two runs where the schedule promised one is nobody else's job to report"
+        );
 
         for quiet in [
             FireOutcome::Ran,
