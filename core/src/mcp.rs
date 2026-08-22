@@ -205,20 +205,23 @@ pub fn catalogue() -> Vec<Tool> {
         Tool {
             name: "ask_assistant",
             description:
-                "Hand an instruction to a fresh assistant and come straight back. This is the \
+                "Hand an instruction to the assistant and come straight back. This is the \
                  main chat's one verb: the assistant is the layer that decides whether the \
                  instruction needs a repository, a one-shot agent, or nothing but an answer, \
                  and it does that in a conversation nobody is typing into.\n\n\
-                 Returns as soon as the assistant's run has started, never when it has \
-                 finished, and never with the answer. The answer reaches you later as a card \
-                 on your rail. Do not wait for it and do not poll for it.\n\n\
+                 Returns as soon as the instruction has been taken, never when it has been \
+                 dealt with, and never with the answer. What the assistant makes of it \
+                 reaches you later — a card on your rail when it hands the work on, a message \
+                 that starts a turn of yours when it answers. Do not wait and do not poll.\n\n\
                  Pass Reljod's words through exactly as he said them. Do not summarise them, \
                  do not rewrite them, and do not resolve which project he meant — the project \
                  is already settled before your turn starts, and the assistant reads the same \
                  words with the same context beside them.\n\n\
-                 Every call starts a new assistant. There is no standing one to reach, on \
-                 purpose: a standing assistant would make each instruction wait for the one \
-                 before it.",
+                 There is one assistant and every call reaches it, so it remembers what you \
+                 handed it a minute ago and a follow-up lands somewhere that understands it. \
+                 If it is mid-turn your instruction is queued and delivered at the start of \
+                 its next turn, batched with anything else that arrives before then. Nothing \
+                 waits on your side either way.",
             // The line every tool that starts an agent sits on. The power an
             // unattended run should hold least of is the power to create more
             // unattended runs, and this creates one that can create more.
@@ -2779,11 +2782,17 @@ impl Server {
     /// Which conversation holds the project pointer this caller is really
     /// setting.
     ///
-    /// Its own, for everybody except an assistant. An assistant's conversation
-    /// is opened for one instruction and never read again, so a sticky pointer
-    /// written there is discarded at the end of the turn that wrote it — and
-    /// the pointer's entire purpose is that the *next* instruction inherits it.
-    /// Main is where it has to land, and main is the assistant's parent.
+    /// Its own, for everybody except an assistant. The assistant's pointer is
+    /// not where the next instruction is resolved *from*: `hand_to_assistant`
+    /// reads the main chat's pointer and carries it down on every instruction,
+    /// so a project the assistant worked out and wrote only on its own row
+    /// would be overwritten by main's stale answer on the very next one. Main is
+    /// where it has to land, and main is the assistant's parent.
+    ///
+    /// This was true when the assistant's conversation was thrown away after
+    /// one instruction and it is still true now that the thread stands. What
+    /// changed is the reason, which is worth keeping straight: it is not that
+    /// the assistant forgets, it is that main is the thing being read.
     ///
     /// Falls back to the caller's own conversation when there is no parent,
     /// which is a database that has no main chat yet. Writing it somewhere is
@@ -2800,8 +2809,9 @@ impl Server {
 
     /// Whether the run calling this is an assistant.
     ///
-    /// Read off `conversations.origin`, which [`Store::open_assistant_conversation`]
-    /// wrote when the conversation was created — so, like
+    /// Read off `conversations.origin`, which [`Store::assistant_conversation`]
+    /// wrote when the conversation was created and the carry-forward behind a
+    /// compaction copies onto its continuation — so, like
     /// [`Server::caller_is_main`], it is sender identity the caller cannot argue
     /// with. An unreadable origin means "not an assistant", for the same reason
     /// an unresolvable identity means "not main": failing closed here would
@@ -2816,18 +2826,22 @@ impl Server {
         )
     }
 
-    /// Hand one instruction to a brand new assistant, and return at once.
+    /// Hand one instruction to the assistant, and return at once.
     ///
     /// **The one thing this must never do is wait.** It is called inside main's
     /// turn, and main's turn is the console: every millisecond spent here is a
-    /// millisecond Reljod cannot type into the box. So it starts the run and
-    /// returns its id, and the assistant's answer comes back later as a card.
+    /// millisecond Reljod cannot type into the box. So it hands the instruction
+    /// over and returns, and what the assistant makes of it comes back later as
+    /// a card on the rail or as a message that starts a turn of main's.
     ///
-    /// A fresh conversation on every call, never a standing one. That is A1,
-    /// and it is the whole reason this design removes the block rather than
-    /// moving it: a standing assistant would serialise, so instruction two
-    /// would wait behind instruction one exactly as it waits behind main's turn
-    /// today.
+    /// **One standing assistant, resumed rather than replaced.** This reverses
+    /// A1, which minted a conversation per instruction on the argument that a
+    /// standing one would serialise. The queue in [`crate::delivery`] is the
+    /// answer to that: an instruction arriving while the assistant is mid-turn
+    /// is queued and delivered into its next turn, batched with anything else
+    /// that arrived meanwhile, so this call returns just as fast as it did
+    /// before and the assistant keeps the thread that lets it act on a
+    /// follow-up. See [`crate::orchestrator::hand_to_assistant`].
     ///
     /// **An assistant may not ask for an assistant.** Nothing bounds that
     /// recursion — an assistant that finds handing over easier than deciding
@@ -2836,6 +2850,14 @@ impl Server {
     /// it would start would hold. This is beyond what the spec asks for and it
     /// is cheap; the refusal says which verb to use instead, since a rule that
     /// only says no leaves the model guessing at what yes is.
+    ///
+    /// The guard holds harder now, not less, and it is worth saying why: with
+    /// one standing conversation, `ask_assistant` from the assistant would be a
+    /// conversation asking to resume *itself*, which is a turn queued behind
+    /// the turn that queued it. [`Server::caller_is_assistant`] reads
+    /// `conversations.origin`, and the carry-forward behind a compaction keeps
+    /// that column on the continuation, so a compacted assistant is still
+    /// recognised as one.
     async fn ask_assistant(&self, args: &Value) -> Result<String, ToolError> {
         let instruction = required_str(args, "instruction")?;
         if instruction.trim().is_empty() {
@@ -2881,18 +2903,45 @@ impl Server {
 
         // Written down so main's own transcript shows what it did with the
         // instruction. `link_child` is false: `hand_to_assistant` has already
-        // hung the new conversation under main, and re-parenting it here would
-        // do the same work twice with one more chance of getting it wrong.
-        self.record_handoff("ask_assistant", &assisted.run_id, false);
+        // hung the assistant's conversation under main, and re-parenting it
+        // here would do the same work twice with one more chance of getting it
+        // wrong.
+        //
+        // Only when a run was actually started. An instruction that joined the
+        // queue has no run to name yet, and recording a handoff to a run id
+        // that does not exist would put a dangling reference in main's
+        // transcript for the sake of a line.
+        if let Some(run_id) = &assisted.run_id {
+            self.record_handoff("ask_assistant", run_id, false);
+        }
+
+        // Two different true sentences, because they mean different things to
+        // the chat reading them. "Started" is the ordinary case. "Queued" is the
+        // assistant being interrupted, and main has to be able to say that to
+        // Reljod without implying anything is stuck — nothing is: the queued
+        // instruction is delivered into the assistant's next turn, batched with
+        // whatever else arrived, and this call did not wait for any of it.
+        let note = match assisted.queued {
+            false => {
+                "running. It decides what happens to that instruction and reports back — a \
+                      card on your rail when it hands the work on, a message that starts a turn \
+                      of yours when it answers. Do not wait for it and do not look for it: both \
+                      arrive whether or not anybody is watching."
+            }
+            true => {
+                "taken. The assistant is mid-turn, so this went into its queue and reaches it \
+                     at the start of its next turn, together with anything else that arrives \
+                     before then. Nothing is blocked and nothing is lost — say that it has been \
+                     passed on, and stop."
+            }
+        };
 
         as_json(&json!({
             "run_id": assisted.run_id,
+            "queued": assisted.queued,
             "name": assisted.name,
             "conversation_id": assisted.conversation_id,
-            "note": "running. It decides what happens to that instruction and raises a card on \
-                     your rail when it has. Do not wait for it and do not look for it: a card \
-                     arrives whether or not anybody is watching, and anything it starts \
-                     underneath it answers you by starting a turn of yours.",
+            "note": note,
         }))
     }
 
@@ -3032,13 +3081,13 @@ impl Server {
         // An assistant switches the *main chat's* project, not its own.
         //
         // The whole value of this tool is that the next instruction inherits
-        // what this one resolved. An assistant's conversation is thrown away
-        // when its turn ends, so a switch written there is a switch nobody
-        // keeps: the next instruction opens a fresh assistant, which inherits
-        // from main, which was never told. Main used to hold the routing
-        // decision and therefore held this too; the decision moved down a layer
-        // and the pointer it sets did not, because there is nowhere down here
-        // for a pointer to live.
+        // what this one resolved, and main is where that is read from:
+        // `hand_to_assistant` reads main's pointer and carries it down on every
+        // instruction. A switch written only on the assistant's own row would be
+        // overwritten by main's stale answer on the very next instruction, so
+        // the correction would survive exactly one turn. Main used to hold the
+        // routing decision and therefore held this too; the decision moved down
+        // a layer and the pointer it sets did not.
         let target = self.sticky_conversation(&raiser);
 
         // A switch away from an inferred project is Reljod's correction
@@ -7658,8 +7707,9 @@ mod tests {
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
                 .unwrap();
             let assistant = store
-                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
-                .unwrap();
+                .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap()
+                .0;
             run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
                 .with_access(ToolAccess::Delegate)
@@ -7690,8 +7740,9 @@ mod tests {
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
                 .unwrap();
             let assistant = store
-                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
-                .unwrap();
+                .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap()
+                .0;
             run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
                 .with_access(ToolAccess::Delegate)
@@ -8051,8 +8102,9 @@ mod tests {
         async fn ask_manager_from_an_assistants_run_is_not_refused_for_being_main() {
             let (store, _) = main_chat();
             let assistant = store
-                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
-                .unwrap();
+                .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap()
+                .0;
             run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
                 .with_access(ToolAccess::Delegate)
@@ -8088,8 +8140,9 @@ mod tests {
         async fn an_assistant_may_not_ask_for_another_assistant() {
             let (store, _) = main_chat();
             let assistant = store
-                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
-                .unwrap();
+                .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap()
+                .0;
             run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store))
                 .with_access(ToolAccess::Delegate)
@@ -8133,8 +8186,9 @@ mod tests {
                 .main_conversation(HarnessKind::ClaudeCode, "/tmp")
                 .unwrap();
             let assistant = store
-                .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
-                .unwrap();
+                .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap()
+                .0;
             run_in(&store, &assistant, "run-assistant");
             let server = Server::new(Jod::with_store(store.clone()))
                 .with_access(ToolAccess::Delegate)

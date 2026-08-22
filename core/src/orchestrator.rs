@@ -217,9 +217,13 @@ pub fn orchestrator_preamble() -> &'static str {
      assistant's job as well as an engineer's.\n\n\
      You have Jod's own tools. Use them:\n\
      - `ask_assistant` for everything Reljod asks you, in his own words. It \
-       starts a fresh assistant, returns as soon as that run is going, and the \
-       answer comes back to your rail as a card. This is very nearly the only \
-       verb you have.\n\
+       returns as soon as the assistant has taken the instruction, which is \
+       long before anything has been done about it. There is one assistant and \
+       it remembers, so a follow-up reaches something that heard the first \
+       half; if it is mid-turn your instruction is queued and reaches it at \
+       the start of its next one. What it makes of the instruction comes back \
+       to you either as a card on your rail or as a message that starts a turn \
+       of yours. This is very nearly the only verb you have.\n\
      - `schedule_create` when the instruction says *when*. `goal_create` when it \
        says *keep* or *until*.\n\
      - `recall` and `related` before asking Reljod something he has already told \
@@ -289,51 +293,124 @@ pub fn orchestrator_preamble() -> &'static str {
 /// disagreeing about it.
 pub const ASSISTANT_ORIGIN: &str = "assistant";
 
+/// Where the pointer to the assistant's standing conversation is kept.
+///
+/// In `settings` rather than in a column, for the reason
+/// [`crate::works::MAX_ENGINEERS_SETTING`] is: `settings` is key and value, so
+/// it needs no migration. It is also the honest shape — the fact is "which
+/// conversation is the assistant's", which is one row for the whole database,
+/// not a property of every conversation.
+///
+/// Read by [`Store::assistant_conversation`] and moved by the carry-forward
+/// behind [`Store::continue_as_new`], which is the only other thing that may
+/// change which row it names.
+pub const ASSISTANT_SETTING: &str = "assistant_conversation_id";
+
 /// What handing an instruction to an assistant produced.
 #[derive(Debug, Clone)]
 pub struct Assisted {
-    /// The run now carrying the instruction.
-    pub run_id: String,
-    /// The conversation it runs in — fresh every time, and never resumed.
+    /// The run now carrying the instruction, when one was started.
+    ///
+    /// `None` when the assistant was already mid-turn: the instruction was
+    /// queued for its next turn rather than starting a second session beside
+    /// the first. See [`Assisted::queued`].
+    pub run_id: Option<String>,
+    /// The assistant's conversation — the same one every time.
     pub conversation_id: String,
     /// What the row answers to in the fleet.
     pub name: String,
+    /// Whether the instruction was queued rather than started.
+    ///
+    /// Not a failure and not a delay Reljod pays for: [`hand_to_assistant`]
+    /// returned just as fast either way, and the queued instruction is
+    /// delivered into the assistant's next turn by
+    /// [`crate::ticker::Ticker::tick_deliveries`], batched with anything else
+    /// that arrived meanwhile. It is reported because the caller says something
+    /// different — "it is on it" against "it will read it when this turn ends"
+    /// — and because a distinction nobody can see is one nobody can debug.
+    pub queued: bool,
+    /// Whether the assistant's thread is due for compaction, and why.
+    ///
+    /// The same pair [`Handed::compaction_due`] carries for main, computed by
+    /// the same [`should_compact`] against the same two clocks. A standing
+    /// conversation that never compacts grows until the harness refuses it, and
+    /// the assistant is a standing conversation now.
+    pub compaction_due: Option<(&'static str, usize)>,
 }
 
-/// Give one instruction to a brand new assistant, and come straight back.
+/// Give one instruction to the assistant, and come straight back.
 ///
-/// **Returns as soon as the run has started, and must never learn to wait.**
-/// This is called from inside main's own turn, and main's turn is the thing
-/// blocking the console: everything this function does before it returns is
-/// time Reljod cannot type into the box. There is nothing here to await beyond
-/// the spawn itself.
+/// **Returns as soon as the instruction has been taken, and must never learn to
+/// wait.** This is called from inside main's own turn, and main's turn is the
+/// thing blocking the console: everything this function does before it returns
+/// is time Reljod cannot type into the box. There is nothing here to await
+/// beyond a spawn.
 ///
-/// A fresh conversation per instruction rather than a standing one, which is
-/// the whole difference between an assistant and a manager. A manager is
-/// resumed because the project context it accumulates is its value; an
-/// assistant has no context worth keeping, and a standing one would *serialise*
-/// — the second instruction would queue behind the first, and the block would
-/// have moved down a layer instead of going away.
+/// ## One standing assistant, interrupted rather than duplicated
+///
+/// The assistant used to be created fresh for every instruction and never
+/// resumed. The argument for that was serialisation — a standing assistant
+/// would make instruction two wait behind instruction one, moving the console's
+/// block down a layer instead of removing it — and it is answered here rather
+/// than ignored.
+///
+/// There are two cases and neither of them blocks:
+///
+/// - **The assistant is free.** Its conversation is resumed, the instruction
+///   becomes its next user turn, and the run starts. This is the ordinary case.
+/// - **The assistant is mid-turn.** The instruction is queued in
+///   [`crate::delivery`] as a [`crate::delivery::Kind::Human`] item and
+///   delivered into the assistant's *next* turn by
+///   [`crate::ticker::Ticker::tick_deliveries`], batched with anything else that
+///   arrived meanwhile. That module's own header calls batching a feature: an
+///   agent reading everything that changed in one go answers more coherently
+///   than one woken repeatedly with a line each.
+///
+/// A second run must not simply be spawned beside the first, and that is the
+/// part worth being precise about. Both would resume the *same* harness session
+/// id, so two processes would be extending one transcript at once — which is
+/// not two assistants working in parallel, it is one transcript being written
+/// by two hands.
+///
+/// ## What the standing thread buys
+///
+/// The assistant remembers. It can hand out work off a message that arrived
+/// after its turn began, it knows what Reljod asked for a minute ago without
+/// being told again, and a follow-up that only makes sense against the previous
+/// instruction — "no, the other one" — lands somewhere that understands it.
+/// None of that was possible when the thread was thrown away every turn.
+///
+/// ## Compaction
+///
+/// A standing conversation grows until the harness refuses it, so this checks
+/// the same two clocks main is checked against — see [`should_compact`] — and
+/// reports the verdict on [`Assisted::compaction_due`]. When it is due and
+/// nothing is in flight, the summariser is started here and the instruction is
+/// queued behind it, so the assistant's next turn begins from the summary
+/// rather than from a transcript nobody can afford.
 pub async fn hand_to_assistant(
-    jod: &Jod,
+    jod: &std::sync::Arc<Jod>,
     instruction: &str,
     kind: HarnessKind,
     cwd: PathBuf,
     permission: PermissionPolicy,
 ) -> Result<Assisted> {
     let store = jod.store().ok_or(JodError::StoreRequired)?;
-    let conversation_id = store.open_assistant_conversation(kind, &cwd.display().to_string())?;
+    let (conversation_id, _fresh) =
+        store.assistant_conversation(kind, &cwd.display().to_string())?;
+    let now = chrono::Utc::now().timestamp_millis();
 
-    // **The assistant has to be told which repository this is about, because
-    // its conversation is one second old and knows nothing.**
+    // **The assistant has to be told which repository this is about.**
     //
     // `settle_project` ran before main's turn and wrote the answer onto *main's*
-    // conversation, so a fresh assistant inherits none of it — and the first
-    // thing it is asked to do is call `ask_manager` with a project name. Left
-    // out, it would have to guess from the words alone on every instruction
-    // that named no repository, which is the case dictated speech produces most
-    // often. So the catalog and the settled project travel with the
-    // instruction, exactly as they do into main's own turn.
+    // conversation. The assistant's thread has its own pointer, and the first
+    // thing it is asked to do is call `ask_manager` with a project name; left
+    // out, it would have to guess from the words alone on every instruction that
+    // named no repository, which is the case dictated speech produces most
+    // often. So the catalog and the settled project travel with the instruction,
+    // exactly as they do into main's own turn — and they are re-read on every
+    // instruction rather than once, because main's answer is the thing that
+    // moves between them.
     //
     // Best-effort in every part. A catalog that cannot be read is not a reason
     // to refuse the instruction: routing worked without projects until they
@@ -363,6 +440,80 @@ pub async fn hand_to_assistant(
     }
     let projects = project_context(&catalog, None, inherited.as_ref());
 
+    // Checked before the instruction goes out, not after: the right moment to
+    // summarise is *between* things, and a compaction started mid-turn would
+    // summarise a thread that is still being written to.
+    let live = store.live_window(&conversation_id)?;
+    let chars: usize = live.iter().map(|m| m.text.len()).sum();
+    let compaction_due = should_compact(chars, store.last_human_ms(&conversation_id)?, now)
+        .map(|reason| (reason.as_str(), chars));
+
+    // A turn of this conversation already in flight, which is the one fact that
+    // decides between the two endings below. Read from the runs that wrote into
+    // it, which is how [`crate::delivery`] asks the same question.
+    let busy = store.conversation_is_busy(&conversation_id)?;
+
+    if busy || compaction_due.is_some() {
+        // Queued, not dropped and not waited on. `ref_id` is the instant it
+        // arrived: the sources this queue was built for number themselves — a
+        // card id, a message id — and an instruction handed straight down from
+        // main has no id of its own to carry, so the one thing that certainly
+        // distinguishes it is when it got here.
+        store.enqueue_delivery(
+            &conversation_id,
+            crate::delivery::Kind::Human,
+            &format!("ask-{now}"),
+            instruction,
+        )?;
+        // The same `touch_human` a started turn gets, and for the same reason:
+        // the idle clock is measured from when *Reljod* last said something, and
+        // an instruction he typed is him saying something whether it started a
+        // turn or joined a queue.
+        store.touch_human(&conversation_id, now)?;
+
+        // Only when nothing is in flight. A summariser started on top of a
+        // running turn would summarise a transcript still being written, and one
+        // started on top of another summariser would race it onto the same
+        // thread — which is why the summariser runs *in* the assistant's
+        // conversation rather than detached: being in it is what makes
+        // `conversation_is_busy` say so, and one turn at a time falls out of
+        // that rather than out of a second flag that could disagree with it.
+        let run_id = match compaction_due.is_some() && !busy {
+            true => start_assistant_compaction(jod, &conversation_id, kind, &cwd, permission).await,
+            false => None,
+        };
+        return Ok(Assisted {
+            run_id,
+            conversation_id,
+            name: ASSISTANT_MEMBER.to_string(),
+            queued: true,
+            compaction_due,
+        });
+    }
+
+    // **A thread with no harness session still has its record, and it has to
+    // travel in the prompt.**
+    //
+    // `resume_for` answers `Fresh` in two cases that both matter here: the turn
+    // straight after a compaction, where the summary is the only thing this
+    // conversation contains, and the turn after the assistant's harness changed
+    // under it, where the whole thread is on the other side. Nothing in
+    // `crate::runner` can stream a transcript into a harness — see
+    // `Store::handoff_text`, which exists for exactly this — so a `Fresh` spawn
+    // that says nothing about the past is an assistant that has quietly
+    // forgotten, on a turn nobody would think to check.
+    //
+    // Empty means there is genuinely nothing to carry, which is the very first
+    // instruction, and then there is nothing to say.
+    let resume = store.resume_for(&conversation_id, kind)?;
+    let carried = match resume {
+        Resume::Fresh => store
+            .handoff_text(&conversation_id)
+            .ok()
+            .filter(|text| !text.trim().is_empty()),
+        _ => None,
+    };
+
     let agent = jod
         .spawn_agent_in(
             SpawnRequest {
@@ -376,11 +527,17 @@ pub async fn hand_to_assistant(
                 // paying frontier prices for it is the thing this fixes.
                 role: Some(Role::Assistant),
                 prompt: instruction.to_string(),
-                // The standing brief first, then the state it applies to — the
-                // same order `hand_to_orchestrator` uses, and for the same
-                // reason: a model reading a catalog before it knows what it is
-                // reading it for is reading it twice.
-                system: Some(format!("{}\n\n{projects}", assistant_preamble())),
+                // The standing brief first, then the state it applies to,
+                // then whatever history is being carried — the same order
+                // `hand_to_orchestrator` uses, and for the same reason: a model
+                // reading a catalog before it knows what it is reading it for is
+                // reading it twice.
+                system: Some(match &carried {
+                    Some(record) => {
+                        format!("{}\n\n{projects}\n\n{record}", assistant_preamble())
+                    }
+                    None => format!("{}\n\n{projects}", assistant_preamble()),
+                }),
                 cwd,
                 model: None,
                 // The same floor main and a manager run under, for the same
@@ -388,8 +545,13 @@ pub async fn hand_to_assistant(
                 // that are its entire job, so it would look like it was
                 // working and be inert.
                 permission: at_least_acting(permission),
-                // Never resumed, so never anything to resume. A1.
-                resume: Resume::Fresh,
+                // Resumed, exactly as a manager is. This is the standing thread
+                // whose memory is the point; starting fresh here would throw
+                // away everything the last instruction established and leave the
+                // assistant answering a follow-up it has never heard the
+                // beginning of. When there is no session to resume, the record
+                // above is what stands in for one.
+                resume,
                 // It starts agents and it talks to managers, and that is all.
                 // Not `Orchestrate`: arming a schedule or a goal spends money
                 // at 2am with nobody watching, and that power stays with main.
@@ -403,13 +565,174 @@ pub async fn hand_to_assistant(
     // The instruction as this conversation's user turn, so the transcript reads
     // as a conversation rather than as a system prompt with answers under it.
     store.append_prompt(&conversation_id, &agent.id, instruction)?;
+    store.touch_human(&conversation_id, now)?;
+
+    // **The return leg, which the assistant did not have.**
+    //
+    // Every bus tool refuses a run that belongs to no addressing scope, and the
+    // assistant's conversation belongs to no work — so `send_message` and
+    // `reply` answered `run … is not a member of any team or work`, and the
+    // assistant's only route home was a card. A card is a row on Reljod's rail;
+    // it does not start a turn of main's, so anything the assistant merely
+    // *answered* — the "what time is it in Manila" branch of its brief — landed
+    // in a transcript nobody opens and reached him not at all.
+    //
+    // This is the same channel `delegate` opens for the run it starts, and for
+    // the same reason: a two-party team holding this run and `main`, so that
+    // what the assistant says arrives as a turn of main's rather than as a row
+    // somebody has to go looking for.
+    //
+    // Best-effort. A channel that could not be opened is a reason to say so and
+    // carry on — the run is already going, and a card still reaches the rail.
+    if let Err(e) = store.open_return_channel(&agent.id, ASSISTANT_MEMBER, kind) {
+        eprintln!("[jod] the assistant has no way to answer main: {e}");
+    }
 
     Ok(Assisted {
-        run_id: agent.id,
+        run_id: Some(agent.id),
         conversation_id,
         name: agent.name,
+        queued: false,
+        compaction_due,
     })
 }
+
+/// What the assistant is called on the bus when it answers main.
+///
+/// A fixed name rather than the run's, unlike `delegate`'s one-shots. Those are
+/// named after the errand because that is all they are; this is one standing
+/// layer, and main reading `assistant` on its roster is reading the thing it
+/// handed the instruction to. `main` and `reljod` are the two reserved names and
+/// this is deliberately neither.
+pub const ASSISTANT_MEMBER: &str = "assistant";
+
+/// Start the summariser that compacts the assistant's thread, and arrange for
+/// the compaction to be finished when it answers.
+///
+/// Detached from the caller in the way [`start_titler`] is: the spawn is not
+/// awaited to completion, so main's turn is not held up by a model call, and the
+/// whole thing returns an `Option` because a compaction that could not be
+/// started is a thread that carries on exactly as it was. The instruction that
+/// triggered it has already been queued by then, so nothing is lost either way.
+///
+/// **It runs inside the assistant's own conversation, and that is a departure
+/// from how the console does it.** The console detaches its summariser so that
+/// "summarise this" never enters the transcript being summarised. Here the run
+/// has to be visible to [`Store::conversation_is_busy`], because that is what
+/// stops a second summariser — or an ordinary turn — starting on top of this
+/// one, and nobody is sitting in front of this thread holding a `busy` flag the
+/// way the console does. The cost is one housekeeping turn in the transcript,
+/// and [`Store::continue_as_new`] compacts it away along with everything else a
+/// moment later.
+///
+/// The summary itself comes from the run, because Jod has no model client — the
+/// same rule the rest of [`crate::conversation`]'s compaction is under.
+async fn start_assistant_compaction(
+    jod: &std::sync::Arc<Jod>,
+    conversation_id: &str,
+    kind: HarnessKind,
+    cwd: &std::path::Path,
+    permission: PermissionPolicy,
+) -> Option<String> {
+    let store = jod.store()?;
+    // Subscribed before the spawn, or a summariser that answers quickly finishes
+    // before anything is listening and the thread is never compacted.
+    let events = jod.subscribe();
+    // With a session, it summarises what it is already holding. Without one —
+    // the turn straight after a previous compaction — it has never seen this
+    // thread, so the record has to travel in the prompt instead.
+    let resume = store.resume_for(conversation_id, kind).ok()?;
+    let material = match resume {
+        Resume::Fresh => store
+            .handoff_text(conversation_id)
+            .ok()
+            .filter(|text| !text.trim().is_empty()),
+        _ => None,
+    };
+    let prompt = match &material {
+        Some(record) => format!("{SUMMARISE_RECORD}\n\n{record}"),
+        None => SUMMARISE.to_string(),
+    };
+    let agent = jod
+        .spawn_agent_in(
+            SpawnRequest {
+                name: "assistant compaction".to_string(),
+                harness: kind,
+                prompt,
+                // Nothing to brief. It is summarising a transcript, not being
+                // the assistant, and handing it the assistant's standing brief
+                // would invite it to act on what it is reading.
+                system: None,
+                cwd: cwd.to_path_buf(),
+                model: None,
+                permission,
+                resume: match material {
+                    Some(_) => Resume::Fresh,
+                    None => resume,
+                },
+                // No Jod verbs. This run answers a question; it does not act.
+                tools: None,
+                // Housekeeping, which is the whole reason that row exists: one
+                // short summary of one transcript should not pay frontier
+                // prices. The same tag `start_titler` uses.
+                role: Some(Role::Housekeeping),
+                ..SpawnRequest::default()
+            },
+            RunConversation::Existing(conversation_id.to_string()),
+        )
+        .await
+        .ok()?;
+
+    let jod = jod.clone();
+    let conversation_id = conversation_id.to_string();
+    let run_id = agent.id.clone();
+    tokio::spawn(async move {
+        let said = titler_output(events, &run_id).await;
+        let Some(store) = jod.store() else {
+            return;
+        };
+        // An empty answer is left alone rather than papered over.
+        // `continue_as_new` refuses an empty summary precisely so that a thread
+        // cannot be compacted into nothing, and inventing a placeholder here
+        // would walk straight through that guard. The thread carries on as it
+        // was, still over the threshold, and the next instruction tries again.
+        if said.trim().is_empty() {
+            eprintln!("[jod] the assistant's summariser said nothing, so nothing was compacted");
+            return;
+        }
+        match store.continue_as_new(
+            &conversation_id,
+            said.trim(),
+            crate::conversation::COMPACTED,
+        ) {
+            Ok(carried) => eprintln!(
+                "[jod] compacted the assistant: {} chars became {}",
+                carried.compaction.before_chars, carried.compaction.after_chars
+            ),
+            Err(e) => eprintln!("[jod] could not compact the assistant: {e}"),
+        }
+    });
+    Some(agent.id)
+}
+
+/// What a summariser is asked for when it is already holding the thread.
+///
+/// A copy of the console's wording rather than a call into it: `jod-core` cannot
+/// depend on the CLI, and this is the only place in core that has to ask for a
+/// summary. If a third caller appears, this and [`SUMMARISE_RECORD`] belong
+/// beside [`crate::conversation::COMPACTED`], which is already the one place
+/// both sides agree on what a compaction is called.
+const SUMMARISE: &str = "Summarise this conversation so that an agent who has \
+     not seen any of it can carry it on. Cover what was asked, what was decided \
+     and why, what was handed to whom, and anything still open. Names, ids and \
+     numbers exactly as they were said. Prose, no preamble, no offer to help.";
+
+/// The same request, for a summariser that has to be handed the record.
+const SUMMARISE_RECORD: &str = "Below is the record of a conversation. \
+     Summarise it so that an agent who has not seen any of it can carry it on. \
+     Cover what was asked, what was decided and why, what was handed to whom, \
+     and anything still open. Names, ids and numbers exactly as they were said. \
+     Prose, no preamble, no offer to help.";
 
 /// The framing the assistant gets, and the routing decision that used to be
 /// main's.
@@ -419,23 +742,49 @@ pub async fn hand_to_assistant(
 /// choose between, moved into a conversation nobody is typing into, so that
 /// thinking about the choice costs Reljod nothing.
 ///
-/// An assistant is created fresh for one instruction and never resumed, which
-/// is the opposite of a manager and is deliberate. A standing assistant would
-/// serialise: instruction two would wait behind instruction one, and the block
-/// this whole design removes would have moved down a layer rather than gone
-/// away. So the brief tells it that everything it needs is in front of it,
-/// because there is no transcript for it to remember anything in.
+/// **The assistant is one standing thread, and this brief has to say so.** It
+/// used to be created fresh for one instruction and never resumed, and the
+/// brief told it as much — "there is no thread here to remember". That is no
+/// longer true, and a standing conversation still being told it is disposable
+/// is one that will not use the transcript in front of it.
 ///
-/// It reports by raising a card, for the reason [`manager_preamble`] does:
-/// cards cascade up `parent_conversation_id`, an assistant's parent is main,
-/// and Reljod is looking at main rather than at this transcript.
+/// The old design's argument was serialisation, and [`hand_to_assistant`]
+/// answers it: an instruction arriving mid-turn is queued and delivered into the
+/// next turn rather than blocked on. So the brief now has to cover the case that
+/// argument was avoiding — a turn that opens with something that arrived after
+/// the turn before it started — and say plainly that the assistant may hand out
+/// work from it.
+///
+/// It reports two ways, and both are here because they answer different
+/// questions. A **card** is a row on Reljod's rail: it cascades up
+/// `parent_conversation_id`, the assistant's parent is main, and it is how a
+/// decision reaches him without interrupting anything. A **message to `main`**
+/// starts a turn of the main chat, which is what an *answer* needs — an answer
+/// left on a rail is an answer he has to go and find. The assistant had no
+/// second route at all until `hand_to_assistant` opened one, so everything it
+/// merely answered landed in this transcript and reached nobody.
 pub fn assistant_preamble() -> &'static str {
-    "You are Jod's assistant. Reljod's main chat took one instruction from him \
-     and handed it to you exactly as he said it, and what happens to it is \
-     your decision.\n\n\
-     You were started for this one instruction and you will not be resumed, so \
-     there is no thread here to remember. Everything you need is in front of \
-     you or in `list_agents`.\n\n\
+    "You are Jod's assistant. Reljod's main chat takes what he says and hands \
+     it to you exactly as he said it, and what happens to it is your \
+     decision.\n\n\
+     **You are one standing conversation, not a fresh one per instruction.** \
+     This transcript is yours and it carries on: what you were asked ten \
+     minutes ago, what you handed to whom, and what came back is all above \
+     you, and you are expected to use it. A follow-up that only makes sense \
+     against an earlier instruction — \"no, the other one\", \"that one, but \
+     for the web repo\" — is answered from the thread rather than by asking \
+     him to say it again.\n\n\
+     **You get interrupted, and that is the normal way things reach you.** \
+     Reljod does not wait for your turn to end before saying the next thing. \
+     Anything that arrives while you are working is held and handed to you at \
+     the start of your next turn, several at once if several arrived. So when \
+     a turn opens with messages, read them first and read all of them: they \
+     are new instructions, they may change or cancel what you were about to \
+     do, and the newest one wins where two disagree. **You may hand out work \
+     from them exactly as you would from anything else** — `ask_manager`, \
+     `delegate` and `continue_agent` are all still yours on a turn that began \
+     with an interruption. Nothing about arriving late makes an instruction \
+     smaller.\n\n\
      **Decide by the task, in this order.**\n\n\
      **Answer directly** when the instruction needs no repository, no work \
      that outlasts this turn, and nothing you would have to go away and \
@@ -501,12 +850,21 @@ pub fn assistant_preamble() -> &'static str {
      `project_switch` the moment you work out this is a different repository \
      from the one you were handed — including when you had to reason to get \
      there. It sets the main chat's own pointer rather than yours, because \
-     yours is thrown away when this turn ends, so what you resolve here is \
-     what the next thing Reljod says will inherit.\n\n\
-     **Finish by raising a card.** `record_decision` with what you did and who \
-     has it now, in one or two sentences. Reljod is looking at the main chat, \
-     not at this transcript, and a card is what reaches him from here. Then \
-     say the same one or two sentences as your reply."
+     main is what the next instruction is resolved against, so what you settle \
+     here is what the next thing Reljod says will inherit.\n\n\
+     **Finish by reporting, and there are two ways to do it.** Reljod is \
+     looking at the main chat, not at this transcript, so a turn that ends \
+     only here has reached nobody.\n\
+     - **Answered it yourself?** `send_message` to `main`, with the answer in \
+       it. That starts a turn of the main chat, so what you found out arrives \
+       where he is already looking. A card is the wrong shape for an answer — \
+       it is a row he has to notice and open, and he asked a question.\n\
+     - **Handed it on?** `record_decision` with what you did and who has it \
+       now, in one or two sentences. A card cascades onto his rail and \
+       interrupts nothing, which is right for something that is now somebody \
+       else's to finish.\n\n\
+     `main` is on your roster and it is the address the main chat answers to. \
+     Then say the same one or two sentences as your reply."
 }
 
 /// What handing an instruction to a manager produced.
@@ -2312,26 +2670,64 @@ impl Store {
         Ok((created.id, true))
     }
 
-    /// Open the conversation one assistant runs in.
+    /// The one conversation the assistant runs in, created the first time it is
+    /// asked for. Says whether it had to create it.
     ///
-    /// **The opposite of [`Store::manager_conversation`] in every respect that
-    /// matters.** A manager is get-or-create because its value is what it
-    /// remembers about one repository; an assistant is create-only because a
-    /// standing one would make every instruction wait for the one before it.
-    /// So there is no lookup here and there is deliberately no way to ask for
-    /// "the assistant" — there are as many as there are instructions in flight.
+    /// **Get-or-create, the same shape as [`Store::manager_conversation`], and
+    /// this reverses what it used to be.** The assistant was created fresh for
+    /// every instruction and never resumed, on the argument that a standing one
+    /// would *serialise* — instruction two waiting behind instruction one, the
+    /// console's block moved down a layer rather than removed.
     ///
-    /// Three things are set on it and they are the three that make it scratch:
-    /// `origin` says what it is, `ephemeral` puts it in the lane that tidies
-    /// itself away, and `parent_conversation_id` hangs it under main so the
-    /// card it raises cascades onto Reljod's rail. It is not pinned — that flag
-    /// belongs to exactly one conversation, and giving it to a second would
-    /// make which one counts as main depend on the order SQLite returns rows.
-    pub fn open_assistant_conversation(
+    /// That argument was answered rather than ignored. A second instruction
+    /// arriving while the assistant is mid-turn is queued in
+    /// [`crate::delivery`] and delivered into its **next** turn, batched with
+    /// anything else that arrived meanwhile, exactly as a card answer is. So
+    /// nothing waits: [`hand_to_assistant`] still returns as soon as the
+    /// instruction has been taken, and the assistant reads what came in when it
+    /// is next able to act on it. What the standing thread buys is the thing a
+    /// per-instruction one could never have — the assistant remembers what
+    /// Reljod asked for a minute ago, and it can hand out work off a message
+    /// that arrived after its turn had already begun.
+    ///
+    /// **It is found through `settings`, not through a flag on the row.** Main
+    /// is found through `pinned = 1` and a manager through
+    /// `projects.manager_conversation_id`; the assistant belongs to no project
+    /// and must never take the pin, so the pointer needs a home of its own.
+    /// `settings` is key and value, so it needs no migration, and the
+    /// carry-forward behind [`Store::continue_as_new`] moves it when a
+    /// compaction opens the thread's continuation — otherwise the next
+    /// instruction would resume the thread that was just compacted away.
+    ///
+    /// Two things are set on the row and they are the two that make it the
+    /// assistant: `origin` says what it is, which is what the recursion guard in
+    /// [`crate::mcp`] reads, and `parent_conversation_id` hangs it under main so
+    /// the cards it raises cascade onto Reljod's rail.
+    ///
+    /// **It is deliberately not `ephemeral` any more.** That flag puts a
+    /// conversation in the scratch lane, and every query in that lane archives a
+    /// conversation once its latest run completes and deletes it once it has
+    /// been archived long enough — which is precisely what must not happen to a
+    /// standing thread. A conversation swept away between two instructions is a
+    /// conversation that forgets, and the whole point of this change is that it
+    /// does not. The scratch lane still owns what the assistant *starts*: a
+    /// `delegate` opens its own ephemeral conversation, and that is unchanged.
+    pub fn assistant_conversation(
         &self,
         harness: crate::harness::HarnessKind,
         cwd: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
+        // Checked against `conversations` rather than trusted, for the reason
+        // `manager_conversation` checks its own pointer: a settings row is not a
+        // foreign key, so a database restored from a partial backup — or one
+        // whose assistant thread was deleted by hand — would name a transcript
+        // that is not there, and resuming it would fail every turn.
+        if let Some(existing) = self.setting(ASSISTANT_SETTING)? {
+            if self.conversation(&existing)?.is_some() {
+                return Ok((existing, false));
+            }
+        }
+
         let created = self.new_conversation(harness, cwd, None)?;
         let main = self.pinned_conversation()?;
         self.write(|tx| {
@@ -2351,8 +2747,8 @@ impl Store {
             }
             Ok(())
         })?;
-        self.mark_ephemeral(&created.id)?;
-        Ok(created.id)
+        self.set_setting(ASSISTANT_SETTING, &created.id)?;
+        Ok((created.id, true))
     }
 
     /// What kind of thing opened this conversation.
@@ -4823,27 +5219,53 @@ mod tests {
         assert!(!ids.contains(&child), "a workless conversation reached the fleet tree");
     }
 
-    // ---- the assistant's conversation ----
+    // ---- the assistant's standing conversation ----
 
-    /// Check 1. The three things that make an assistant's conversation what it
-    /// is, asserted on the row rather than on the code that writes it.
+    /// Mark a run of `conversation` as still going, so
+    /// `Store::conversation_is_busy` says so.
     ///
-    /// `origin` is how the recursion guard and the scratch sweep recognise one,
-    /// `ephemeral` is what puts it in the lane that tidies itself away, and the
-    /// parent is what makes the card it raises cascade onto Reljod's rail.
+    /// Both halves are needed and neither is enough: the busy check joins
+    /// `messages` to `runs`, so a run row with no message is invisible to it and
+    /// a message whose run has no row is too.
+    fn running_run(store: &Store, conversation: &str, run_id: &str) {
+        store
+            .append_prompt(conversation, run_id, "the turn before")
+            .unwrap();
+        store
+            .save_run(&crate::store::StoredRun {
+                id: run_id.into(),
+                name: "assistant".into(),
+                harness: "claude_code".into(),
+                status: "running".into(),
+                cwd: "/tmp".into(),
+                session_id: Some(format!("session-{run_id}")),
+                pid: None,
+                pgid: None,
+                created_at_ms: 0,
+                summary: serde_json::Value::Null,
+            })
+            .unwrap();
+    }
+
+    /// The two things that make the assistant's conversation what it is,
+    /// asserted on the row rather than on the code that writes it.
+    ///
+    /// `origin` is how the recursion guard in `crate::mcp` recognises one, and
+    /// the parent is what makes the card it raises cascade onto Reljod's rail.
     /// Miss the parent and the assistant works perfectly and reports to nobody,
     /// which is the failure `manager_conversation` already had once.
     #[test]
-    fn an_assistants_conversation_is_scratch_and_hangs_under_main() {
+    fn the_assistants_conversation_hangs_under_main_and_says_what_it_is() {
         let store = Store::in_memory().unwrap();
         let main = store
             .main_conversation(HarnessKind::ClaudeCode, "/tmp")
             .unwrap();
 
-        let assistant = store
-            .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+        let (assistant, fresh) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
             .unwrap();
 
+        assert!(fresh, "the first ask has to create it");
         assert_eq!(
             store.conversation_origin(&assistant).unwrap().as_deref(),
             Some(ASSISTANT_ORIGIN)
@@ -4852,20 +5274,6 @@ mod tests {
             store.parent_conversation(&assistant).unwrap().as_deref(),
             Some(main.as_str()),
             "an assistant that hangs under nothing answers onto a rail nobody reads"
-        );
-        // Ephemeral, read the way everything downstream reads it: every one of
-        // the scratch queries starts at `ephemeral = 1`, so a conversation that
-        // is not marked is invisible to the whole lane rather than merely
-        // untidy — it would never archive and never be swept.
-        store.append_prompt(&assistant, "run-assistant", "do it").unwrap();
-        assert!(
-            store
-                .scratch_runs()
-                .unwrap()
-                .values()
-                .any(|c| *c == assistant),
-            "the assistant's conversation is not marked ephemeral, so nothing in \
-             the scratch lane can see it"
         );
         assert_ne!(
             store.pinned_conversation().unwrap().as_deref(),
@@ -4876,95 +5284,504 @@ mod tests {
         );
     }
 
-    /// Check 2. Two calls, two conversations.
+    /// One assistant, however many times it is asked for.
     ///
-    /// The regression guard on "fresh every time", and the one that matters
-    /// most in this epic. A get-or-create here — the shape `main_conversation`
-    /// and `manager_conversation` both use, and the obvious thing to copy —
-    /// would return the same id twice, and then instruction two would queue
-    /// behind instruction one. The block would have moved down a layer rather
-    /// than gone away, and it would be harder to see there than it is in the
-    /// console.
+    /// This is the reversal, and the assertion that says so. It used to open a
+    /// conversation per instruction, so the assistant forgot everything between
+    /// one instruction and the next; the second call now finds the first one's
+    /// thread. What stops that serialising is the queue, which the interrupt
+    /// test below covers.
     #[test]
-    fn every_ask_for_an_assistant_opens_a_new_conversation() {
+    fn every_ask_for_the_assistant_reaches_the_same_conversation() {
         let store = Store::in_memory().unwrap();
         store
             .main_conversation(HarnessKind::ClaudeCode, "/tmp")
             .unwrap();
 
-        let first = store
-            .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+        let (first, first_fresh) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
             .unwrap();
-        let second = store
-            .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+        let (second, second_fresh) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
             .unwrap();
 
-        assert_ne!(
+        assert_eq!(
             first, second,
-            "a standing assistant serialises every instruction behind the one before it"
+            "an assistant that is minted per instruction cannot remember the \
+             instruction before it, which is the whole point of standing"
+        );
+        assert!(
+            first_fresh && !second_fresh,
+            "only the first ask creates one"
         );
     }
 
-    /// An assistant opened before there is a main chat keeps a null parent
-    /// rather than pointing at nothing.
+    /// The standing thread is not in the scratch lane, so nothing sweeps it
+    /// away between two instructions.
     ///
-    /// The same rule `manager_conversation` follows. It is reachable on a fresh
-    /// store, and a dangling parent id is worse than an absent one: the cascade
-    /// walks it and finds a conversation that is not there.
+    /// It used to be marked `ephemeral`, which was right when it was one
+    /// conversation per instruction. Every query in that lane starts at
+    /// `ephemeral = 1`: `scratch_ready_to_archive` hides the row once its
+    /// latest run completes, and `scratch_ready_to_delete` removes it — and its
+    /// messages, and its cards — once it has been hidden long enough. A
+    /// standing conversation that gets tidied away is a standing conversation
+    /// that forgets, on a timer, with nothing saying it happened.
     #[test]
-    fn an_assistant_opened_before_the_main_chat_exists_has_no_parent() {
+    fn the_standing_assistant_is_never_swept_away_as_scratch() {
         let store = Store::in_memory().unwrap();
-        let assistant = store
-            .open_assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+        store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
             .unwrap();
-        assert_eq!(store.parent_conversation(&assistant).unwrap(), None);
+        let (assistant, _) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        // A finished turn, which is the state the archive sweep looks for.
+        store.append_prompt(&assistant, "run-1", "do it").unwrap();
+        store
+            .save_run(&crate::store::StoredRun {
+                id: "run-1".into(),
+                name: "assistant".into(),
+                harness: "claude_code".into(),
+                status: "completed".into(),
+                cwd: "/tmp".into(),
+                session_id: Some("session-1".into()),
+                pid: None,
+                pgid: None,
+                created_at_ms: 0,
+                summary: serde_json::Value::Null,
+            })
+            .unwrap();
+
+        assert!(
+            !store.is_ephemeral(&assistant).unwrap(),
+            "the assistant is in the scratch lane, so the sweeps will archive \
+             and then delete the thread that is supposed to stand"
+        );
+        assert!(
+            !store
+                .scratch_ready_to_archive()
+                .unwrap()
+                .contains(&assistant),
+            "the archive sweep has the assistant's standing thread on its list"
+        );
+        assert!(
+            !store
+                .scratch_runs()
+                .unwrap()
+                .values()
+                .any(|c| *c == assistant),
+            "the assistant's runs read as scratch, so `list_agents` and the \
+             loose pane treat the standing layer as an errand"
+        );
     }
 
-    /// Check 3. `hand_to_assistant` returns when the run has *started*, and
-    /// there is nothing in it that could wait for the run to say anything.
+    /// An instruction arriving while the assistant is mid-turn is queued, not
+    /// blocked on and not dropped.
     ///
-    /// **Asserted against the source, because there is no type that holds it.**
-    /// The property is the absence of an await, and a test that proved it by
-    /// running would have to start a real harness process and then prove a
-    /// negative about how long it did not take. What can be checked exactly is
-    /// that the function never reaches for the two mechanisms in this file that
-    /// wait for a run's output — subscribing to the event bus, and the loop
-    /// that drains it — which is how `start_titler` deliberately does not wait
-    /// either.
+    /// **This is the objection the old design was built around, and the
+    /// answer to it.** A standing assistant was rejected because instruction
+    /// two would wait behind instruction one; it does not wait, it joins the
+    /// delivery queue and reaches the assistant at the start of its next turn,
+    /// batched with anything else that arrived meanwhile. `hand_to_assistant`
+    /// returns without spawning anything, which is what keeps main's turn — and
+    /// therefore the console — free.
+    #[tokio::test]
+    async fn an_instruction_to_a_busy_assistant_is_queued_for_its_next_turn() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let (assistant, _) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        running_run(&store, &assistant, "run-1");
+        let jod = Jod::with_store(store.clone());
+
+        let taken = hand_to_assistant(
+            &jod,
+            "actually, do the other one first",
+            HarnessKind::ClaudeCode,
+            PathBuf::from("/tmp"),
+            PermissionPolicy::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            taken.queued,
+            "a busy assistant must not be spawned on top of"
+        );
+        assert_eq!(
+            taken.run_id, None,
+            "nothing was started, so there is no run to name — a second run here \
+             would be two processes extending one harness session"
+        );
+        assert_eq!(taken.conversation_id, assistant);
+
+        let waiting = store.pending_for(&assistant).unwrap();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "the instruction was dropped rather than queued"
+        );
+        assert_eq!(waiting[0].kind, crate::delivery::Kind::Human);
+        assert_eq!(waiting[0].body, "actually, do the other one first");
+
+        // And a second one joins it rather than replacing it or starting
+        // anything. Batching is the intended behaviour: the assistant reads both
+        // in one turn.
+        hand_to_assistant(
+            &jod,
+            "and check the CI while you are there",
+            HarnessKind::ClaudeCode,
+            PathBuf::from("/tmp"),
+            PermissionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let waiting = store.pending_for(&assistant).unwrap();
+        assert_eq!(
+            waiting.len(),
+            2,
+            "the second instruction overwrote the first"
+        );
+        let injection = store.plan_injection(&assistant, false).unwrap().unwrap();
+        assert!(
+            injection.prompt.contains("do the other one first")
+                && injection.prompt.contains("check the CI"),
+            "both queued instructions have to reach the same turn: {}",
+            injection.prompt
+        );
+    }
+
+    /// The assistant's thread is compacted on the same two clocks main's is.
     ///
-    /// This is the property the whole epic exists for. Main calls this inside
-    /// its own turn, and its turn is the console: an await added here would put
-    /// a model call back in front of every instruction Reljod types, and
-    /// nothing else in the codebase would notice.
+    /// A standing conversation that never compacts grows until the harness
+    /// refuses it, and nothing is watching this one the way the console watches
+    /// main. `hand_to_assistant` therefore computes the verdict itself and says
+    /// so on what it returns, and the instruction that found the thread over the
+    /// threshold is queued behind the summariser rather than starting a turn
+    /// against a transcript that is about to be replaced.
+    #[tokio::test]
+    async fn a_full_assistant_thread_is_due_for_compaction_and_the_instruction_waits() {
+        let store = std::sync::Arc::new(Store::in_memory().unwrap());
+        store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let (assistant, _) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        // Over `COMPACT_CHARS`, which is the size trigger.
+        let long = "x".repeat(COMPACT_CHARS + 1);
+        store.append_prompt(&assistant, "run-1", &long).unwrap();
+        let jod = Jod::with_store(store.clone());
+
+        let taken = hand_to_assistant(
+            &jod,
+            "one more thing",
+            HarnessKind::ClaudeCode,
+            PathBuf::from("/tmp"),
+            PermissionPolicy::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            taken.compaction_due.map(|(why, _)| why),
+            Some("size"),
+            "nothing measures the assistant's context, so it grows until the \
+             harness refuses the turn"
+        );
+        assert!(
+            taken.queued,
+            "a turn started against a transcript about to be summarised away is \
+             a turn spent on a context that is being replaced"
+        );
+        assert_eq!(
+            store.pending_for(&assistant).unwrap().len(),
+            1,
+            "the instruction has to survive the compaction it triggered"
+        );
+    }
+
+    /// Everything the assistant needs survives its own compaction.
+    ///
+    /// Compaction opens a *fresh* conversation seeded with a summary, and four
+    /// things about the old row have to move onto it or the assistant carries on
+    /// looking fine and reaching nobody:
+    ///
+    /// - the **pointer**, or the next instruction resumes the thread that was
+    ///   just compacted away and the compaction is silently undone;
+    /// - the **parent edge**, or its cards stop cascading onto Reljod's rail —
+    ///   the exact failure `a_managers_card_still_reaches_main_after_it_compacts`
+    ///   records one level up;
+    /// - the **origin**, or the run no longer counts as an assistant and the
+    ///   guard that stops it starting another one stops applying;
+    /// - the **queue**, or an instruction handed to it a moment before is
+    ///   injected into a conversation nothing resumes any more.
     #[test]
-    fn handing_an_instruction_to_an_assistant_never_waits_for_the_run() {
+    fn compacting_the_assistant_carries_its_whole_identity_forward() {
+        use crate::cards::{NewCard, Query};
+
+        let store = Store::in_memory().unwrap();
+        let main = store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        let (assistant, _) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        store
+            .append_prompt(&assistant, "run-1", "what is running")
+            .unwrap();
+        store
+            .enqueue_delivery(
+                &assistant,
+                crate::delivery::Kind::Human,
+                "ask-1",
+                "and the other thing",
+            )
+            .unwrap();
+        store
+            .raise_card(NewCard {
+                conversation_id: assistant.clone(),
+                title: "handed the README to tetris".into(),
+                ..NewCard::default()
+            })
+            .unwrap();
+
+        store.continue_as_new(&assistant, "so far", "full").unwrap();
+
+        let (now, fresh) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        assert_ne!(now, assistant, "the compaction did not open a new thread");
+        assert!(
+            !fresh,
+            "the pointer did not move, so the next instruction opened a third \
+             assistant instead of continuing the compacted one"
+        );
+        assert_eq!(
+            store.conversation_origin(&now).unwrap().as_deref(),
+            Some(ASSISTANT_ORIGIN),
+            "the continuation does not read as an assistant, so the recursion \
+             guard no longer applies to it"
+        );
+        assert_eq!(
+            store.parent_conversation(&now).unwrap().as_deref(),
+            Some(main.as_str()),
+            "the continuation reports to nobody"
+        );
+        let rail: Vec<String> = store
+            .cards(&Query {
+                subtree_of: Some(main.clone()),
+                ..Query::default()
+            })
+            .unwrap()
+            .iter()
+            .map(|c| c.title.clone())
+            .collect();
+        assert!(
+            rail.contains(&"handed the README to tetris".to_string()),
+            "the assistant's open card fell off Reljod's rail: {rail:?}"
+        );
+        let waiting = store.pending_for(&now).unwrap();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "the queued instruction stayed on the thread that was compacted away"
+        );
+        assert_eq!(waiting[0].body, "and the other thing");
+    }
+
+    /// The assistant can answer main, which is the thing it could not do.
+    ///
+    /// **The measured failure, as an assertion.** Every bus tool derives sender
+    /// identity from the run and refuses one that belongs to no addressing
+    /// scope. The assistant's conversation belongs to no work, and nothing ever
+    /// gave its runs a scope — `delegate` opens a return channel for the run it
+    /// starts and `hand_to_assistant` did not — so `send_message` and `reply`
+    /// answered `run … is not a member of any team or work`. Reproduced before
+    /// it was fixed: `Store::caller_for_run` on a run in the assistant's
+    /// conversation returned `None`.
+    ///
+    /// What that cost is the whole of the "answer directly" branch of the
+    /// assistant's brief. A card reaches Reljod's rail, which is right for work
+    /// handed on; an *answer* left on a rail is an answer he has to go and find,
+    /// and the branch exists precisely so that "what time is it in Manila" comes
+    /// straight back. It went into a transcript nobody opens.
+    ///
+    /// Asserted on the store rather than by spawning, because opening the
+    /// channel is the half that was missing and starting a harness process is
+    /// not something a unit test can do. That `hand_to_assistant` actually calls
+    /// this is checked below, off the source, for the same reason the
+    /// never-waits check is.
+    #[test]
+    fn the_assistant_has_a_way_to_answer_main() {
+        let store = Store::in_memory().unwrap();
+        let main = store
+            .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        // A main chat that has actually run, because `main_chat_is_resumable`
+        // is what decides whether mail to it starts a turn: a pinned
+        // conversation with no harness session behind it would have to be woken
+        // into a fresh context, and an orchestrator woken having forgotten what
+        // it delegated is worse than one not woken at all.
+        store
+            .record_session(&main, HarnessKind::ClaudeCode, "ses-main")
+            .unwrap();
+        let (assistant, _) = store
+            .assistant_conversation(HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        store
+            .append_prompt(&assistant, "run-1", "what time is it in Manila")
+            .unwrap();
+
+        // Before the channel: no identity, so every bus tool refuses.
+        assert!(
+            store.caller_for_run("run-1").unwrap().is_none(),
+            "the premise of this test is that a run of the assistant's \
+             conversation is on no roster until something puts it on one"
+        );
+
+        let name = store
+            .open_return_channel("run-1", ASSISTANT_MEMBER, HarnessKind::ClaudeCode)
+            .unwrap()
+            .expect("a channel, because there is a main chat to report to");
+        assert_eq!(name, ASSISTANT_MEMBER);
+
+        let caller = store
+            .caller_for_run("run-1")
+            .unwrap()
+            .expect("the run resolves to a member from its first tool call");
+        assert_eq!(caller.name, ASSISTANT_MEMBER);
+        let roster = store
+            .roster(caller.scope, &caller.team, &caller.name)
+            .unwrap();
+        let main = roster
+            .iter()
+            .find(|a| a.name == crate::team::MAIN)
+            .expect("`main` has to be on the assistant's roster or it cannot answer");
+        assert!(
+            main.can_be_woken,
+            "a message to `main` has to start a turn, or the answer is a row in \
+             a table rather than something Reljod is told"
+        );
+    }
+
+    /// `hand_to_assistant` opens that channel on every turn it starts.
+    ///
+    /// The store test above proves the channel works; this proves it is asked
+    /// for. Off the source, for the reason the never-waits check is: what stands
+    /// between the assistant and a return leg is one call, and a unit test
+    /// cannot reach it without starting a harness process.
+    #[test]
+    fn handing_an_instruction_over_opens_the_assistants_return_channel() {
         let source = include_str!("orchestrator.rs");
         let start = source
             .find("pub async fn hand_to_assistant(")
             .expect("hand_to_assistant is in this file");
-        // To the next item at the top level, which is the doc comment of
-        // whatever comes after it.
         let body = &source[start..];
         let end = body[1..]
             .find("\n/// ")
             .map(|at| at + 1)
             .unwrap_or(body.len());
-        let body = &body[..end];
+        assert!(
+            body[..end].contains("open_return_channel("),
+            "the assistant is started with no way to answer main, so anything it \
+             answers itself reaches nobody"
+        );
+    }
 
-        for waiting in ["subscribe(", "titler_output(", ".recv(", "while let"] {
+    /// A thread with no harness session is handed its own record.
+    ///
+    /// `resume_for` answers `Fresh` in two cases the standing assistant reaches
+    /// on its own: the turn straight after a compaction, where the summary is
+    /// the only thing the conversation contains, and the turn after its harness
+    /// changed under it. Nothing in `crate::runner` can stream a transcript into
+    /// a harness — `Store::handoff_text` exists because of that — so a `Fresh`
+    /// spawn that carries nothing is an assistant that has silently forgotten,
+    /// on a turn nobody would think to check.
+    ///
+    /// Asserted off the source, because what a spawn is *given* is only
+    /// observable by starting a harness process. What can be checked exactly is
+    /// that the function reaches for the record at all, which is the whole of
+    /// the difference between remembering and not.
+    #[test]
+    fn a_resumeless_assistant_thread_carries_its_record_in_the_prompt() {
+        let source = include_str!("orchestrator.rs");
+        let body = body_of(source, "pub async fn hand_to_assistant(");
+        assert!(
+            body.contains("handoff_text("),
+            "a turn spawned `Fresh` on the standing thread would start from \
+             nothing, and the turn after every compaction is exactly that turn"
+        );
+    }
+
+    /// `hand_to_assistant` returns when the instruction has been *taken*, and
+    /// there is nothing in it that could wait for a run to say anything.
+    ///
+    /// **Asserted against the source, because there is no type that holds it.**
+    /// The property is the absence of an await on output, and a test that proved
+    /// it by running would have to start a real harness process and then prove a
+    /// negative about how long it did not take. What can be checked exactly is
+    /// that the function never reaches for the two mechanisms in this file that
+    /// wait for a run's output — subscribing to the event bus, and the loop that
+    /// drains it — which is how `start_titler` deliberately does not wait
+    /// either.
+    ///
+    /// This is the property the whole design exists for. Main calls this inside
+    /// its own turn, and its turn is the console: an await on output added here
+    /// would put a model call back in front of every instruction Reljod types,
+    /// and nothing else in the codebase would notice.
+    #[test]
+    fn handing_an_instruction_to_the_assistant_never_waits_for_a_run() {
+        let source = include_str!("orchestrator.rs");
+        let body = body_of(source, "pub async fn hand_to_assistant(");
+        for waiting in ["titler_output(", ".recv(", "while let"] {
             assert!(
                 !body.contains(waiting),
-                "`hand_to_assistant` contains `{waiting}`, which is how a function in \
-                 this file waits for a run to say something. It must return when the \
-                 run has started and not when it has answered."
+                "`hand_to_assistant` contains `{waiting}`, which is how a function \
+                 in this file waits for a run to say something. It must return \
+                 when the instruction has been taken and not when a run has \
+                 answered."
             );
         }
-        // One await, and it is the spawn.
-        assert_eq!(
-            body.matches(".await").count(),
-            1,
-            "`hand_to_assistant` awaits something other than the spawn: {body}"
+
+        // The summariser *does* collect a run's output — that is what a summary
+        // is — so the property here is not that it never waits but that it never
+        // waits on the caller's thread. The collector has to sit inside the
+        // detached task, which is exactly what `start_titler` does and for the
+        // same reason: main's turn is the console.
+        let body = body_of(source, "async fn start_assistant_compaction(");
+        let detached = body
+            .find("tokio::spawn(")
+            .expect("the summariser's output has to be collected off the caller's thread");
+        let collected = body
+            .find("titler_output(")
+            .expect("something has to read what the summariser said");
+        assert!(
+            collected > detached,
+            "`start_assistant_compaction` waits for the summariser before it \
+             returns, which puts a model call in front of every instruction \
+             Reljod types"
         );
+    }
+
+    /// One function's source, from its signature to whatever is declared next.
+    ///
+    /// The two checks above both read the file they are in, and both want the
+    /// same slice. `\n/// ` is the boundary because every item at the top level
+    /// of this file opens with a doc comment.
+    fn body_of<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .expect("this function is in this file");
+        let body = &source[start..];
+        let end = body[1..]
+            .find("\n/// ")
+            .map(|at| at + 1)
+            .unwrap_or(body.len());
+        &body[..end]
     }
 }
 
