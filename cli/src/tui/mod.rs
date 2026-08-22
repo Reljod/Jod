@@ -724,6 +724,10 @@ async fn event_loop(
     let mut keys = EventStream::new();
     let mut events = jod.subscribe();
     let mut viewport = 20usize;
+    // ...and how far back that frame's transcript can be scrolled, which only
+    // the frame knows: it depends on how many lines each entry wrapped to, not
+    // on how many entries there are.
+    let mut scrollback = 0usize;
     // Where the last frame put the rail, so a click can be resolved against the
     // cards that were actually on screen when it happened.
     let mut hits = ui::RailHits::default();
@@ -768,6 +772,7 @@ async fn event_loop(
         terminal.draw(|f| {
             let painted = ui::draw(f, &app);
             viewport = painted.viewport;
+            scrollback = painted.max_scroll();
             hits = painted.rail;
             panel_hits = painted.panel;
             preview = painted.preview;
@@ -793,7 +798,7 @@ async fn event_loop(
                         // query per keystroke, which is what the comparison
                         // buys.
                         let asked = app.rail.query(app.conversation.clone());
-                        match on_key(&mut app, &mut thread, key, viewport, preview) {
+                        match on_key(&mut app, &mut thread, key, viewport, scrollback, preview) {
                             // The editor takes the terminal, so it can only be
                             // done from here — with the same discipline as
                             // `enter`/`restore`, panic hook included.
@@ -831,6 +836,7 @@ async fn event_loop(
                                 terminal.draw(|f| {
                                     let painted = ui::draw(f, &app);
                                     viewport = painted.viewport;
+                                    scrollback = painted.max_scroll();
                                     hits = painted.rail;
                                     panel_hits = painted.panel;
                                     preview = painted.preview;
@@ -896,7 +902,7 @@ async fn event_loop(
                             MouseEventKind::ScrollDown if panel_hits.holds(m.column, m.row) => {
                                 app.step_project(1);
                             }
-                            MouseEventKind::ScrollUp => app.scroll_up(3, app.transcript.len()),
+                            MouseEventKind::ScrollUp => app.scroll_up(3, scrollback),
                             MouseEventKind::ScrollDown => app.scroll_down(3),
                             _ => {}
                         }
@@ -1292,7 +1298,17 @@ fn replay(
             Role::Assistant => entries.push(Entry::Agent(message.text.clone())),
             // A runner error or a note Jod injected. It is not the agent
             // speaking, and `apply` already gives the same event a notice.
-            Role::System => entries.push(Entry::Notice(message.text.clone())),
+            //
+            // Except the one system message that is a document rather than a
+            // remark: the summary a compaction or a harness switch seeded this
+            // thread with. See [`Entry::Carried`].
+            Role::System => entries.push(match jod_core::conversation::carried(&message.text) {
+                Some((heading, body)) => Entry::Carried {
+                    heading: heading.to_string(),
+                    body: body.to_string(),
+                },
+                None => Entry::Notice(message.text.clone()),
+            }),
             Role::ToolCall => replay_call(&mut entries, message),
             Role::ToolResult => replay_result(&mut entries, message),
         }
@@ -3185,6 +3201,7 @@ fn on_key(
     thread: &mut Thread,
     key: KeyEvent,
     viewport: usize,
+    scrollback: usize,
     preview: ui::Preview,
 ) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -3210,7 +3227,7 @@ fn on_key(
         return on_overlay_key(app, key);
     }
     if ctrl || alt {
-        if let Some(action) = on_chord(app, key) {
+        if let Some(action) = on_chord(app, key, scrollback) {
             return action;
         }
     }
@@ -3280,7 +3297,7 @@ fn on_key(
     if app.workspace.is_list() {
         return on_workspace_key(app, key, viewport, preview);
     }
-    on_chat_key(app, thread, key, viewport)
+    on_chat_key(app, thread, key, viewport, scrollback)
 }
 
 /// Keys while the decision rail has the keyboard.
@@ -3678,7 +3695,7 @@ fn on_quit(app: &mut App) -> Option<Action> {
 /// Note that `Ctrl-B` and `Ctrl-F` are readline's word motions. Jod binds no
 /// word motion at all, so the chords are free — but if one is ever wanted it
 /// has to find another key, because delegate and the fleet are printed here.
-fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
+fn on_chord(app: &mut App, key: KeyEvent, scrollback: usize) -> Option<Option<Action>> {
     let handled = |a: Option<Action>| Some(a);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -3840,8 +3857,7 @@ fn on_chord(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
         // Scrolling keeps a modifier at all because the bare arrows now walk
         // back through what has been sent.
         KeyCode::Up if either => {
-            let max = app.transcript.len();
-            app.scroll_up(1, max);
+            app.scroll_up(1, scrollback);
             handled(None)
         }
         KeyCode::Down if either => {
@@ -5646,6 +5662,7 @@ fn on_chat_key(
     thread: &mut Thread,
     key: KeyEvent,
     viewport: usize,
+    scrollback: usize,
 ) -> Option<Action> {
     // Consumed here, once, regardless of which arm below ends up handling the
     // key — Tab or Enter on the suggestion list is reading the offer exactly
@@ -5653,7 +5670,6 @@ fn on_chat_key(
     // either way. Only a plain character typed while this was still true
     // means "that offer was never read"; see the `KeyCode::Char(c)` arm.
     let offer_was_unread = std::mem::take(&mut thread.model_offer_unread);
-    let max_scroll = app.transcript.len();
 
     // The `@` popup owns the arrows and `⏎` while it is up, and `Esc` closes it
     // *without* touching the line — D1's fourth requirement, and the one people
@@ -5842,7 +5858,7 @@ fn on_chat_key(
         // mouse, or Ctrl with an arrow.
         KeyCode::Up => app.history_prev(),
         KeyCode::Down => app.history_next(),
-        KeyCode::PageUp => app.scroll_up(viewport.max(1), max_scroll),
+        KeyCode::PageUp => app.scroll_up(viewport.max(1), scrollback),
         KeyCode::PageDown => app.scroll_down(viewport.max(1)),
         // **Stop, but stay.** The most-used key in a coding harness: you see a
         // turn going the wrong way in the first two seconds and you correct it.
@@ -7972,6 +7988,7 @@ mod tests {
                 &mut thread,
                 KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
                 20,
+                40,
                 ui::Preview::default(),
             );
         }
@@ -7983,6 +8000,7 @@ mod tests {
             &mut thread,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             20,
+            40,
             ui::Preview::default(),
         );
         assert_eq!(
@@ -8836,6 +8854,40 @@ mod tests {
         );
     }
 
+    /// Main compacts itself when its context fills, and the thread it opens
+    /// holds the summary and nothing else. Replayed as an ordinary notice, that
+    /// arrived as several screens of handoff document sitting where the
+    /// conversation should be — text the reader never wrote and the chat never
+    /// said, which is why it reads as another agent's output.
+    ///
+    /// Driven through the real compaction rather than a hand-written string:
+    /// what the seed message looks like is [`Store::continue_as_new`]'s to
+    /// decide, and a test that writes its own would keep passing after that
+    /// changed.
+    #[test]
+    fn the_summary_a_compaction_seeds_replays_as_carried_context_not_as_a_notice() {
+        use jod_core::conversation::{NewMessage, Role};
+        let s = store();
+        let id = s.main_conversation(HarnessKind::ClaudeCode, "/tmp").unwrap();
+        s.append_message(&id, NewMessage::new(Role::User, "build a tic tac toe game"))
+            .unwrap();
+        s.append_message(&id, NewMessage::new(Role::Assistant, "handed to a manager"))
+            .unwrap();
+
+        let carried = s
+            .continue_as_new(&id, "# Handoff Summary\n\nThe manager was started.", "compact")
+            .unwrap();
+        let next = carried.conversation.id;
+
+        let entries = replay(&s.live_window(&next).unwrap(), "the main chat", true);
+        assert!(
+            matches!(&entries[0], Entry::Carried { heading, body }
+                if heading == "the conversation so far, compacted"
+                    && body.contains("The manager was started")),
+            "the whole document, kept, and marked as carried rather than said: {entries:?}"
+        );
+    }
+
     /// The other half of "your turns read as yours": reasoning is neither, and
     /// replaying it as the chat's own prose put words in the chat's mouth.
     #[test]
@@ -9129,6 +9181,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::NONE),
             20,
+            40,
             ui::Preview::default(),
         )
     }
@@ -9654,6 +9707,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::CONTROL),
             20,
+            40,
             ui::Preview::default(),
         )
     }
@@ -9664,6 +9718,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::ALT),
             20,
+            40,
             ui::Preview::default(),
         )
     }
@@ -10494,7 +10549,7 @@ mod tests {
         {
             return true;
         }
-        on_chord(app, KeyEvent::new(code, modifier)).is_some()
+        on_chord(app, KeyEvent::new(code, modifier), 0).is_some()
     }
 
     /// Every press this crate could plausibly bind, so the reverse direction
@@ -12739,6 +12794,7 @@ mod tests {
             thread,
             KeyEvent::new(code, KeyModifiers::NONE),
             20,
+            40,
             ui::Preview::default(),
         )
     }
@@ -13932,6 +13988,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             20,
+            40,
             WIDE,
         );
     }
@@ -13996,6 +14053,7 @@ mod tests {
                 &mut Thread::default(),
                 KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
                 20,
+                40,
                 ui::Preview::default(),
             )
         };
@@ -14052,6 +14110,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(code, KeyModifiers::NONE),
             20,
+            40,
             shape,
         );
     }
@@ -14198,6 +14257,7 @@ mod tests {
                 &mut Thread::default(),
                 KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
                 20,
+                40,
                 shape,
             ),
             Some(Action::Delegate("work".into())),
@@ -14219,6 +14279,7 @@ mod tests {
             &mut Thread::default(),
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             20,
+            40,
             ui::Preview::default(),
         );
 

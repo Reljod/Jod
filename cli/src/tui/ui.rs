@@ -104,10 +104,27 @@ const PANEL_BESIDE: u16 = 88;
 pub struct Painted {
     /// How many transcript lines one page holds.
     pub viewport: usize,
+    /// How many lines the transcript came to, drawn. Reported for the reason
+    /// [`Preview::lines`] is: scrolling is clamped to what is on screen, and
+    /// only the frame knows how tall an entry drew.
+    ///
+    /// The key handler used to clamp to the *entry* count instead, which is a
+    /// different number and is smaller whenever an entry wraps — a chat holding
+    /// one seven-thousand-character summary and one notice stopped dead at
+    /// `scrolled up 2` with two hundred lines still above it.
+    pub lines: usize,
     pub rail: RailHits,
     pub panel: PanelHits,
     /// The preview pane of the frame just drawn.
     pub preview: Preview,
+}
+
+impl Painted {
+    /// The furthest the transcript can be scrolled before its first line is at
+    /// the top of the pane.
+    pub fn max_scroll(&self) -> usize {
+        self.lines.saturating_sub(self.viewport)
+    }
 }
 
 /// The shape of the preview pane the last frame drew.
@@ -297,6 +314,10 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     // out rather than being recomputed from the layout.
     let mut input = Rect::new(0, 0, 0, 0);
     let mut preview = Preview::default();
+    // How tall the transcript came to. Only the chat screen has one; a workspace
+    // list pages by its own height and clamps its own cursor, so zero there
+    // leaves the chat's scroll at the bottom, which is where it belongs.
+    let mut lines = 0usize;
     let height = if app.workspace == Workspace::Chat {
         let column = measure(body);
         if fresh(app) {
@@ -314,7 +335,8 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
                 .constraints([Constraint::Min(3), Constraint::Length(composer(app, column))])
                 .split(column);
             input = parts[1];
-            let height = draw_transcript(f, app, parts[0]);
+            let (height, drawn) = draw_transcript(f, app, parts[0]);
+            lines = drawn;
             draw_input(f, app, input);
             height
         }
@@ -356,6 +378,7 @@ pub fn draw(f: &mut Frame, app: &App) -> Painted {
     }
     Painted {
         viewport: height,
+        lines,
         rail: hits,
         panel: panel_hits,
         preview,
@@ -5932,7 +5955,9 @@ pub(super) fn run_glyph(status: &str) -> &'static str {
     }
 }
 
-fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
+/// Draws the conversation, and reports back how tall the pane is and how tall
+/// what went in it came to — the two numbers scrolling has to be clamped to.
+fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> (usize, usize) {
     let width = area.width.saturating_sub(2).max(1);
     let lines = transcript_lines(app, width);
 
@@ -5982,7 +6007,7 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) -> usize {
             .scroll((offset as u16, 0)),
         area,
     );
-    viewport
+    (viewport, total)
 }
 
 /// The whole transcript as styled lines, with a blank line between blocks.
@@ -6083,7 +6108,7 @@ impl Chunk {
             Entry::Thinking(_) => Chunk::Think,
             Entry::Tool { .. } | Entry::Diff { .. } | Entry::Routing(_) => Chunk::Step,
             Entry::ToolOut { .. } => Chunk::Out,
-            Entry::Plan(_) | Entry::Delegated { .. } => Chunk::Card,
+            Entry::Plan(_) | Entry::Delegated { .. } | Entry::Carried { .. } => Chunk::Card,
             Entry::Notice(_) | Entry::Hint(_) => Chunk::Note,
             Entry::Alert(_) => Chunk::Alarm,
             Entry::Done { .. } => Chunk::End,
@@ -6168,6 +6193,7 @@ fn render(entry: &Entry, ctx: &Ctx) -> Vec<Line<'static>> {
         Entry::Delegated { id, prompt, dir } => {
             return render_delegated(id, prompt, dir, ctx)
         }
+        Entry::Carried { heading, body } => return render_carried(heading, body, width, expanded),
         Entry::You(t) => ("› ", bold(USER), t.clone()),
         Entry::Agent(t) => return render_prose(t, width),
         Entry::Thinking(t) => ("  ", fg(MUTED).add_modifier(Modifier::ITALIC), t.clone()),
@@ -6315,6 +6341,42 @@ fn render_output(text: &str, failed: bool, width: u16, expanded: bool) -> Vec<Li
             format!("    … {} · Ctrl-O", plural(held, "more line")),
             fg(MUTED),
         )));
+    }
+    lines
+}
+
+/// A carried-context seed: one line saying what arrived, and the document it
+/// carried behind `Ctrl-O`.
+///
+/// Collapsed by default, and that default is the point. The body is a handoff
+/// summary — the whole of what the model is holding now that this thread has
+/// replaced the one before it — so on a chat that has just compacted itself it
+/// is the only entry in the transcript and it is several screens long. Drawn in
+/// full it reads as somebody else's report pasted into your own chat, and it
+/// pushes the composer's own history off the top of a pane it cannot be
+/// scrolled out of.
+///
+/// Never dropped, only folded. What the model was handed has to stay something
+/// the reader can check.
+fn render_carried(heading: &str, body: &str, width: u16, expanded: bool) -> Vec<Line<'static>> {
+    let held = wrap(body, width as usize, PROSE).len();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("⟲ ", fg(MUTED)),
+        Span::styled(heading.to_string(), bold(MUTED)),
+        Span::styled(
+            if expanded {
+                String::new()
+            } else {
+                // Worded and spaced exactly as the held-back rows of a tool's
+                // output are — see [`render_output`]. It is the same offer, and
+                // two spellings of one key would read as two different keys.
+                format!(" · {} · Ctrl-O", plural(held, "line"))
+            },
+            fg(MUTED),
+        ),
+    ])];
+    if expanded {
+        lines.extend(render_prose(body, width));
     }
     lines
 }
@@ -7732,6 +7794,73 @@ mod tests {
         }
         a.scroll_up(5, 40);
         assert!(rendered(&a, 60, 12).contains("scrolled up"));
+    }
+
+    /// The summary a compaction leaves behind is a handoff document, and the
+    /// thread it seeds contains it and nothing else. Drawn in full it is the
+    /// whole screen, and it is text the reader never wrote and the agent never
+    /// just said.
+    #[test]
+    fn a_carried_summary_arrives_folded_to_one_line() {
+        let mut a = app();
+        a.push(Entry::Carried {
+            heading: "the conversation so far, compacted".into(),
+            body: "# Handoff Summary\n\nThe manager was started and acknowledged, \
+                   but had raised nothing by the end of this conversation."
+                .into(),
+        });
+        let out = rendered(&a, 80, 20);
+        assert!(
+            out.contains("the conversation so far, compacted"),
+            "the reader is told one arrived: {out}"
+        );
+        assert!(out.contains("Ctrl-O"), "and how to read it: {out}");
+        assert!(
+            !out.contains("Handoff Summary"),
+            "but the document itself stays shut: {out}"
+        );
+    }
+
+    /// Folded, never dropped. A summary the model is being handed has to stay
+    /// something the reader can check.
+    #[test]
+    fn the_carried_summary_opens_with_the_rest_of_the_details() {
+        let mut a = app();
+        a.push(Entry::Carried {
+            heading: "the conversation so far, compacted".into(),
+            body: "# Handoff Summary\n\nThe manager was started.".into(),
+        });
+        a.expand_details = true;
+        let out = rendered(&a, 60, 20);
+        assert!(out.contains("Handoff Summary"), "{out}");
+        assert!(out.contains("The manager was started"), "{out}");
+    }
+
+    /// Scrolling is clamped to the lines on screen, not to the number of
+    /// entries that produced them. Clamping to the entry count left a chat
+    /// holding one long message stuck two lines from the bottom with the rest
+    /// of the message above it and no way to reach it — which is exactly the
+    /// shape of a freshly compacted `main`.
+    #[test]
+    fn one_long_entry_can_be_scrolled_back_to_its_first_line() {
+        let mut a = app();
+        let body = (0..60)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        a.push(Entry::Agent(body));
+        assert_eq!(a.transcript.len(), 1, "one entry, sixty lines");
+
+        let max = painted(&a, 60, 14).max_scroll();
+        assert!(
+            max > a.transcript.len(),
+            "the frame counts lines, not entries: {max}"
+        );
+        assert!(!rendered(&a, 60, 14).contains("line 0 "), "starts at the end");
+
+        a.scroll_up(max, max);
+        let top = rendered(&a, 60, 14);
+        assert!(top.contains("line 0"), "and scrolling reaches the top: {top}");
     }
 
     #[test]
@@ -14104,6 +14233,7 @@ mod tests {
             &mut crate::tui::Thread::default(),
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
             20,
+            40,
             Preview::default(),
         );
         let screen = rendered(&a, 120, 30);
@@ -14131,6 +14261,7 @@ mod tests {
             &mut crate::tui::Thread::default(),
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             20,
+            40,
             Preview::default(),
         );
         assert!(a.panel && a.projects_open && a.panel_focused);

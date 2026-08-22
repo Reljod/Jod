@@ -717,3 +717,56 @@ Two notes on things that looked like bugs and were not:
 - The fleet's two panes are empty boxes when nothing is running, with the empty
   state only in the status bar. That is a defensible choice rather than a bug,
   but a line inside the pane would read better than a blank box.
+
+## T8. A compacted `main` opens as a wall of somebody else's summary
+Status: **fixed — this branch** · Severity: medium · Owner: Reljod
+
+Reported from a screenshot of `main`: several screens of prose about a
+tic-tac-toe delegation, a `## Unrelated context carried in from earlier
+sessions` heading, and a scroll that stopped dead at `scrolled up 2` with the
+top of the text still off screen. The reasonable first reading was that another
+agent's output had leaked into the chat.
+
+It had not. It was `main`'s own compaction. `Store::continue_as_new` compacts a
+thread, opens its continuation and seeds it with the summary as a real
+`Role::System` message — deliberately, so a conversation that replays a full
+context does not draw as an empty chat. In the store that produced the
+screenshot the continuation held that message and nothing else: 6,838
+characters, conversation `49de8480`, compaction row 4, 24,060 chars down to
+6,801. So the transcript was one entry, and that entry was a handoff document.
+
+Two separate faults made it look like a leak.
+
+- **The seed replayed as an ordinary notice.** `replay` mapped every
+  `Role::System` message to `Entry::Notice`, which is drawn in full. A remark
+  and a handoff document are not the same kind of thing, and drawn the same way
+  the document reads as text somebody else pasted into your chat.
+- **Scrolling was clamped to the entry count, not the line count.** Three call
+  sites passed `app.transcript.len()` as the maximum scroll — `PageUp`,
+  `Ctrl-↑` and the mouse wheel. With one summary and one live-window notice
+  that maximum was 2, while the drawn transcript was around two hundred lines.
+  The title told the truth and was read as a bug: it really was scrolled up 2,
+  and 2 really was as far as it went.
+
+The fix: `Entry::Carried`, folded to one heading line with the body behind
+`Ctrl-O` — the same fold `Entry::Diff` and held-back tool output already use, so
+nothing is dropped from a summary the model is actually holding. And `Painted`
+now reports the drawn line count, so scrolling clamps to what is on screen the
+way the fleet's preview pane already did.
+
+Checks:
+
+- `core`: `a_carried_summary_is_recognised_and_an_ordinary_message_is_not` —
+  drives a real `continue_as_new` and asserts the seed is recognised while a
+  message that merely opens with a bracket is not.
+- `cli`: `the_summary_a_compaction_seeds_replays_as_carried_context_not_as_a_notice`
+  — end to end through the real compaction, not a hand-written string.
+- `cli`: `a_carried_summary_arrives_folded_to_one_line` and
+  `the_carried_summary_opens_with_the_rest_of_the_details`.
+- `cli`: `one_long_entry_can_be_scrolled_back_to_its_first_line` — one entry,
+  sixty lines, and the top of it has to be reachable.
+
+Worth naming, because it cost time: `a_manager_is_titled_and_pointed_at_its_own_project`
+fails inside a git worktree and passes in the main checkout, with my changes
+stashed either way. It is the `/private/tmp` versus `/tmp` artefact again, in a
+new place, and it is not this branch's.
