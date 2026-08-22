@@ -2325,40 +2325,55 @@ fn fit_path(path: &str, room: usize) -> String {
 /// for the recommendation.
 const CONTEXT_HEIGHT: u16 = 7;
 
-/// Sessions above, context below — the two questions a panel that costs a
-/// third of the screen has to be worth answering: what else is running, and how
-/// much of the window this conversation has eaten.
+/// How tall the settings box is: two borders, and one row each for the mode,
+/// the harness and the spend.
+const SESSION_HEIGHT: u16 = 5;
+
+/// The projects at the top, this conversation's settings under them, and how
+/// much of the window it has eaten at the bottom.
+///
+/// The list of runs used to sit in the middle of this and it is gone. Thirty
+/// columns could hold an id, an age and a truncated name — three facts about a
+/// run, none of them the ones anybody acts on — while the fleet shows the same
+/// runs with the room to tell two of them apart. A panel that costs a third of
+/// the screen has to answer questions nothing else answers, and *what else is
+/// running* was not one of them.
 fn draw_panel(f: &mut Frame, app: &App, area: Rect) -> PanelHits {
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(projects_height(app, area.height)),
-            Constraint::Min(3),
+            // The slack, so a short catalog is drawn at the size of what is in
+            // it rather than stretched down the panel with blank rows under the
+            // last project.
+            Constraint::Min(0),
+            Constraint::Length(SESSION_HEIGHT),
             Constraint::Length(CONTEXT_HEIGHT),
         ])
         .split(area);
     let hits = draw_projects(f, app, parts[0]);
-    draw_sessions(f, app, parts[1]);
-    draw_context(f, app, parts[2]);
+    draw_session(f, app, parts[2]);
+    draw_context(f, app, parts[3]);
     hits
 }
 
 /// How many rows the catalog gets.
 ///
 /// Collapsed it is one line plus its border, which still answers the question
-/// the panel is there for — *which project am I in* — while giving the rest of
-/// the height back to the sessions list. Expanded it grows with the catalog but
-/// never past a third of the panel: the sessions below it are what a running
-/// fleet is watched through, and a twenty-project catalog must not push them
-/// off the screen.
+/// the panel is there for — *which project am I in*. Expanded it grows with the
+/// catalog and stops where the two fixed boxes under it begin, so a long
+/// catalog is cut rather than pushing the settings and the context off the
+/// bottom. It used to stop at a third of the panel instead, to leave room for
+/// the runs list that sat between them; with that list gone the room is the
+/// catalog's.
 ///
 /// **An opened catalog is never nothing.** Below twelve rows of panel this used
 /// to return zero whatever the state was, so on a short terminal `Ctrl-P`
 /// changed a flag nothing rendered: the key did nothing, said nothing, and gave
 /// no reason — which is the exact failure the old projects key had already been
 /// fixed once for, one state further out. Collapsed it still yields the whole
-/// box, because a collapsed catalog is worth three rows only while there is a
-/// sessions list left underneath it to be worth them against.
+/// box, because a collapsed catalog is worth three rows only while there is
+/// something left underneath it to be worth them against.
 fn projects_height(app: &App, available: u16) -> u16 {
     // Two borders and a line. Under that there is no box to draw and no
     // arithmetic that produces one.
@@ -2370,7 +2385,10 @@ fn projects_height(app: &App, available: u16) -> u16 {
         // status bar, which is where it matters most.
         return if available < 12 { 0 } else { 3 };
     }
-    let ceiling = (available / 3).max(4).min(available);
+    let ceiling = available
+        .saturating_sub(SESSION_HEIGHT + CONTEXT_HEIGHT)
+        .max(4)
+        .min(available);
     let wanted = app.projects.len().clamp(1, 32) as u16 + 2;
     wanted.clamp(3.min(ceiling), ceiling)
 }
@@ -2670,71 +2688,49 @@ fn draw_flash(f: &mut Frame, app: &App, body: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Every conversation this process knows about, two rows each.
+/// What this conversation is set to and what it has cost so far.
 ///
-/// Two rather than one because the panel is thirty-odd columns: an id, an age
-/// and a name on one row would truncate the name to nothing, and the name is
-/// the only part that says what the run was *for*.
-fn draw_sessions(f: &mut Frame, app: &App, area: Rect) {
-    let inner = area.width.saturating_sub(2) as usize;
-    let mut items: Vec<ListItem> = vec![
-        ListItem::new(Line::from(vec![
+/// Three facts, one row each. They were the header of the runs list until that
+/// list was taken off the panel, and they are the part of it worth keeping:
+/// every one of them is about the turn you are about to send, and the mode is
+/// the only one of the three the status bar also carries.
+fn draw_session(f: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let lines = vec![
+        Line::from(vec![
             Span::styled(" mode    ", fg(MUTED)),
             mode_span(app.mode),
             Span::styled("   Tab cycles", fg(MUTED)),
-        ])),
-        ListItem::new(Line::from(vec![
+        ]),
+        Line::from(vec![
             Span::styled(" harness ", fg(MUTED)),
             Span::styled(app.harness.label().to_string(), fg(AGENT)),
-        ])),
+        ]),
         // A dash rather than `$0.0000`: four decimal places of nothing is four
         // decimal places of noise on a thirty-column panel.
-        ListItem::new(Line::from(Span::styled(
+        Line::from(Span::styled(
             if app.cost_usd > 0.0 {
                 format!(" spend   ${:.4}", app.cost_usd)
             } else {
                 " spend   —".to_string()
             },
             fg(MUTED),
-        ))),
-        ListItem::new(Line::from(Span::styled(
-            format!(" {}", "─".repeat(inner.saturating_sub(2))),
-            fg(MUTED),
-        ))),
+        )),
     ];
 
-    if app.agents.is_empty() {
-        for chunk in wrap("no runs yet — Ctrl-B delegates one", inner, 1) {
-            items.push(ListItem::new(Span::styled(format!(" {chunk}"), fg(MUTED))));
-        }
-    }
-    for a in &app.agents {
-        let watched = app.watching.as_deref() == Some(a.id.as_str());
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(if watched { " ▸ " } else { "   " }, fg(USER)),
-            Span::styled(
-                format!("{} ", run_glyph(&a.status)),
-                fg(status_colour(&a.status)),
-            ),
-            Span::styled(format!("{:<9}", short(&a.id)), fg(MUTED)),
-            Span::styled(
-                super::app::short_duration(app.now_ms.saturating_sub(a.created_at_ms)),
-                fg(MUTED),
-            ),
-        ])));
-        items.push(ListItem::new(Span::styled(
-            format!("     {}", cut(&a.name, inner.saturating_sub(5))),
-            if watched { bold(USER) } else { fg(AGENT) },
-        )));
-    }
-
     f.render_widget(
-        List::new(items).block(
+        Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(fg(MUTED))
-                .title(" sessions ")
-                .title_bottom(" Shift-Tab closes "),
+                .title(" session ")
+                // Both keys, because they are both true and the panel's own
+                // border is where the way out of it is printed. `Esc` is the
+                // one a reader tries first and the one that used to do nothing
+                // here.
+                .title_bottom(" Esc or Shift-Tab closes "),
         ),
         area,
     );
@@ -9400,21 +9396,27 @@ mod tests {
         assert!(panel_hits(&a, 140, 30).catalog.is_none());
     }
 
-    /// The sessions list is how a running fleet is watched. A long catalog must
-    /// not push it off the panel.
+    /// A long catalog stops where the two fixed boxes under it begin. It is cut
+    /// rather than allowed to push the settings and the context off the bottom,
+    /// and it now gets every row above them — the third-of-the-panel cap was
+    /// there to leave space for the runs list that used to sit between them.
     #[test]
-    fn a_long_catalog_is_capped_at_a_third_of_the_panel() {
+    fn a_long_catalog_stops_above_the_boxes_below_it() {
         let mut a = app();
         a.panel = true;
         a.projects = (0..40)
             .map(|i| catalogued(&format!("project-{i}")))
             .collect();
+        let room = 30 - (SESSION_HEIGHT + CONTEXT_HEIGHT);
         let height = projects_height(&a, 30);
-        assert!(height <= 10, "the catalog took {height} of 30 rows");
+        assert_eq!(
+            height, room,
+            "a 40-project catalog should fill the {room} rows above the fixed boxes"
+        );
     }
 
     /// Below a certain height there is no honest room for a third box, and
-    /// squeezing one in costs the sessions list its last row. That applies to
+    /// squeezing one in costs the boxes below it their last row. That applies to
     /// the *collapsed* catalog, which is a one-line reminder nobody asked for.
     #[test]
     fn a_short_panel_drops_a_collapsed_catalog_rather_than_squeezing_it() {
@@ -9538,33 +9540,43 @@ mod tests {
     #[test]
     fn the_panel_is_drawn_only_when_it_is_open() {
         let mut a = app();
-        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
         assert!(
-            !rendered(&a, 140, 24).contains("sessions"),
+            !rendered(&a, 140, 24).contains("session"),
             "shut by default"
         );
 
         a.panel = true;
         let screen = rendered(&a, 140, 24);
-        assert!(screen.contains("sessions"), "{screen}");
+        assert!(screen.contains("session"), "{screen}");
+        assert!(screen.contains("projects"), "{screen}");
+        assert!(screen.contains("context"), "{screen}");
         assert!(
-            screen.contains("Shift-Tab closes"),
+            screen.contains("Esc or Shift-Tab closes"),
             "the way out:\n{screen}"
         );
-        assert!(
-            screen.contains("port the parser"),
-            "what is running:\n{screen}"
-        );
-        assert!(screen.contains("aaa11111"), "and its id:\n{screen}");
     }
 
-    /// An empty panel has to say what would fill it rather than show a box with
-    /// nothing in it, which reads as a bug.
+    /// The runs are the fleet's to show, not the panel's.
+    ///
+    /// Thirty columns held an id, an age and a name cut to nothing, which is
+    /// three facts about a run and none of the ones anybody acts on. Two
+    /// screens listing the same runs also meant two places to look and two to
+    /// keep right, so the panel gave the question up.
     #[test]
-    fn an_empty_panel_says_how_to_start_a_run() {
+    fn the_panel_does_not_list_the_runs() {
         let mut a = app();
         a.panel = true;
-        assert!(rendered(&a, 140, 24).contains("no runs yet"));
+        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
+        let screen = rendered(&a, 140, 24);
+        assert!(
+            !screen.contains("port the parser"),
+            "the runs list is the fleet's:\n{screen}"
+        );
+        assert!(!screen.contains("aaa11111"), "nor its id:\n{screen}");
+        assert!(
+            !screen.contains("no runs yet"),
+            "and no empty state for a list that is gone:\n{screen}"
+        );
     }
 
     #[test]
@@ -9686,10 +9698,9 @@ mod tests {
     fn the_panel_floats_rather_than_starving_the_chat_on_a_narrow_terminal() {
         let mut a = app();
         a.panel = true;
-        a.agents = vec![agent_line("aaa11111", "port the parser", "running")];
         let screen = rendered(&a, 60, 20);
         assert!(
-            screen.contains("sessions"),
+            screen.contains("session"),
             "Shift-Tab must still do something:\n{screen}"
         );
         assert!(screen.lines().all(|l| l.chars().count() <= 60), "{screen}");
@@ -14780,9 +14791,9 @@ mod tests {
 
     // ---- the side panel: advertised, and reachable ----
 
-    /// The panel holds the projects, the sessions, the mode, the harness, the
-    /// spend and the context left — a large fraction of the program's state —
-    /// and `Shift-Tab` is the only way in. Until it had a row here the only
+    /// The panel holds the projects, the mode, the harness, the spend and the
+    /// context left — a large fraction of the program's state — and
+    /// `Shift-Tab` is the only way in. Until it had a row here the only
     /// place the key was written down was the panel's own bottom border, which
     /// you can read only once you have already found it. An overlay that calls
     /// itself the whole keymap and omits the key to a sixth of the program
@@ -14821,7 +14832,7 @@ mod tests {
         );
         let screen = rendered(&a, 120, 30);
         assert!(
-            screen.contains("sessions"),
+            screen.contains("session"),
             "the overlay's row for the panel opened nothing:\n{screen}"
         );
     }
