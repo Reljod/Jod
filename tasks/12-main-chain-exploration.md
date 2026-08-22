@@ -844,6 +844,45 @@ twice in one afternoon.
 
 ---
 
+## What to merge first, and why
+
+Written for Reljod, because on the night these findings were produced four pull
+requests sat READY that no agent could merge, and most of the remaining work
+touches files those four hold. This is a reading order, not a verdict — the gate
+still decides.
+
+1. **#237 — the roles panel offers a row its own harness's models.** Merge this
+   first. Without it the configuration Reljod asked for cannot be set through
+   the panel in one pass at all (X6), and it holds `service.rs` and the TUI,
+   which blocks X11 and X9. Its diff also touches the same `apply_role` seam as
+   X7, so whoever fixes X7 needs it landed or they will collide.
+2. **#238 — carry the whole thread across a harness switch.** It owns the seam
+   X5 lives on. X5's fix has to compose with it rather than undo it, and #238's
+   author's session has since died, so the longer it sits the more likely
+   somebody rebuilds it by accident.
+3. **#239 — tell an agent when a card answer overrules it.** Holds `team.rs`,
+   which blocks X12.
+4. **#240** — same batch, unblocks the rest of `main.rs`.
+
+Then the findings in this file, in this order:
+
+- **X13** (no manager tier at runtime) and **X7** (a role harness change breaks
+  every turn) are the two that make the requested configuration not work. X7 has
+  a fix in flight; X13 needs its mechanism pinned down first and should not be
+  handed to an agent to "just implement".
+- **X1** and **X10** are both decisions rather than implementations, and both
+  are deliberately unclaimed. Read X1 first: X13 may turn out to be downstream
+  of it.
+- **X8** (a failed run reported as exit 0 and silence) is small, contained, and
+  the one most likely to waste somebody's night, because an unattended run can
+  do nothing all night and report success.
+
+**Do not let a fixing spree near these**, which work and which nobody will
+re-test: the queue while main is busy, Esc, `/stop`, the handling of ambiguous,
+contradictory and destructive instructions, and auto-compaction's reporting.
+Every one was exercised live and behaved correctly. A regression there is the
+one that ships.
+
 ## Scenarios run
 
 | # | Scenario | Expected | Result |
