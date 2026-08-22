@@ -2394,11 +2394,10 @@ fn projects_height(app: &App, available: u16) -> u16 {
 /// The way out of an empty catalog, in the thirty-odd columns the panel has.
 ///
 /// It used to say “ask Jod to add one”, which is not a remedy: it names no
-/// command, and the console had none to name — the catalog could only be
-/// filled from a second terminal. Now that `/project add` exists, the empty
-/// state is the natural place to learn it, because an empty box is exactly
-/// when you are looking for the way to fill it.
-pub(super) const CATALOG_REMEDY: &str = "/project add";
+/// command at all. The catalog is filled from a shell, so the empty state
+/// names that command — an empty box is exactly when you are looking for the
+/// way to fill it, and “ask somebody” is not it.
+pub(super) const CATALOG_REMEDY: &str = "jod project add";
 
 /// The catalog, with the project this conversation is about marked.
 ///
@@ -5586,7 +5585,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  the board is empty — n adds a task, /todo does too",
+            "  the board is empty — n adds a task",
             fg(MUTED),
         )));
     }
@@ -5796,7 +5795,7 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
 
     if app.tasks.is_empty() {
         items.push(ListItem::new(Span::styled(
-            "── board ── empty · /todo <title> adds one",
+            "── board ── empty · n adds one",
             fg(MUTED),
         )));
     } else {
@@ -5848,7 +5847,7 @@ fn draw_team(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(fg(USER))
                 .title(title)
-                .title_bottom(" ↑↓ pick · ⏎ mark done · /todo adds · Esc back "),
+                .title_bottom(" ↑↓ pick · ⏎ mark done · n adds · Esc back "),
         ),
         area,
     );
@@ -7405,39 +7404,26 @@ mod tests {
 
     /// BUG-10: `/main` was listed twice, with opposite behaviours — go into the
     /// main chat, and send it one instruction from here — and nothing on either
-    /// row said which was which. The difference is the argument, so the row has
-    /// to show the argument.
+    /// row said which was which. The second form is gone rather than relabelled,
+    /// so the fix is now that there is exactly one row.
     ///
-    /// Pinned to the two rows rather than to the screen: `/main` is also in the
-    /// input box being typed, and a screen-wide `contains` would pass on a
-    /// palette that still shows the same token twice.
+    /// Counted over the popup rather than the whole screen: `/main` is also in
+    /// the input box being typed, and a screen-wide count would see two.
     #[test]
-    fn the_two_main_rows_say_which_one_takes_an_instruction() {
+    fn main_is_offered_once() {
         let mut a = app();
         a.input = "/main".into();
         let screen = rendered(&a, 120, popup_height());
-        let row = |hint: &str| {
-            screen
-                .lines()
-                .find(|line| line.contains(hint))
-                .unwrap_or_else(|| panic!("expected a row hinting {hint:?}:\n{screen}"))
-        };
-        // The label is what is left of a row once its hint and the chrome come
-        // off — the part a user reads to choose between the two.
-        let label = |hint: &str| {
-            let line = row(hint);
-            line[..line.find(hint).unwrap()]
-                .trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '▸')
-                .to_string()
-        };
-        let go = label("go into the main chat");
-        let send = label("hand main one instruction");
-        assert_ne!(
-            go, send,
-            "the two /main rows must not read alike:\n{screen}"
-        );
-        assert_eq!(go, "/main", "{screen}");
-        assert_eq!(send, "/main <instruction>", "{screen}");
+        let rows: Vec<&str> = screen
+            .lines()
+            .filter(|line| line.contains("go into the main chat"))
+            .collect();
+        assert_eq!(rows.len(), 1, "one /main row, not two:\n{screen}");
+        let line = rows[0];
+        let label = line[..line.find("go into the main chat").unwrap()]
+            .trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '▸')
+            .to_string();
+        assert_eq!(label, "/main", "{screen}");
     }
 
     #[test]
@@ -7518,9 +7504,10 @@ mod tests {
         // misaligned when they are not.
         let column =
             |line: &str, hint: &str| line.find(hint).map(|byte| line[..byte].chars().count());
+        let last = crate::tui::command::HELP.last().unwrap().1;
         let starts: Vec<usize> = screen
             .lines()
-            .filter_map(|l| column(l, "this list").or_else(|| column(l, "the team panel")))
+            .filter_map(|l| column(l, "this list").or_else(|| column(l, last)))
             .collect();
         assert_eq!(starts.len(), 2, "expected both rows:\n{screen}");
         assert_eq!(starts[0], starts[1], "hints must share a column:\n{screen}");
@@ -8625,14 +8612,17 @@ mod tests {
     fn the_splash_yields_to_the_completion_popup_rather_than_clipping_it() {
         let mut a = app();
         a.input = "/".into();
-        // Sized to the palette, as in `the_completion_hints_line_up_in_a_column`:
-        // `/team` is the sentinel for "the far end of the list is reachable",
-        // so the screen has to be tall enough to hold the list it is the end of.
+        // Sized to the palette, as in `the_completion_hints_line_up_in_a_column`.
+        // The last command in the list is the sentinel for "the far end is
+        // reachable", so the screen has to be tall enough to hold the list it
+        // is the end of. Taken from `HELP` rather than named, so retiring a
+        // command moves the sentinel instead of breaking the test.
         let screen = rendered(&a, 100, popup_height());
+        let last = crate::tui::command::HELP.last().unwrap().1;
         assert!(screen.contains("this list"), "/help:\n{screen}");
         assert!(
-            screen.contains("the team panel"),
-            "/team, thirty rows further down:\n{screen}"
+            screen.contains(last),
+            "{last:?}, the far end of the list:\n{screen}"
         );
     }
 
@@ -10886,7 +10876,7 @@ mod tests {
     fn an_empty_board_screen_says_how_to_add_to_it() {
         let mut a = app();
         a.go(Workspace::Tasks);
-        assert!(rendered(&a, 100, 20).contains("/todo"));
+        assert!(rendered(&a, 100, 20).contains("n adds a task"));
     }
 
     // ---- activity ----
@@ -11061,7 +11051,7 @@ mod tests {
         let mut a = app();
         a.team = Some("crew".into());
         a.go(Workspace::Team);
-        assert!(rendered(&a, 100, 20).contains("/todo"));
+        assert!(rendered(&a, 100, 20).contains("n adds one"));
     }
 
     // ---- sizes ----
@@ -14255,8 +14245,8 @@ mod tests {
     /// The spec's own words: with zero roots it says so. An empty list would
     /// read as "no matches" and invite another keystroke that cannot help.
     ///
-    /// And it says so with the command that fixes it *from here*. The popup is
-    /// open and the cursor is in the chat box; a message naming a shell
+    /// And it says so with the keystroke that fixes it *from here*. The popup
+    /// is open and the cursor is in the chat box; a message naming a shell
     /// command is a message you cannot act on without leaving.
     #[test]
     fn the_picker_with_no_roots_says_so_rather_than_showing_an_empty_list() {
@@ -14267,15 +14257,15 @@ mod tests {
         a.open_mention(8);
         let frame = rendered(&a, 120, 30);
         assert!(frame.contains("no folder to search"), "{frame}");
-        assert!(frame.contains("/add-dir"), "{frame}");
+        assert!(frame.contains("Ctrl-G d"), "{frame}");
     }
 
     /// The full-screen picker says which tree it is walking.
     ///
     /// It mattered less when the base was always the directory `jod` was
-    /// launched in — you knew where you were. `/add-dir <path>` makes the base
-    /// somewhere you named a moment ago, and a list of bare relative paths
-    /// with no header is a list you cannot tell apart from the last one.
+    /// launched in — you knew where you were. The base is a parameter now, and
+    /// a list of bare relative paths with no header is a list you cannot tell
+    /// apart from the last one.
     #[test]
     fn the_full_screen_picker_names_the_tree_it_is_walking() {
         let mut a = app();

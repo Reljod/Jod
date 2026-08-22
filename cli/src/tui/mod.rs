@@ -79,8 +79,6 @@ pub enum Action {
     Send(String),
     /// Start an agent that runs without taking over the transcript.
     Delegate(String),
-    /// Hand an instruction to the orchestrator and let it decide the shape.
-    Orchestrate(String),
     /// Move the conversation to another harness, carrying its context across.
     ///
     /// Not something `apply_slash` can do: it needs a summary, a summary needs a
@@ -132,9 +130,9 @@ pub enum Action {
     /// Put the chat box into the main chat.
     ///
     /// The pinned conversation is one of several the TUI can be in, and this is
-    /// the verb that goes there — `⏎` on the fleet's top row, or `/main` with
-    /// no instruction. Distinct from [`Action::Orchestrate`], which hands over a
-    /// single instruction from wherever you already are and leaves you there.
+    /// the verb that goes there — `⏎` on the fleet's top row, or `/main`. It is
+    /// the only way in now: `/main <instruction>` used to hand one sentence over
+    /// from wherever you already were and leave you there, and it is gone.
     EnterMain,
     /// Put the chat box into a project's manager conversation.
     ///
@@ -187,8 +185,6 @@ pub enum Action {
     Watch(String),
     /// Arm or disarm a run's heartbeat — see [`command::Slash::Heartbeat`].
     Heartbeat { id: String, on: bool },
-    /// Say how to attach to an agent's tmux session.
-    Attach(String),
     /// Put a task on the watched team's board.
     AddTask(String),
     /// Mark a task on that board finished.
@@ -317,43 +313,17 @@ pub enum Action {
     /// worktree it claims, so a root added by hand is somewhere to read until
     /// something explicitly claims it.
     AddRoot(PathBuf),
-    RemoveRoot(PathBuf),
-    /// Put a repository in the catalog an unqualified instruction is resolved
-    /// against.
+    /// Take a repository out of the working set — `x` on a fleet project row.
     ///
-    /// Distinct from [`Action::AddRoot`], which is about *permission* — what
-    /// this one conversation may read. A project is about *reference*: it is
-    /// what "let's fix this" resolves to, it outlives the conversation, and
-    /// until one is listed every instruction has to spell the path out.
-    ///
-    /// The path is already resolved by the time it gets here — see
-    /// `apply_slash`, which refuses one that is not a directory rather than
-    /// writing a row nothing will ever match.
-    AddProject(PathBuf),
-    /// Take a repository out of the working set — `x` on a fleet project row,
-    /// or `/project untrack <name>`.
-    ///
-    /// The two routes know different things, and the difference is the whole
-    /// reason both fields are here. The fleet row carries the project's id, so
-    /// there is nothing to resolve and nothing to be ambiguous about — the
-    /// cursor was on exactly one repository. A typed name carries no id, so it
-    /// has to be looked up, and two checkouts called `proj` is the case where
-    /// picking one is worse than refusing.
-    ///
-    /// Collapsing this to a name would have made `x` on a row refuse because
-    /// some *other* row shares its name, which is the console arguing with a
-    /// finger already pointing at the answer. The name comes along either way,
-    /// because every sentence about what happened has to say it.
+    /// The id is what the row carries, so there is nothing to resolve and
+    /// nothing to be ambiguous about: the cursor was on exactly one
+    /// repository. `id` stays an `Option` because the store's own call takes
+    /// either, and the name comes along either way because every sentence
+    /// about what happened has to say it.
     UntrackProject {
         id: Option<String>,
         name: String,
     },
-    /// Print the catalog, and put it on screen.
-    ListProjects,
-    /// Print this conversation's roots, in the user's own order, saying which
-    /// is writable — the one fact that decides whether an agent may change
-    /// anything there.
-    ListRoots,
     /// A verb the screens offer and the store cannot carry out yet. Named
     /// rather than silently ignored, and naming the missing call rather than
     /// apologising, so the gap is a to-do and not a mystery.
@@ -1613,9 +1583,6 @@ async fn perform(
         Action::RunCommand { prompt, command } => {
             send_turn(jod, app, opts, thread, prompt, command).await
         }
-        Action::Orchestrate(instruction) => {
-            orchestrate(jod, app, opts, thread, instruction, Origin::Typed).await;
-        }
         Action::EnterMain => enter_main(jod, app, opts, thread, false).await,
         Action::EnterManager(conversation) => match jod.store() {
             None => app.push(Entry::Notice(format!("{NO_STORE} — there are no managers"))),
@@ -1837,15 +1804,6 @@ async fn perform(
             thread.watching_own_turn = false;
             watch(jod, app, id).await
         }
-        Action::Attach(id) => match jod.agent(&id).await {
-            Ok(agent) => {
-                app.push(Entry::Notice(format!(
-                    "from another terminal: {}",
-                    agent.watch_command
-                )));
-            }
-            Err(e) => app.push(Entry::Notice(format!("no agent {}: {e}", short(&id)))),
-        },
         Action::AddTask(title) => {
             let (Some(team), Some(store)) = (app.team.clone(), jod.store()) else {
                 app.push(Entry::Notice(
@@ -1942,80 +1900,8 @@ async fn perform(
                 None => "no conversation to add a root to yet — say something first".to_string(),
             })
         }
-        Action::RemoveRoot(path) => {
-            let conversation = app.conversation.clone();
-            on_store(jod, app, move |store| match conversation {
-                Some(conversation) => match store.remove_root(&conversation, &path) {
-                    Ok(true) => format!("removed {}", path.display()),
-                    Ok(false) => format!("{} was not one of this session's roots", path.display()),
-                    Err(e) => format!("{} not removed: {e}", path.display()),
-                },
-                None => NO_STORE.to_string(),
-            })
-        }
-        // Multi-line, like `/config` and `/sessions`: folding a list of roots
-        // into one notice is several directories in a paragraph.
-        Action::ListRoots => {
-            let lines = match (jod.store(), app.conversation.clone()) {
-                (Some(store), Some(conversation)) => {
-                    let roots = store.roots(&conversation).unwrap_or_default();
-                    if roots.is_empty() {
-                        vec![
-                            "no roots — /add-dir picks one (Ctrl-G d), and `@` says so until there is"
-                                .to_string(),
-                        ]
-                    } else {
-                        // Spelled out, as `jod root ls` already does. `ro` was
-                        // two letters nothing on the screen explained, and it
-                        // is the one fact on the line worth reading: a checkout
-                        // is read-only, which is *why* an agent's edits land in
-                        // a worktree rather than where you are looking. Someone
-                        // who does not know what `ro` means is exactly the
-                        // person that surprises.
-                        roots
-                            .iter()
-                            .map(|r| {
-                                format!(
-                                    "{}  {}  {}",
-                                    if r.writable { "writable " } else { "read-only" },
-                                    r.label(),
-                                    r.path.display()
-                                )
-                            })
-                            .collect()
-                    }
-                }
-                _ => vec!["no conversation yet, so no roots to list".to_string()],
-            };
-            for line in lines {
-                app.push(Entry::Notice(line));
-            }
-        }
-        Action::AddProject(path) => {
-            // The catalog itself is the answer, so the box that holds it comes
-            // out. A notice alone would be the whole of the feedback, and on a
-            // fresh session the transcript is not on screen at all — see
-            // `ui::fresh`. The panel is drawn beside every screen, so it is the
-            // one channel that shows the new row whatever you are looking at.
-            reveal_catalog(app);
-            on_store(jod, app, move |store| {
-                match store.add_project(jod_core::projects::NewProject::at(&path)) {
-                    // What it will answer to, not merely that it worked: the
-                    // spoken forms are what an offhand mention is matched
-                    // against, and they are derived rather than typed, so this
-                    // is the only place you find out what they came out as.
-                    Ok(project) => format!(
-                        "{} — say {}",
-                        project.summary_line(),
-                        project.spoken_forms().join(", ")
-                    ),
-                    Err(e) => format!("{} not catalogued: {e}", path.display()),
-                }
-            })
-        }
-        // The catalog comes out for the same reason `AddProject` brings it out:
-        // the panel is where the effect is visible, and a row leaving it is as
-        // worth seeing as one arriving.
+        // The catalog comes out because the panel is where the effect is
+        // visible, and a row leaving it is worth seeing.
         //
         // No `Overlay::Confirm`. That overlay is titled "this cannot be undone"
         // and means it, and this can: nothing is deleted, the works and
@@ -2084,26 +1970,6 @@ async fn perform(
                     ),
                 }
             });
-            refresh_workspaces(jod, app);
-        }
-        // Multi-line, like `/root` and `/sessions`: a catalog folded into one
-        // notice is a paragraph of directories.
-        Action::ListProjects => {
-            reveal_catalog(app);
-            let lines = match jod.store() {
-                Some(store) => {
-                    let projects = store.projects(false).unwrap_or_default();
-                    if projects.is_empty() {
-                        vec![CATALOG_EMPTY.to_string()]
-                    } else {
-                        projects.iter().map(|p| p.summary_line()).collect()
-                    }
-                }
-                None => vec![NO_STORE.to_string()],
-            };
-            for line in lines {
-                app.push(Entry::Notice(line));
-            }
             refresh_workspaces(jod, app);
         }
         Action::DismissCard(id) => on_store(jod, app, |store| match store.dismiss_card(id) {
@@ -2223,8 +2089,8 @@ const NO_STORE: &str = "no database is open, so nothing was changed";
 /// panel's. The panel says the same thing in thirty columns — see
 /// `ui::CATALOG_REMEDY` — and both name the command, because a remedy the
 /// empty state does not name is one you have to already know.
-const CATALOG_EMPTY: &str = "no projects — /project add <path> catalogs one, and until one is \
-                             listed “let's fix this” has nothing to resolve to";
+const CATALOG_EMPTY: &str = "no projects — `jod project add <path>` at a shell catalogs one, and \
+                             until one is listed “let's fix this” has nothing to resolve to";
 
 /// Put the catalog where it can be seen before writing to it.
 ///
@@ -4880,7 +4746,7 @@ fn on_tree_key(app: &mut App, key: KeyEvent, viewport: usize) -> Option<Option<A
                         // one.
                         None => "this work belongs to no catalogued repository, so there is \
                                  nothing to untrack — it sits at the top level because it has \
-                                 no project, and `/project add <path>` catalogs one"
+                                 no project, and `jod project add <path>` catalogs one"
                             .to_string(),
                     },
                 }));
@@ -5179,7 +5045,7 @@ fn on_fleet_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     if !app.has_tree() && key.code == KeyCode::Char('x') {
         app.push(Entry::Notice(
             "no projects on the fleet to untrack — these sessions belong to no work, \
-             and `/project add` catalogs a repository"
+             and `jod project add` at a shell catalogs a repository"
                 .into(),
         ));
         return None;
@@ -6079,68 +5945,6 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
             // the main chat, which binds the same field.
             return Some(Action::NewThread);
         }
-        Slash::Root(what) => {
-            return match what {
-                command::RootCmd::List => Some(Action::ListRoots),
-                // No path means the picker, which is the same screen `Ctrl-P`
-                // opens — one picker, reached two ways, rather than a second
-                // one that would drift.
-                command::RootCmd::Add(None) => {
-                    open_picker(app, launch_dir());
-                    None
-                }
-                command::RootCmd::Add(Some(path)) => Some(Action::AddRoot(PathBuf::from(path))),
-                // `/add-dir <where>` — the same picker, started somewhere you
-                // name. Refused rather than opened empty when the name is not
-                // a directory: a picker with no rows would read as "nothing
-                // here" when the truth is "that is not a place".
-                command::RootCmd::AddFrom(named) => {
-                    match picker::base_named(&named) {
-                        Some(base) => open_picker(app, base),
-                        None => app.push(Entry::Notice(format!(
-                            "{named} is not a directory — /add-dir takes somewhere that exists, \
-                             or nothing at all to pick from here"
-                        ))),
-                    }
-                    None
-                }
-                command::RootCmd::Remove(path) => Some(Action::RemoveRoot(PathBuf::from(path))),
-            }
-        }
-        Slash::Project(what) => {
-            return match what {
-                command::ProjectCmd::List => Some(Action::ListProjects),
-                // Nothing after `add` is the directory the console was launched
-                // in — the same default `jod project add` takes from the shell.
-                command::ProjectCmd::Add(None) => Some(Action::AddProject(launch_dir())),
-                // Resolved through the picker's own opener, which expands `~`,
-                // makes a relative path absolute and canonicalises the result:
-                // the catalog is matched against later, so two spellings of one
-                // checkout would be two projects.
-                //
-                // Refused rather than stored when it is not a directory. The
-                // CLI keeps an unresolvable path as given, which is right for a
-                // script that is ahead of the filesystem; here it is a typo,
-                // and a row nothing will ever match is worse than no row.
-                command::ProjectCmd::Add(Some(named)) => match picker::base_named(&named) {
-                    Some(path) => Some(Action::AddProject(path)),
-                    None => {
-                        app.push(Entry::Notice(format!(
-                            "{named} is not a directory — /project add takes a checkout that \
-                             exists, or nothing at all for the one Jod was launched in"
-                        )));
-                        None
-                    }
-                },
-                // A name, and not run through the picker: this one names a row
-                // that is already catalogued, so a path on disk is neither
-                // needed nor a good check — the checkout of an untracked
-                // project is often the one that has already been deleted.
-                command::ProjectCmd::Untrack(name) => {
-                    Some(Action::UntrackProject { id: None, name })
-                }
-            }
-        }
         Slash::Resume(id) => match app.resolve_session(&id) {
             app::Resolved::Session(session) => {
                 app.resume = Resume::Session(session.clone());
@@ -6196,35 +6000,9 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 ))),
             }
         }
-        Slash::Memory(query) => {
-            app.go(Workspace::Memory);
-            if let Some(q) = query {
-                let list = app.list_mut(Workspace::Memory);
-                list.filter = Some(q);
-                list.editing_filter = false;
-                app.reconcile();
-            }
-        }
         Slash::NewKind(ws) => {
             app.go(ws);
             return begin_new(app, ws);
-        }
-        // `/pause` and `/unpause` are the same verb typed two ways: both toggle,
-        // because the alternative is a command that reports success having
-        // changed nothing when the thing was already in the state asked for.
-        Slash::Pause(name) | Slash::Unpause(name) => {
-            return match named(app, &name) {
-                Named::Schedule => Some(Action::ToggleSchedule(name)),
-                Named::Goal => Some(Action::ToggleGoal(name)),
-                Named::Neither | Named::Both => None,
-            }
-        }
-        Slash::Run(name) => {
-            return match named(app, &name) {
-                Named::Schedule => Some(Action::RunSchedule(name)),
-                Named::Goal => Some(Action::RunGoal(name)),
-                Named::Neither | Named::Both => None,
-            }
         }
         Slash::Remember {
             subject,
@@ -6255,17 +6033,11 @@ fn apply_slash(app: &mut App, slash: command::Slash) -> Option<Action> {
                 what: name,
             };
         }
-        Slash::Delegate(prompt) => return Some(Action::Delegate(prompt)),
-        Slash::Main(instruction) => return Some(Action::Orchestrate(instruction)),
         Slash::EnterMain => return Some(Action::EnterMain),
         Slash::Stop(which) => return resolve_agent(app, &which).map(Action::Stop),
-        Slash::Watch(which) => return resolve_agent(app, &which).map(Action::Watch),
         Slash::Heartbeat { which, on } => {
             return resolve_agent(app, &which).map(|id| Action::Heartbeat { id, on })
         }
-        Slash::Attach(which) => return resolve_agent(app, &which).map(Action::Attach),
-        Slash::Todo(title) => return Some(Action::AddTask(title)),
-        Slash::Done(id) => return Some(Action::FinishTask(id)),
         Slash::Clear => {
             // The same three fields `/new` resets, for the same reason: they
             // are what an ordinary turn resumes from, and a cleared screen in
@@ -6592,43 +6364,6 @@ fn remember_fact(store: &Store, subject: &str, predicate: &str, object: &str) ->
     }
 }
 
-/// What kind of thing a name typed at `/pause`, `/unpause` or `/run` is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Named {
-    Schedule,
-    Goal,
-    /// A name that is both. Refused rather than guessed at.
-    Both,
-    Neither,
-}
-
-/// Decide which screen a typed name belongs to, and say so when it cannot.
-///
-/// Schedules and goals share a namespace on screen but not in the store, so one
-/// name can legitimately be both — and pausing the wrong one is invisible until
-/// the thing that should have happened does not. Exact matches only: a prefix
-/// that pauses the wrong nightly job is the same mistake with a shorter cause.
-fn named(app: &mut App, name: &str) -> Named {
-    let schedule = app.schedules.iter().any(|s| s.name == name);
-    let goal = app.goals.iter().any(|g| g.name == name);
-    match (schedule, goal) {
-        (true, false) => Named::Schedule,
-        (false, true) => Named::Goal,
-        (true, true) => {
-            app.push(Entry::Notice(format!(
-                "{name} is both a schedule and a goal — open the screen and press p there"
-            )));
-            Named::Both
-        }
-        (false, false) => {
-            app.push(Entry::Notice(format!(
-                "no schedule or goal called {name} — /schedules and /goals list them"
-            )));
-            Named::Neither
-        }
-    }
-}
-
 /// Where a workspace command lands: the workspace, unless you are already
 /// there, in which case home.
 fn toggled(here: Workspace, asked: Workspace) -> Workspace {
@@ -6639,7 +6374,7 @@ fn toggled(here: Workspace, asked: Workspace) -> Workspace {
     }
 }
 
-/// Turn what was typed at `/stop`, `/watch` or `/attach` into one agent id.
+/// Turn what was typed at `/stop` or `/heartbeat` into one agent id.
 ///
 /// A prefix is enough, because the panel shows eight characters and retyping a
 /// UUID is not a user interface. An ambiguous or unknown one is refused rather
@@ -9857,7 +9592,8 @@ mod tests {
         assert!(app.queued.is_empty());
     }
 
-    /// The key that makes several jobs at once possible without leaving the UI.
+    /// The key that makes several jobs at once possible without leaving the UI
+    /// — and the only route to a background run, now that `/delegate` is gone.
     #[test]
     fn ctrl_b_delegates_the_typed_line_to_a_background_agent() {
         let mut app = app_on(HarnessKind::ClaudeCode);
@@ -9961,16 +9697,18 @@ mod tests {
         }
     }
 
-    /// `/main` with an instruction sends one; `/main` alone goes there. It used
-    /// to refuse the second form as a missing argument, which left the pinned
-    /// chat with no keyboard route into it at all.
+    /// `/main` goes there, and takes nothing. It used to refuse the bare form
+    /// as a missing argument, which left the pinned chat with no keyboard route
+    /// into it at all; now the bare form is the only form.
     #[test]
-    fn bare_main_enters_the_chat_and_main_with_words_sends_to_it() {
+    fn bare_main_enters_the_chat() {
         assert_eq!(command::parse("/main"), Some(command::Slash::EnterMain));
-        assert_eq!(
+        // Words after it are refused rather than dropped, so an instruction
+        // typed out of habit is not swallowed by a command that moved you.
+        assert!(matches!(
             command::parse("/main count the rust files"),
-            Some(command::Slash::Main("count the rust files".into()))
-        );
+            Some(command::Slash::Refused(_))
+        ));
 
         let mut app = app_on(HarnessKind::ClaudeCode);
         assert_eq!(
@@ -10249,31 +9987,10 @@ mod tests {
     fn naming_an_agent_that_does_not_exist_says_so() {
         let mut app = app_on(HarnessKind::ClaudeCode);
         assert_eq!(
-            apply_slash(&mut app, command::Slash::Watch("zz".into())),
+            apply_slash(&mut app, command::Slash::Stop("zz".into())),
             None
         );
         assert!(last_notice(&app).contains("no agent"));
-    }
-
-    #[test]
-    fn delegate_reaches_the_loop_as_a_background_spawn() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Delegate("do it".into())),
-            Some(Action::Delegate("do it".into()))
-        );
-    }
-
-    /// The TUI is the interface that matters, so the orchestrator has to be
-    /// reachable from it — a headline feature only the CLI can reach is a
-    /// feature most of its use will never see.
-    #[test]
-    fn the_orchestrator_reaches_the_loop_as_its_own_action() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Main("sweep the PRs daily".into())),
-            Some(Action::Orchestrate("sweep the PRs daily".into()))
-        );
     }
 
     // ---- board ids ----
@@ -11240,24 +10957,37 @@ mod tests {
 
     // ---- the palette reaches the same places ----
 
-    /// A screen you can open one way and not the other is a screen half the
-    /// users never find.
+    /// The commands that name a screen have to reach it. The palette is
+    /// deliberately shorter than the menu now — memory, activity and the team
+    /// panel lost their words — so this covers only the ones that stayed, and
+    /// [`the_which_key_menu_answers_to_the_digits_it_prints`] is what keeps
+    /// every screen reachable.
     #[test]
-    fn every_workspace_is_reachable_by_a_slash_command_as_well_as_a_letter() {
+    fn every_workspace_command_reaches_its_screen() {
         for (line, expected) in [
-            ("/agents", Workspace::Fleet),
-            ("/memory", Workspace::Memory),
+            ("/fleet", Workspace::Fleet),
             ("/schedules", Workspace::Schedules),
             ("/goals", Workspace::Goals),
             ("/hooks", Workspace::Hooks),
             ("/tasks", Workspace::Tasks),
-            ("/activity", Workspace::Activity),
-            ("/team", Workspace::Team),
         ] {
             let mut app = app_on(HarnessKind::ClaudeCode);
             let slash = command::parse(line).unwrap_or_else(|| panic!("{line} did not parse"));
             apply_slash(&mut app, slash);
             assert_eq!(app.workspace, expected, "{line}");
+        }
+    }
+
+    /// The screens whose commands were cut are still on the `Ctrl-G` menu, so
+    /// a shorter palette did not make anything unreachable.
+    #[test]
+    fn the_screens_that_lost_their_command_are_still_on_the_menu() {
+        for ws in [Workspace::Memory, Workspace::Activity, Workspace::Team] {
+            assert!(
+                Workspace::MENU.contains(&ws),
+                "{} has no command any more, so the menu is its only way in",
+                ws.menu_name()
+            );
         }
     }
 
@@ -11270,20 +11000,6 @@ mod tests {
         assert_eq!(app.workspace, Workspace::Fleet);
         apply_slash(&mut app, command::Slash::Open(Workspace::Fleet));
         assert_eq!(app.workspace, Workspace::Chat);
-    }
-
-    /// `/memory prefers` should land you looking at the answer, not at the
-    /// list with the query still to type.
-    #[test]
-    fn memory_with_a_query_opens_the_list_already_filtered() {
-        let mut app = with_memory();
-        app.go(Workspace::Chat);
-        apply_slash(&mut app, command::Slash::Memory(Some("linear".into())));
-        assert_eq!(app.workspace, Workspace::Memory);
-        assert_eq!(
-            app.row_ids(Workspace::Memory),
-            vec!["linear-is-truth".to_string()]
-        );
     }
 
     /// Naming a row is what makes `/schedule <name>` worth having beside
@@ -11532,66 +11248,6 @@ mod tests {
     }
 
     // ---- the verbs, as slash commands ----
-
-    fn with_both_screens() -> App {
-        let mut app = with_schedules();
-        app.goals = with_goals().goals;
-        app.go(Workspace::Chat);
-        app
-    }
-
-    #[test]
-    fn run_typed_at_a_name_reaches_whichever_kind_owns_it() {
-        let mut app = with_both_screens();
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Run("nightly-inbox".into())),
-            Some(Action::RunSchedule("nightly-inbox".into()))
-        );
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Run("ship-the-tui".into())),
-            Some(Action::RunGoal("ship-the-tui".into()))
-        );
-    }
-
-    /// `/pause` and `/unpause` are the same verb: a command that reports success
-    /// having changed nothing is worse than one that toggles.
-    #[test]
-    fn pause_and_unpause_both_flip_whichever_state_the_thing_is_in() {
-        let mut app = with_both_screens();
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Pause("nightly-inbox".into())),
-            Some(Action::ToggleSchedule("nightly-inbox".into()))
-        );
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Unpause("ship-the-tui".into())),
-            Some(Action::ToggleGoal("ship-the-tui".into()))
-        );
-    }
-
-    #[test]
-    fn pausing_a_name_that_is_neither_a_schedule_nor_a_goal_says_so() {
-        let mut app = with_both_screens();
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Pause("nope".into())),
-            None
-        );
-        let last = last_notice(&app);
-        assert!(last.contains("no schedule or goal called nope"), "{last}");
-    }
-
-    /// Pausing the wrong one of two things sharing a name is invisible until the
-    /// thing that should have happened does not.
-    #[test]
-    fn a_name_that_is_both_a_schedule_and_a_goal_is_refused_rather_than_guessed() {
-        let mut app = with_both_screens();
-        app.goals[0].name = "nightly-inbox".into();
-        assert_eq!(
-            apply_slash(&mut app, command::Slash::Pause("nightly-inbox".into())),
-            None
-        );
-        let last = last_notice(&app);
-        assert!(last.contains("both a schedule and a goal"), "{last}");
-    }
 
     /// Typed or pointed at, forgetting is the same irreversible thing.
     #[test]
@@ -13212,7 +12868,7 @@ mod tests {
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
         let said = last_notice(&app);
         assert!(said.contains("no catalogued repository"), "{said}");
-        assert!(said.contains("/project add"), "{said}");
+        assert!(said.contains("jod project add"), "{said}");
         assert!(
             !said.contains("the group this one is in"),
             "there is no group above a top-level row: {said}"
@@ -13234,7 +12890,7 @@ mod tests {
         assert_eq!(press(&mut app, KeyCode::Char('x')), None);
         let said = last_notice(&app);
         assert!(said.contains("no projects on the fleet"), "{said}");
-        assert!(said.contains("/project add"), "{said}");
+        assert!(said.contains("jod project add"), "{said}");
     }
 
     /// And a project row is a heading, so it folds rather than pretending to
@@ -13333,12 +12989,6 @@ mod tests {
         let conversation = store
             .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
             .unwrap();
-        store
-            .add_root(
-                &conversation.id,
-                jod_core::roots::NewRoot::reading("/srv/reljod/notes"),
-            )
-            .unwrap();
 
         let mut app = app_on(HarnessKind::ClaudeCode);
         app.conversation = Some(conversation.id.clone());
@@ -13356,26 +13006,18 @@ mod tests {
             &mut app,
             &options(),
             &mut Thread::default(),
-            Action::ListRoots,
+            Action::Config(config::Request::List),
         )
         .await;
 
         let after = on_screen(&app, 120, 40);
         assert!(
-            after.contains("/srv/reljod/notes"),
-            "the roots `/root` listed have to be on the screen:\n{after}"
+            after.contains("thinking"),
+            "the preferences `/config` listed have to be on the screen:\n{after}"
         );
         assert!(
             !after.contains("an orchestrator, not a chat window"),
             "and the splash has to have got out of the way:\n{after}"
-        );
-        // Spelled out, as `jod root ls` already does. `ro` was two letters
-        // nothing on screen explained, and it is the one fact on the line worth
-        // reading: a checkout is read-only, which is *why* an agent's edits
-        // land in a worktree rather than where the person is looking.
-        assert!(
-            after.contains("read-only") || after.contains("writable"),
-            "the line says what it means rather than abbreviating it:\n{after}"
         );
     }
 
@@ -15768,69 +15410,6 @@ mod tests {
         );
     }
 
-    /// `/add-dir` is the folder-first name for the same picker, so it must
-    /// land in exactly the state the key does — one picker, three doors.
-    #[test]
-    fn add_dir_opens_the_same_picker_the_key_does() {
-        let mut typed = app_on(HarnessKind::ClaudeCode);
-        apply_slash(&mut typed, command::parse("/add-dir").expect("parses"));
-        let mut chorded = app_on(HarnessKind::ClaudeCode);
-        picker_chord(&mut chorded);
-        assert_eq!(typed.overlay, chorded.overlay);
-    }
-
-    /// The argument is a *base*, and this is the capability that did not exist
-    /// before: a console launched inside one repository can be pointed at a
-    /// tree that has nothing to do with it.
-    #[test]
-    fn add_dir_with_a_path_walks_that_tree_rather_than_the_launch_directory() {
-        let base = std::env::temp_dir().join(format!("jod-add-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("notes")).expect("a fixture tree");
-
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        let line = format!("/add-dir {}", base.display());
-        apply_slash(&mut app, command::parse(&line).expect("parses"));
-
-        let Overlay::Picker(p) = &app.overlay else {
-            panic!("/add-dir <path> opens the picker, got {:?}", app.overlay);
-        };
-        assert_eq!(p.base, std::fs::canonicalize(&base).expect("a real path"));
-        assert_ne!(
-            p.base,
-            std::env::current_dir().expect("a working directory"),
-            "the point of the argument is to leave where you are"
-        );
-        assert!(
-            p.entries.contains(&"notes".to_string()),
-            "and to walk the named tree: {:?}",
-            p.entries
-        );
-        // `.` is still the first row, so "this exact folder" costs one `⏎`.
-        assert_eq!(p.rows[0].path, ".");
-        assert_eq!(p.chosen().as_deref(), Some(p.base.as_path()));
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A name that is not a directory is said out loud. An empty picker would
-    /// read as "there is nothing here" when the truth is "that is not a
-    /// place", and the next keystroke would look like it might help.
-    #[test]
-    fn add_dir_somewhere_that_does_not_exist_says_so_and_opens_nothing() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        apply_slash(
-            &mut app,
-            command::parse("/add-dir /no/such/folder/anywhere").expect("parses"),
-        );
-        assert_eq!(app.overlay, Overlay::None);
-        assert!(
-            last_notice(&app).contains("not a directory"),
-            "got {:?}",
-            last_notice(&app)
-        );
-    }
-
     // ---- the catalog, from inside the console ----
 
     /// What is actually on the screen, so a test can assert on the panel
@@ -15854,65 +15433,6 @@ mod tests {
             .join("\n")
     }
 
-    /// A directory to catalog, named after the test so two cannot collide.
-    fn a_checkout(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("jod-project-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("a fixture checkout");
-        // Canonical, because `add_project` normalises what it stores and the
-        // temp directory is a symlink on macOS.
-        std::fs::canonicalize(&path).expect("a real path")
-    }
-
-    /// BUG-5. The capability existed in `core` and in `jod project add`, and
-    /// the console could reach neither: the catalog that resolves an
-    /// unqualified instruction could only be filled from a second terminal.
-    ///
-    /// Driven from a default `App` and a real store, through `parse` — no
-    /// field set by hand, and the panel opened by the key that opens it —
-    /// because the state going non-empty is only half of "it visibly worked".
-    #[tokio::test]
-    async fn a_project_typed_into_the_console_reaches_the_catalog_and_the_panel() {
-        let checkout = a_checkout("tetris");
-        let jod = jod_with(store());
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        let mut thread = Thread::default();
-
-        // The panel a fresh console has, opened the way a user opens it.
-        assert!(!app.panel, "a fresh console has the panel shut");
-        press(&mut app, KeyCode::BackTab);
-        assert!(app.projects.is_empty(), "and an empty catalog");
-
-        let line = format!("/project add {}", checkout.display());
-        let action = apply_slash(
-            &mut app,
-            command::parse(&line).expect("/project add parses"),
-        )
-        .expect("/project add is a store action, not a screen one");
-        perform(&jod, &mut app, &options(), &mut thread, action).await;
-
-        assert_eq!(
-            app.projects.len(),
-            1,
-            "the catalog is still empty after /project add"
-        );
-        let name = checkout.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(app.projects[0].name, name);
-        assert_eq!(app.projects[0].path, checkout);
-
-        // And it is on the screen, not merely in the struct.
-        let after = screen(&app, 100, 30);
-        assert!(
-            after.contains(&name),
-            "the panel does not show it:\n{after}"
-        );
-
-        // The store is the system of record, so it survives this console.
-        let listed = jod.store().unwrap().projects(false).unwrap();
-        assert_eq!(listed.len(), 1, "and it was written down");
-
-        let _ = std::fs::remove_dir_all(&checkout);
-    }
 
     /// The empty state has to name its own remedy, the way the roots one does.
     /// `nothing set` named none, and there was none to name.
@@ -15926,7 +15446,7 @@ mod tests {
         assert!(app.projects_open);
         let open = screen(&app, 100, 30);
         assert!(
-            open.contains("/project add"),
+            open.contains("jod project add"),
             "the expanded empty state names no remedy:\n{open}"
         );
 
@@ -15938,7 +15458,7 @@ mod tests {
         assert!(!app.projects_open);
         let shut = screen(&app, 100, 30);
         assert!(
-            shut.contains("/project add"),
+            shut.contains("jod project add"),
             "the collapsed empty state names no remedy:\n{shut}"
         );
     }
@@ -16416,62 +15936,6 @@ mod tests {
         let mut out = ui::Painted::default();
         terminal.draw(|f| out = ui::draw(f, app)).unwrap();
         out.panel
-    }
-
-    /// `/project` with nothing after it lists, and brings the box it is
-    /// listing into with it — on a fresh session the transcript is not on
-    /// screen at all, so a notice alone would be a command with no visible
-    /// answer.
-    #[tokio::test]
-    async fn listing_the_catalog_brings_the_panel_with_it() {
-        let checkout = a_checkout("listed");
-        let jod = jod_with(store());
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        let mut thread = Thread::default();
-
-        let empty = apply_slash(&mut app, command::parse("/project").expect("parses"))
-            .expect("/project lists");
-        perform(&jod, &mut app, &options(), &mut thread, empty).await;
-        assert!(app.panel, "listing an empty catalog still shows the box");
-        assert!(
-            last_notice(&app).contains("/project add"),
-            "got {:?}",
-            last_notice(&app)
-        );
-
-        let line = format!("/project add {}", checkout.display());
-        let add = apply_slash(&mut app, command::parse(&line).expect("parses")).expect("adds");
-        perform(&jod, &mut app, &options(), &mut thread, add).await;
-
-        let listed = apply_slash(&mut app, command::parse("/project ls").expect("parses"))
-            .expect("/project ls lists");
-        perform(&jod, &mut app, &options(), &mut thread, listed).await;
-        let name = checkout.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(
-            last_notice(&app).contains(&name),
-            "the listing does not name it: {:?}",
-            last_notice(&app)
-        );
-
-        let _ = std::fs::remove_dir_all(&checkout);
-    }
-
-    /// A typo must not become a row. The catalog is matched against later, so
-    /// a project pointing nowhere is a mention that resolves to nothing —
-    /// worse than no project, because it looks like it worked.
-    #[test]
-    fn cataloguing_somewhere_that_does_not_exist_says_so_and_stores_nothing() {
-        let mut app = app_on(HarnessKind::ClaudeCode);
-        let action = apply_slash(
-            &mut app,
-            command::parse("/project add /no/such/checkout/anywhere").expect("parses"),
-        );
-        assert!(action.is_none(), "a typo must not reach the store");
-        assert!(
-            last_notice(&app).contains("not a directory"),
-            "got {:?}",
-            last_notice(&app)
-        );
     }
 
     /// The same four keys as the `@` popup, which is the whole claim of "one

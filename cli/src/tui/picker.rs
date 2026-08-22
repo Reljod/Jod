@@ -19,8 +19,8 @@
 //! It began as `std::env::current_dir()` at every call site, which quietly
 //! made half the filesystem unreachable: a console launched inside one
 //! repository could not be pointed at the one next to it, so `@` could never
-//! see it either. [`base_named`] is the escape — `/add-dir <path>` opens the
-//! same picker somewhere else. Everything below the base is unchanged.
+//! see it either. The base is passed in instead, and everything below it is
+//! unchanged.
 //!
 //! ## Why it enumerates directories itself
 //!
@@ -144,55 +144,6 @@ impl Picker {
             self.base.join(&row.path)
         })
     }
-}
-
-/// Where a picker asked for by name should start walking, or `None` when the
-/// name is not a directory.
-///
-/// The launch directory is the only base the picker had, and that made every
-/// tree outside it unreachable: a console started inside one repository could
-/// never be pointed at the one beside it. Naming the base is the whole of the
-/// fix — the matcher, the rows and the keys are untouched.
-///
-/// `~` expands, a relative name resolves against the working directory, and
-/// anything that is not a directory comes back `None` rather than an empty
-/// picker that would blame the query for the mistake in the argument.
-pub fn base_named(named: &str) -> Option<PathBuf> {
-    let named = named.trim();
-    // Nothing is not a name. Left to fall through it would resolve to the
-    // working directory, so `/add-dir "   "` would silently mean `/add-dir`.
-    if named.is_empty() {
-        return None;
-    }
-    let expanded = expand_home(named)?;
-    let absolute = if expanded.is_absolute() {
-        expanded
-    } else {
-        std::env::current_dir().ok()?.join(expanded)
-    };
-    if !absolute.is_dir() {
-        return None;
-    }
-    // Canonical, because the base is printed at the top of the picker and
-    // joined onto every row that is accepted: `../../notes` is not a sentence
-    // anyone wants to read back in `/root`.
-    Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
-}
-
-/// `~` and `~/…` as a real path.
-///
-/// `~otheruser` is deliberately not resolved: guessing that somebody else's
-/// home is a sibling of yours is how a walk ends up in the wrong tree, and a
-/// refusal a user can read beats a picker full of surprises.
-fn expand_home(named: &str) -> Option<PathBuf> {
-    let Some(rest) = named.strip_prefix('~') else {
-        return Some(PathBuf::from(named));
-    };
-    if !rest.is_empty() && !rest.starts_with('/') {
-        return None;
-    }
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(rest.trim_start_matches('/')))
 }
 
 /// Every directory under `base`, relative to it, breadth-first.
@@ -361,79 +312,6 @@ mod tests {
         assert!(skip(".cache"), "hidden directories are not workplaces");
         assert!(!skip("src"));
         assert!(!skip("core"));
-    }
-
-    /// A named base is the whole point of `/add-dir <path>`: without it the
-    /// picker can only ever see the tree `jod` happened to be launched in.
-    #[test]
-    fn a_named_directory_becomes_a_base_to_walk_from() {
-        let base = fixture("named");
-        std::fs::create_dir_all(base.join("cli")).expect("a fixture tree");
-
-        let found = base_named(&base.to_string_lossy()).expect("a real directory is a base");
-        // Canonical, because the base is printed and joined onto every row.
-        assert_eq!(found, std::fs::canonicalize(&base).unwrap());
-        let (entries, _) = directories(&found);
-        assert!(entries.contains(&"cli".to_string()), "{entries:?}");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A file and a name that is nothing are both `None`, so the caller can
-    /// say "that is not a place" instead of opening a picker with no rows,
-    /// which reads as "nothing here".
-    #[test]
-    fn something_that_is_not_a_directory_is_not_a_base() {
-        let base = fixture("not-a-dir");
-        std::fs::create_dir_all(&base).expect("a fixture tree");
-        let file = base.join("README.md");
-        std::fs::write(&file, "not a directory").expect("a file");
-
-        assert_eq!(base_named(&file.to_string_lossy()), None);
-        assert_eq!(base_named(&base.join("absent").to_string_lossy()), None);
-        assert_eq!(base_named(""), None, "and neither is nothing at all");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// `~/Developer` is how somebody escapes the launch directory, so the
-    /// tilde has to be a path rather than a directory nobody has.
-    #[test]
-    fn a_tilde_is_the_home_directory_and_not_a_folder_called_tilde() {
-        let Ok(home) = std::env::var("HOME") else {
-            return; // No home to expand against; nothing to assert.
-        };
-        let expected = std::fs::canonicalize(&home).ok();
-        assert_eq!(base_named("~"), expected);
-        assert_eq!(base_named("~/"), expected);
-    }
-
-    /// `~reljod` is somebody's home directory and this does not know where
-    /// homes live. Refusing beats guessing at a sibling of your own and
-    /// walking the wrong tree.
-    #[test]
-    fn another_users_home_is_refused_rather_than_guessed_at() {
-        assert_eq!(base_named("~someone-else/repo"), None);
-    }
-
-    /// Relative names resolve against the working directory, so `/add-dir ..`
-    /// does the obvious thing from inside a repository.
-    #[test]
-    fn a_relative_name_resolves_against_the_working_directory() {
-        let here = std::env::current_dir().expect("a working directory");
-        assert_eq!(base_named("."), std::fs::canonicalize(&here).ok());
-        assert_eq!(
-            base_named(".."),
-            std::fs::canonicalize(here.join("..")).ok()
-        );
-    }
-
-    /// Every filesystem test builds its own tree — a sanctioned fixture, not a
-    /// mock of the filesystem.
-    fn fixture(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("jod-picker-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        base
     }
 
     /// The walk is over a real directory, which is a sanctioned fixture: a
