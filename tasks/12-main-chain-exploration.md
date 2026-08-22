@@ -28,6 +28,56 @@ Two of the things that looked like findings were checked and were not, and they
 are recorded at the bottom under "Checked and not a bug" so nobody spends the
 afternoon refiling them.
 
+**Read this before you read anything else in the file.** The title says the
+chain was driven end to end. That is true of `main`, of the queue, and of the
+assistant's queue-reading, and it is **not** true of the rest. Because of X13,
+**the manager tier never ran, in any scenario here.** Main called `ask_manager`
+zero times in thirteen turns; it reached for `open_work` and `delegate` every
+time, and the guard that should have stopped it failed open. So every scenario
+below that looks like it tested main → manager → engineer actually tested
+main → work session. What the engineers did was observed; what a *manager*
+would have done with the same instruction was never seen once.
+
+That matters for how the passes below should be read. A pass here means "main
+did the right thing and the work session did the right thing". It is not
+evidence about planning, about a manager deciding whether an instruction is new
+work or something an agent of its own is already doing, or about the placement
+rules a manager owns. None of that was exercised. The next person to work this
+file should assume the manager and engineer tiers are **untested**, not
+"tested and fine".
+
+## What was not tested, and should be
+
+Named explicitly, because a list of scenarios that were run says nothing about
+the ones that were not, and the gaps here are larger than the coverage.
+
+- **The manager tier, at all.** See above. Everything about `ask_manager`,
+  `manager_preamble` and `plan_work` is unexercised. This is the single biggest
+  gap and it is a consequence of X13 rather than a choice.
+- **Engineer reuse and the roster.** Whether a second instruction on the same
+  subject reuses a warm engineer, and whether a different subject correctly
+  opens a new one, is the whole of `worktree-engineer-reuse-rules` (#236, merged)
+  and none of it was driven.
+- **The doorman's judgement, which is the half of the assistant that matters.**
+  The queue works — a message typed into a busy chat waits and is answered after
+  the turn. But every message queued in these runs was one that could wait, so
+  the assistant was never asked to decide, and `interrupt_main` was never seen
+  to fire. Nothing here tests an *urgent* message cutting a running turn short,
+  which is the behaviour Reljod actually asked for.
+- **Shift-Esc.** `/stop` was tested and works. Its twin was not, and D8 exists
+  because the terminal may not deliver the modified key at all.
+- **Multi-turn work with cards answered.** Cards were raised and left sitting.
+  Nothing here answers one and watches the work resume, so the card→answer→
+  resume loop is unverified from this side.
+- **Schedules, goals, memory and webhooks.** Untouched. They have their own area
+  files and this run added nothing to them.
+- **Concurrency.** One console, one chat. Two consoles on one store, or two
+  works in the same repository at once, were never tried — and the pin drift in
+  X13 suggests that is exactly where more lives.
+- **Recovery.** No harness was killed mid-run, no database was locked, no disk
+  filled *deliberately*. The one disk exhaustion that happened was an accident
+  and is recorded as such.
+
 ---
 
 ## X1. Main on AGY or OpenCode writes its delegations into the wrong database, and its engineers into the wrong directory
@@ -120,7 +170,7 @@ message naming the harness and the reason.
 ---
 
 ## X2. `jod chat` ignores role configuration completely
-Status: **open — fix is PR #251** · Severity: medium · Owner: the pull-request session
+Status: **fixed — PR #251, merged** · Severity: medium · Owner: the pull-request session
 
 `jod chat` is documented as the console without a screen — *"you `cd` into a
 repository and start talking"* (`cli/src/main.rs:4895`). It is not main, and it
@@ -246,7 +296,7 @@ what the limit is for and why it is the number it is.
 ---
 
 ## X5. A summariser run that fails is reported as a summary that came back empty, and it leaves you unable to change harness
-Status: **open — fix in progress, composing with PR #238** · Severity: high · Owner: the pull-request session
+Status: **open — fix is PR #252, open, composed with PR #238** · Severity: high · Owner: the pull-request session
 
 Switching the main chat's harness first summarises the conversation *on the
 harness you are leaving*, and hands that summary to the new one. When the
