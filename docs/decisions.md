@@ -4192,3 +4192,52 @@ object it happens to share with the older one. Only `CREATE` and `ADD COLUMN`
 are ever skipped, since they are the only statements that fail this way; a
 backfilling `INSERT` or `UPDATE` still takes the whole migration down, which is
 what it should do.
+
+## A harness switch summarises only when the thread will not fit
+
+`/harness opencode` spent a model call before it did anything. It asked the
+harness you were leaving to write a summary of the thread, waited for several
+paragraphs, compacted the whole conversation away at a loss fraction of 1.0, and
+opened the new one holding that summary and nothing else. Every switch cost a
+run, took as long as a model takes to write prose, and arrived holding strictly
+less than it started with.
+
+Nothing about moving a thread requires that. `Store::handoff` had already worked
+out what each harness accepts as prior context, and the reason a summary was
+there at all is one paragraph further down, in `Store::handoff_text`: two of the
+three carriers are structured and Jod can deliver neither. Claude Code would have
+to be started with `--input-format stream-json` and fed on stdin, and nothing
+runs `opencode import`. So the only carrier that arrives is the prompt one, and a
+whole transcript in a prompt looked like the thing you summarise to avoid.
+
+Nobody had measured whether it would fit. Measuring it is the change.
+
+`Store::switch_harness_whole` mints the new conversation with the source's
+`head_id` — which `carry_forward` was already doing — and then simply does not
+compact. The two rows share the thread's DAG, so `Store::transcript` walks
+straight back through the messages already sitting there and the carrier renders
+all of them. Nothing is copied and nothing is rewritten. What made a switch lossy
+was never the move; it was the compaction. The source thread is left live, so it
+is still resumable on its own harness exactly as it was before.
+
+`Store::switch_harness` stays, as the fallback. The transcript arrives as the
+first prompt of a fresh session — paid once, since the harness holds a session of
+its own from the second turn on — so a thread long enough to fill the window on
+arrival does still have to be summarised. The console decides in `fits_whole`,
+against the threshold the context bar already uses: three quarters of
+`CONTEXT_WINDOW`, counted in characters at three characters to the token, because
+a token count is the harness's to report and there is no session yet to report
+one. Three rather than the usual four for prose, since a transcript carries tool
+payloads and JSON, which pack fewer characters into a token than sentences do.
+Erring low buys a summary slightly sooner than strictly necessary, and what it
+avoids is a first turn that dies on a context error.
+
+`Store::continue_as_new` cannot take this route, and is refused if it tries. A
+compaction exists to make a context shorter, and one thread reachable from two
+rows is not shorter — it is a single context with two conversations pointing at
+it.
+
+Thinking still never crosses: reasoning blocks are signed by the model that
+produced them, so `Store::handoff` drops them before they reach any carrier. Nor
+does structure, when the target is AGY, which has no import path. The transcript
+itself no longer goes with them.
