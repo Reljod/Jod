@@ -2852,14 +2852,31 @@ impl Server {
     /// Unresolvable identity means "not main". A run Jod did not start has no
     /// pinned conversation to be, and refusing everything Jod cannot identify
     /// would break `jod run` against its own MCP server.
+    ///
+    /// # Why this asks about the thread and not about the pin
+    ///
+    /// This used to be one equality against `store.pinned_conversation()`, and
+    /// that made the answer depend on a value that moves underneath a running
+    /// turn. Compacting the main chat forks it into a new conversation and
+    /// moves the pin onto that one, which is correct in itself, but a turn that
+    /// began before the compaction keeps writing into the conversation it
+    /// started in. From the moment the pin moved, the equality said "not main"
+    /// about the main chat's own turn — and because both guards that read this
+    /// allow a caller that is not main, the result was not a wrong label but a
+    /// silent bypass of the whole layer above main, for the rest of that turn.
+    ///
+    /// [`Store::on_main_thread`] answers the same question against the thread:
+    /// the pinned conversation and every conversation it was compacted from,
+    /// walked back along `forked_from` under a bound. A conversation that *was*
+    /// main and has since been compacted is still main for the turn that was
+    /// already running in it.
     fn caller_is_main(&self, raiser: &Raiser) -> bool {
         let Ok(store) = self.store() else {
             return false;
         };
-        match store.pinned_conversation() {
-            Ok(Some(main)) => main == raiser.conversation_id,
-            _ => false,
-        }
+        store
+            .on_main_thread(&raiser.conversation_id)
+            .unwrap_or(false)
     }
 
     /// Which conversation holds the project pointer this caller is really
@@ -7634,6 +7651,66 @@ mod tests {
             );
         }
 
+        /// A turn that began before a compaction is still the main chat.
+        ///
+        /// Compaction does not edit a conversation in place. It forks the
+        /// thread into a new conversation and moves the pin onto it, which is
+        /// correct: `main_conversation` is get-or-create on `pinned = 1`, so a
+        /// pin left behind would send the next turn back into the thread that
+        /// was just handed over. But a turn already running belongs to the old
+        /// conversation for its whole life, and answering "is this main" by
+        /// comparing that conversation against the current pin says no from the
+        /// moment the pin moves.
+        ///
+        /// The consequence is not a wrong label. `refuse_routing_from_main`
+        /// returns `Ok(())` when the caller is not main, so a wrong answer here
+        /// is a silent bypass of the whole layer above main rather than an
+        /// error. Observed live: main on a small-context model compacted four
+        /// times in forty minutes, routed its own repository work through
+        /// `open_work` for thirteen turns, and the layer above it never ran.
+        ///
+        /// Driven through the tool rather than through `caller_is_main`,
+        /// because the bypass is the thing being tested and the guard is where
+        /// it happens.
+        #[tokio::test]
+        async fn open_work_from_a_turn_that_straddled_a_compaction_is_still_refused() {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            // The turn starts here, bound to the conversation that is main now.
+            run_in(&store, &main, "run-main");
+
+            // Mid-turn, main's context fills and it compacts itself. The pin
+            // moves to a fresh conversation forked from this one, and the run
+            // in flight stays where it is.
+            let carried = store
+                .continue_as_new(&main, "what happened so far", "context")
+                .unwrap();
+            assert_ne!(carried.conversation.id, main, "compaction forks a new row");
+            assert_eq!(
+                store.pinned_conversation().unwrap().as_deref(),
+                Some(carried.conversation.id.as_str()),
+                "and the pin moves onto it"
+            );
+
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Orchestrate)
+                .for_run("run-main");
+
+            let answer = call(
+                &server,
+                "open_work",
+                json!({ "instruction": "port the parser", "checkout": "/tmp" }),
+            )
+            .await;
+
+            assert!(is_error_result(&answer), "{answer}");
+            let said = said(&answer);
+            assert!(said.contains("ask_assistant"), "{said}");
+            assert!(said.contains("not the main chat's to call"), "{said}");
+        }
+
         /// A stalled run is refused by the tool, not merely discouraged.
         ///
         /// Reljod's decision was that a stalled session is marked and surfaced,
@@ -7883,6 +7960,49 @@ mod tests {
             let said = said(&answer);
             assert!(said.contains("ask_manager"), "{said}");
             assert!(said.contains("tetris"), "{said}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        /// `delegate` is the other verb a straddling main turn got through, and
+        /// it closes at the same place.
+        ///
+        /// Two guards read `caller_is_main`. This is the second: the one that
+        /// stops repository work being started with `delegate` and a `cwd`
+        /// pointing at a catalogued checkout, written
+        /// `caller_is_main(..) || caller_is_assistant(..)`. Both halves went
+        /// false for a main turn after a compaction — the first because the pin
+        /// had moved, the second because main's origin is not the assistant's —
+        /// so it failed open exactly as `open_work`'s did.
+        ///
+        /// What actually refuses main here is the earlier
+        /// `refuse_routing_from_main` at the top of `delegate_request`, which
+        /// reads the same repaired answer, so main is stopped before it reaches
+        /// the project check at all. That leaves the project check's job to the
+        /// assistant, whose identity comes off `conversations.origin` and is
+        /// not affected by main compacting. Asserted through `delegate_request`
+        /// because a real `delegate` would want a harness on the machine.
+        #[tokio::test]
+        async fn delegate_into_a_project_after_a_compaction_is_still_refused_from_main() {
+            let dir = format!("/tmp/jod-main-delegate-{}", std::process::id());
+            let (store, _) = with_project(&dir);
+            let main = store
+                .main_conversation(HarnessKind::ClaudeCode, "/tmp")
+                .unwrap();
+            run_in(&store, &main, "run-main");
+            store
+                .continue_as_new(&main, "what happened so far", "context")
+                .unwrap();
+            let server = Server::new(Jod::with_store(store))
+                .with_access(ToolAccess::Delegate)
+                .for_run("run-main");
+
+            let refused = server
+                .delegate_request(&json!({ "prompt": "count the tests", "cwd": dir.clone() }))
+                .expect_err("a compacted main is still main");
+
+            let said = format!("{refused:?}");
+            assert!(said.contains("not the main chat's to call"), "{said}");
+            assert!(said.contains("ask_assistant"), "{said}");
             std::fs::remove_dir_all(&dir).ok();
         }
 

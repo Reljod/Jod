@@ -830,7 +830,9 @@ cannot, and not retrying on an unrelated turn.
 ---
 
 ## X13. Main never calls `ask_manager` — compaction moves the pin mid-turn, so the guard that should force it fails open
-Status: **open — root cause established: compaction forks the main chat and moves the pin** · Severity: critical · Owner: —
+Status: **fixed — `caller_is_main` now asks whether the caller is on the main
+thread, walking `forked_from` back from the pin under a bound, so a turn that
+began before a compaction is still main** · Severity: critical · Owner: Reljod
 
 Across every scenario run tonight — thirteen main turns, several of them plainly
 repository work — **main called `ask_manager` exactly zero times.** It used
