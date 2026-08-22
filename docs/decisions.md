@@ -4280,3 +4280,41 @@ already protects, for the same reason and in the same words — the flag has no
 default and the default lives at the point of use — and `SpawnRequest::role`
 asks every caller to drop its role tag when a harness was named, so that an
 explicit flag stays the top rung of the precedence.
+
+## A model belongs to a harness, so a harness change drops it wherever it comes from
+
+Setting the `main` role's harness to `agy` in the roles panel broke the main
+chat outright. Every turn afterwards died with `invalid model selection
+(--model "opencode/deepseek-v4-flash-free")`, because the harness moved and the
+model did not. The pinned conversation still had OpenCode's model name stored
+on it, and that name means nothing to AGY.
+
+Two rungs of the precedence ladder were acting on different fields.
+`apply_role` fills the harness from the role row; `prefer_conversation_settings`
+runs afterwards and used to copy the conversation's model over unconditionally.
+Each rung is right on its own field. The pair they produced together was never
+valid, and nothing checked whether the model belonged to the harness that had
+just been chosen.
+
+The rule already existed for the other path. `/harness` drops the requested
+model back to `None` and lets the new harness pick its own default, and
+[`harness-config.md`](harness-config.md) has said so all along. The guard was
+simply never extended to a harness change that arrives through a role row, so
+the same knowledge protected one door and not the one next to it.
+
+So the conversation's model now comes across only when the run is actually
+going to the conversation's own harness. No model beats the wrong model: a
+harness left on its own default answers, and a harness handed another harness's
+spelling refuses the run before it reaches a model at all. Refusing the harness
+change instead would overrule the person who had just asked for it, in a panel
+that promises "a role decides what is spawned next".
+
+A harness id this build does not recognise leaves the model alone. Not knowing
+what the row says is not the same as knowing it disagrees, and a conversation
+written by a newer build must not lose its model to an older build's ignorance.
+
+The `--effort ""` in the same error line is **not** Jod's. Checked by running
+`agy --model "opencode/deepseek-v4-flash-free" -p "hi"` with no effort flag at
+all: AGY prints its own effort setting, empty, as part of the message. Jod's
+adapters emit no `--effort` when nothing asked for one, which is what
+`SpawnRequest::effort` being an `Option` is for.

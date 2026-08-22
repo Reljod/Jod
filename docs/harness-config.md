@@ -36,10 +36,16 @@ just offers nothing.
 `/model` with no argument — or `default`, or `clear` — hands the choice back to
 the harness.
 
-Model names do not survive `/harness`. `claude-sonnet-4-5` means nothing to
-OpenCode or AGY, so switching harness drops the requested model back to `None`
-and lets the new harness pick its own default — otherwise the switch would look
-like it simply had not worked.
+Model names do not survive a harness change. `claude-sonnet-4-5` means nothing
+to OpenCode or AGY, so switching harness drops the requested model back to
+`None` and lets the new harness pick its own default — otherwise the switch
+would look like it simply had not worked.
+
+That is true however the harness changes, not only through `/harness`. Setting
+a row's harness in the roles panel moves the next turn the same way, and the
+conversation's stored model is dropped for the same reason: a harness on its
+own default answers, and a harness handed another harness's spelling refuses
+the run before it reaches a model.
 
 The permission mode is four levels: `plan` (read and reason, change nothing),
 `ask` (check first), `edits` (file edits go through), `auto` (everything

@@ -391,9 +391,41 @@ fn open_conversation(
 /// *before* spawning — a status bar that shows the app's own mode while the
 /// conversation's stored one is what the run will get is a status bar that lies.
 /// [`Jod::spawn_agent_in`] applies it either way; nobody has to remember to.
+///
+/// **The model comes across only when the run is going to the conversation's
+/// own harness.** A model id belongs to exactly one harness — `opus` is Claude
+/// Code's, `opencode/deepseek-v4-flash-free` is OpenCode's,
+/// `claude-opus-4-6-thinking` is AGY's — so a stored model read onto a request
+/// that has since been moved elsewhere is a name the new harness has never
+/// heard of. That is not hypothetical: setting the `main` role's harness to
+/// `agy` in the roles panel moved every following turn to AGY, this function
+/// then copied OpenCode's model onto it regardless, and AGY refused the run
+/// before it reached a model at all. Two keystrokes from a working console to
+/// one that answered nothing.
+///
+/// Dropping the model is the same answer `/harness` already gives, and
+/// `docs/harness-config.md` has documented it for that path all along: a
+/// harness left on its own default works, and a harness handed another
+/// harness's spelling fails outright, so no model beats the wrong model. The
+/// alternative — refusing the harness change — would overrule the person who
+/// just asked for it.
+///
+/// A harness id this build does not recognise leaves the model alone. Not
+/// knowing what a row says is not the same as knowing it disagrees, and a
+/// conversation written by a newer build must not lose its model to an older
+/// one's ignorance.
 pub fn prefer_conversation_settings(req: &mut SpawnRequest, conversation: &Conversation) {
     if let Some(model) = &conversation.model {
-        req.model = Some(model.clone());
+        match conversation.harness_kind() {
+            Some(stored) if stored != req.harness => eprintln!(
+                "[jod] this conversation's model is {}'s and this turn is going to {} — \
+                 leaving the model to the harness rather than handing over a name it \
+                 does not have",
+                stored.label(),
+                req.harness.label()
+            ),
+            _ => req.model = Some(model.clone()),
+        }
     }
     if let Some(permission) = conversation.permission {
         req.permission = permission;
@@ -3866,6 +3898,118 @@ mod tests {
         later.model = None;
         prefer_conversation_settings(&mut later, &opened);
         assert_eq!(later.model.as_deref(), Some("opus"));
+    }
+
+    /// X7, the whole failure, driven through the two functions
+    /// [`Jod::spawn_agent_in`] calls in the order it calls them, and read off
+    /// the command line AGY would actually have been given.
+    ///
+    /// The setup is the one Reljod had: the pinned `main` conversation sitting
+    /// on OpenCode with one of OpenCode's model names stored on it, and the
+    /// `main` role's harness set to `agy` from the roles panel. `apply_role`
+    /// moves the request to AGY; `prefer_conversation_settings` then used to
+    /// copy the conversation's model over unconditionally, so the run was
+    /// launched on AGY carrying `opencode/deepseek-v4-flash-free`. AGY rejects
+    /// that before it reaches a model and the turn dies.
+    ///
+    /// The command line is asserted rather than the field, because the field
+    /// being wrong is only a bug once it becomes an argument.
+    #[test]
+    fn a_role_that_moves_the_harness_leaves_the_old_harnesss_model_behind() {
+        use crate::store::RoleField;
+
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("main", RoleField::Harness, Some("agy"))
+            .unwrap();
+        let conversation = store
+            .new_conversation(
+                HarnessKind::OpenCode,
+                "/work",
+                Some("opencode/deepseek-v4-flash-free"),
+            )
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            role: Some(crate::harness::Role::Main),
+            harness: HarnessKind::OpenCode,
+            model: None,
+            ..request("say which model you are")
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(
+            req.harness,
+            HarnessKind::Agy,
+            "the role row moves a fresh run to the harness it names"
+        );
+        prefer_conversation_settings(&mut req, &conversation);
+
+        let argv: Vec<String> = req
+            .harness
+            .build()
+            .args(&req, None)
+            .into_iter()
+            .filter_map(|part| match part {
+                crate::harness::ArgPart::Literal(s) => Some(s),
+                crate::harness::ArgPart::Prompt => None,
+            })
+            .collect();
+        assert!(
+            !argv.iter().any(|a| a == "opencode/deepseek-v4-flash-free"),
+            "AGY was handed OpenCode's model name: {argv:?}"
+        );
+        assert_eq!(
+            req.model, None,
+            "no model at all beats a name the harness rejects outright"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "--effort"),
+            "nobody asked for an effort level, so no flag: {argv:?}"
+        );
+    }
+
+    /// The other side of the same rule: a conversation that is still on the
+    /// harness the turn is going to hands its model over exactly as before.
+    /// The guard has to be able to tell "another harness's name" from "a name
+    /// somebody chose on purpose", and this is the case it must not touch.
+    #[test]
+    fn a_conversation_on_the_harness_the_turn_is_going_to_still_sets_the_model() {
+        let store = Store::in_memory().unwrap();
+        let conversation = store
+            .new_conversation(HarnessKind::Agy, "/work", Some("claude-opus-4-6-thinking"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            harness: HarnessKind::Agy,
+            model: None,
+            ..request("go on then")
+        };
+        prefer_conversation_settings(&mut req, &conversation);
+        assert_eq!(req.model.as_deref(), Some("claude-opus-4-6-thinking"));
+    }
+
+    /// A harness id this build has never heard of is a row a newer build
+    /// wrote, and losing the model to that would be this build punishing a
+    /// conversation for being ahead of it. Not knowing what the row says is
+    /// not the same as knowing it disagrees.
+    #[test]
+    fn a_harness_this_build_does_not_know_leaves_the_stored_model_alone() {
+        let store = Store::in_memory().unwrap();
+        let conversation = Conversation {
+            harness: "some-harness-from-next-year".into(),
+            ..store
+                .new_conversation(HarnessKind::ClaudeCode, "/work", Some("opus"))
+                .unwrap()
+        };
+        assert_eq!(conversation.harness_kind(), None);
+
+        let mut req = SpawnRequest {
+            harness: HarnessKind::Agy,
+            model: None,
+            ..request("go on then")
+        };
+        prefer_conversation_settings(&mut req, &conversation);
+        assert_eq!(req.model.as_deref(), Some("opus"));
     }
 
     #[test]
