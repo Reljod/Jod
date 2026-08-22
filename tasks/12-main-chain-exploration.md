@@ -611,6 +611,66 @@ and is marked failed.
 
 ---
 
+## X11. A main turn on AGY that uses tools is recorded as failed even when it succeeds
+Status: **open — mechanism needs confirming** · Severity: high · Owner: —
+
+Every AGY main run today that called a tool is recorded `failed`, and every one
+of them produced a complete, correct final answer. The one that answered without
+tools is recorded `completed`.
+
+| Status | Events | Final message |
+|---|---|---|
+| `failed` | 2 | `invalid model selection …` — a genuine failure (X7) |
+| `failed` | 2 | `invalid model selection …` — a genuine failure (X7) |
+| `completed` | 3 | "I am Gemini 3.7 Flash." |
+| `failed` | 22 | "Handed this over to a new session … to build the `notes` CLI tool" |
+| `failed` | 12 | "The 'notes' CLI session has stopped and raised card 28 for your decision …" |
+
+The last two did their job. One opened a work and delegated it; the other
+noticed a blocked session, raised a card and explained why. Both are recorded as
+failures.
+
+**It is not AGY's exit code.** Checked directly rather than assumed:
+
+```
+$ agy -p "List the files in this directory using your tools, then say DONE." \
+      --model gemini-3.7-flash-medium
+… DONE
+AGY_EXIT=0
+```
+
+**The likely mechanism, and it is marked as unconfirmed on purpose.**
+`core/src/service.rs:924` reclassifies a run whose row still says `running` once
+its process group is gone:
+
+```rust
+let alive = record.summary.status == AgentStatus::Running
+    && run.pgid.is_some_and(proc::group_alive);
+record.summary.process_alive = alive;
+if record.summary.status == AgentStatus::Running && !alive {
+    record.summary.status = AgentStatus::Failed;
+}
+```
+
+That is the right rule for a run that died. It produces this result whenever a
+terminal status was never recorded in the first place — so the thing to check is
+whether the AGY adapter emits an end-of-run event Jod recognises after a
+tool-using turn. Someone should confirm that before changing anything; the rule
+above is not the bug and should not be softened.
+
+**Why it matters more than a wrong label.** This is Reljod's configured main
+harness, so in the ordinary case *every substantive main turn shows up as a
+failure* — on the rail, in `jod ls`, and to anything that keys off status.
+Paired with X8, which reports a failed run as exit 0 and prints nothing, the two
+statuses are exactly inverted from the operator's point of view: the command
+line says everything is fine when a run failed, and the store says it failed
+when it was fine.
+
+Check: run a main turn on AGY that calls at least one tool and finishes cleanly,
+then read `runs.status`. Green is `completed`.
+
+---
+
 ## Checked and not a bug
 
 Recorded because both looked like findings and both cost real time to
