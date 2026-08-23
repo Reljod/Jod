@@ -745,7 +745,7 @@ async fn event_loop(
     // program for as long as the harness takes to answer.
     let (models_tx, mut models_rx) =
         tokio::sync::mpsc::unbounded_channel::<(HarnessKind, Vec<Model>)>();
-    let mut asking_models: Option<HarnessKind> = None;
+    let mut asking_models: HashSet<HarnessKind> = HashSet::new();
     // `/update`, running as a background job. The channel carries the
     // installer's own output line by line so the transcript shows a build
     // happening rather than a console that has gone quiet.
@@ -1029,13 +1029,13 @@ async fn event_loop(
             }
 
             Some((kind, models)) = models_rx.recv() => {
-                if app.harness == kind {
-                    app.models = models;
-                    app.models_for = Some(kind);
-                }
-                if asking_models == Some(kind) {
-                    asking_models = None;
-                }
+                // Filed whichever harness answered, and whatever it answered.
+                // The console is not the only screen asking — the roles panel
+                // asks about the harness each row names — and an empty answer
+                // is still an answer, which is what lets the panel say "AGY
+                // could not be asked" rather than showing an empty list.
+                app.note_models(kind, models);
+                asking_models.remove(&kind);
             }
 
             _ = ticks.tick() => {
@@ -1102,29 +1102,48 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Ask the current harness what models it accepts, unless that is already known
-/// or already being asked.
+/// Ask every harness whose list is wanted what models it accepts, skipping the
+/// ones already known or already being asked.
+///
+/// Two screens want a list, and they want different ones. The chat box wants
+/// the harness it is on, for `/model`. The roles panel wants whichever harness
+/// each *row* names — and on that screen all three are worth having, because
+/// the next keypress may set a row to any of them and a chooser that offers
+/// nothing is a chooser that looks broken. That costs one subprocess per
+/// harness, once per session, and only while the panel is open.
 ///
 /// Blocking rather than async: `HarnessKind::models` runs a child process and
 /// waits on it, which is exactly what must not happen on the runtime's own
 /// threads while a turn is streaming.
 fn ask_models(
     app: &App,
-    asking: &mut Option<HarnessKind>,
+    asking: &mut HashSet<HarnessKind>,
     tx: &tokio::sync::mpsc::UnboundedSender<(HarnessKind, Vec<Model>)>,
 ) {
-    let kind = app.harness;
-    if app.models_for == Some(kind) || *asking == Some(kind) {
-        return;
+    for kind in wanted_models(app) {
+        if app.models_of(kind).is_some() || !asking.insert(kind) {
+            continue;
+        }
+        let tx = tx.clone();
+        // The result may arrive after the program has quit, or after another
+        // harness has been chosen. Both are fine: the send fails or the
+        // receiver drops it, and neither is worth reporting to somebody who has
+        // moved on.
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send((kind, kind.models()));
+        });
     }
-    *asking = Some(kind);
-    let tx = tx.clone();
-    // The result may arrive after the program has quit, or after another
-    // harness has been chosen. Both are fine: the send fails or the receiver
-    // drops it, and neither is worth reporting to somebody who has moved on.
-    tokio::task::spawn_blocking(move || {
-        let _ = tx.send((kind, kind.models()));
-    });
+}
+
+/// Whose model list is worth having right now.
+///
+/// Its own function so the answer can be tested without a terminal or a
+/// subprocess: this is the whole of the policy above.
+fn wanted_models(app: &App) -> Vec<HarnessKind> {
+    if app.workspace == Workspace::Roles {
+        return HarnessKind::ALL.to_vec();
+    }
+    vec![app.harness]
 }
 
 /// Say that a background agent ended, and how it went.
@@ -1867,9 +1886,17 @@ async fn perform(
         Action::DeleteHook(name) => on_store(jod, app, |store| delete_hook(store, &name)),
         Action::Forget(subject) => on_store(jod, app, |store| forget_about(store, &subject)),
         Action::KeepRun(run) => on_store(jod, app, move |store| keep_run(store, &run, now)),
-        Action::SetRole { role, field, value } => on_store(jod, app, move |store| {
-            set_role(store, role, field, value.as_deref())
-        }),
+        Action::SetRole { role, field, value } => {
+            on_store(jod, app, move |store| {
+                set_role(store, role, field, value.as_deref())
+            });
+            // A row is edited one column at a time, so setting the harness is
+            // exactly what leaves the model and the thinking columns holding
+            // another harness's words. The table marks them, and this says it
+            // in the transcript as well — the panel may be left behind before
+            // anybody looks at the row again.
+            say_role_objections(app, role);
+        }
         Action::ResetRole(role) => on_store(jod, app, move |store| reset_role(store, role)),
         // Both card verbs go through `on_store` like every other store verb,
         // and the sentence they hand back is the whole feature: `Store::
@@ -2796,13 +2823,13 @@ fn point_at(
     app.session = None;
     app.model = None;
     app.reported_model = None;
-    // And the list `/model` offers, for the same reason as the model itself:
-    // `opencode/claude-opus-5` is not a name AGY accepts, so offering the old
-    // harness's models until the new list arrives would be offering names that
-    // fail the turn. Cleared rather than replaced — the loader notices the
-    // mismatch on the next tick and asks the new harness.
-    app.models = Vec::new();
-    app.models_for = None;
+    // The list `/model` offers follows by itself, for the same reason as the
+    // model itself: `opencode/claude-opus-5` is not a name AGY accepts, so
+    // offering the old harness's models would be offering names that fail the
+    // turn. Nothing is cleared here because the lists are kept one per
+    // harness — `App::models` reads the new harness's, which is empty until the
+    // loader asks it on the next tick, and the old one stays where it is for
+    // whoever wants it back.
     // Spend belongs to the conversation being left. Carrying it over showed
     // `$0.11` next to AGY, which had charged nothing.
     app.cost_usd = 0.0;
@@ -3087,6 +3114,21 @@ fn keep_run(store: &Store, run: &str, now_ms: i64) -> String {
     match store.archive_conversation(&conversation, now_ms) {
         Ok(()) => "let go, and archived — `z` on the fleet brings it back".to_string(),
         Err(e) => format!("let go, but could not archive it: {e}"),
+    }
+}
+
+/// Say what a role's row now holds that its own harness will not take.
+///
+/// Nothing at all on a coherent row, which is the ordinary case. Read from the
+/// row as the store has it, so it has to run after the write — see
+/// [`on_store`], which refreshes the panel before this is called.
+fn say_role_objections(app: &mut App, role: Role) {
+    let Some(row) = app.role_rows().into_iter().find(|r| r.role == role) else {
+        return;
+    };
+    let models = app.role_models(row.harness_kind());
+    for said in roles::objections(&row, &models) {
+        app.push(Entry::Notice(said));
     }
 }
 
@@ -4747,14 +4789,17 @@ fn on_preview_wheel(app: &mut App, shape: ui::Preview, notches: i32) {
 fn on_roles_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     let row = app.selected_role()?;
     let open = |app: &mut App, field| {
+        // The row's *own* harness rather than the console's, for both lists it
+        // decides. An effort level is a word only some harnesses know, and a
+        // model id belongs to exactly one of them — which of them will run this
+        // role is decided by this row and not by whatever the chat box happens
+        // to be on.
+        let models = app.role_models(row.harness_kind());
         app.choosing = Some(roles::Choosing::Value {
             role: row.role,
             field,
-            // The row's *own* harness rather than the console's. An effort level
-            // is a word only some harnesses know, and which of them will run
-            // this role is decided by this row and not by whatever the chat box
-            // happens to be on.
-            options: roles::options(field, row.harness_kind(), &app.models),
+            options: roles::options(field, row.harness_kind(), &models),
+            models,
             selected: 0,
         });
         None
@@ -4829,10 +4874,12 @@ fn on_role_chooser_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                         .into_iter()
                         .find(|row| row.role == role)
                         .and_then(|row| row.harness_kind());
+                    let models = app.role_models(harness);
                     app.choosing = Some(roles::Choosing::Value {
                         role,
                         field,
-                        options: roles::options(field, harness, &app.models),
+                        options: roles::options(field, harness, &models),
+                        models,
                         selected: 0,
                     });
                     None
@@ -4842,6 +4889,7 @@ fn on_role_chooser_key(app: &mut App, key: KeyEvent) -> Option<Option<Action>> {
                     field,
                     options,
                     selected,
+                    ..
                 } => {
                     let chosen = options.get(*selected)?.clone();
                     let action = Action::SetRole {
@@ -8192,11 +8240,13 @@ mod tests {
     /// An OpenCode session whose model list has loaded.
     fn opencode_with_list() -> App {
         let mut app = app_on(HarnessKind::OpenCode);
-        app.models = jod_core::harness::models::parse(
+        app.note_models(
             HarnessKind::OpenCode,
-            "opencode/claude-opus-5\nopencode/hy3-free\n",
+            jod_core::harness::models::parse(
+                HarnessKind::OpenCode,
+                "opencode/claude-opus-5\nopencode/hy3-free\n",
+            ),
         );
-        app.models_for = Some(HarnessKind::OpenCode);
         app
     }
 
@@ -12635,8 +12685,8 @@ mod tests {
             let jod = jod_with(store());
             let s = jod.store().unwrap().clone();
             let mut app = on_the_panel(&jod);
-            app.models = HarnessKind::ClaudeCode.models();
-            let first = app.models[0].id.clone();
+            app.note_models(HarnessKind::ClaudeCode, HarnessKind::ClaudeCode.models());
+            let first = app.models()[0].id.clone();
 
             assert_eq!(press(&mut app, KeyCode::Char('m')), None, "it opens a list");
             // Past `inherit`, onto the first model the harness named.
@@ -12740,6 +12790,125 @@ mod tests {
             assert!(offered("claude_code").contains(&"xhigh".to_string()));
             assert!(!offered("agy").contains(&"xhigh".to_string()));
             assert_eq!(offered("open_code"), ["low", "medium", "high", "xhigh", "max"]);
+        }
+
+        /// What the chooser `m` opens is offering, whatever it is offering.
+        fn model_choices(app: &mut App) -> Vec<String> {
+            press(app, KeyCode::Char('m'));
+            match app.choosing.take() {
+                Some(roles::Choosing::Value { options, .. }) => {
+                    options.into_iter().filter_map(|c| c.value).collect()
+                }
+                other => panic!("expected a list of models, got {other:?}"),
+            }
+        }
+
+        /// The bug this panel was reported with, at the key that produces it.
+        /// Reljod set a row's harness to `agy`, pressed `m`, and was offered
+        /// `opus`, `claude-opus-5` and the rest of Claude Code's names —
+        /// because the list came from the console session rather than from the
+        /// row. Every one of those names fails an AGY run.
+        #[tokio::test]
+        async fn m_on_an_agy_row_offers_agys_models_and_none_of_the_consoles() {
+            let s = store();
+            s.role_set("main", RoleField::Harness, Some("agy")).unwrap();
+            let jod = jod_with(s);
+            // The console is on Claude Code, and its list has loaded — which is
+            // exactly the state the wrong names came from.
+            let mut app = on_the_panel(&jod);
+            app.note_models(HarnessKind::ClaudeCode, HarnessKind::ClaudeCode.models());
+            app.note_models(
+                HarnessKind::Agy,
+                jod_core::harness::models::parse(
+                    HarnessKind::Agy,
+                    "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n",
+                ),
+            );
+
+            let offered = model_choices(&mut app);
+            assert_eq!(offered, ["claude-opus-4-6-thinking"]);
+            for claude in HarnessKind::ClaudeCode.models() {
+                assert!(!offered.contains(&claude.id), "{offered:?}");
+            }
+        }
+
+        /// A harness that has not answered offers nothing rather than the
+        /// console's names. AGY is asked over the network and OpenCode through
+        /// a subprocess, so this is the first second on the panel — and a wrong
+        /// list is worse than a list that is not there yet.
+        #[tokio::test]
+        async fn a_row_whose_harness_has_not_answered_offers_no_model_at_all() {
+            let s = store();
+            s.role_set("main", RoleField::Harness, Some("agy")).unwrap();
+            let jod = jod_with(s);
+            let mut app = on_the_panel(&jod);
+            app.note_models(HarnessKind::ClaudeCode, HarnessKind::ClaudeCode.models());
+
+            assert!(model_choices(&mut app).is_empty(), "inherit and nothing else");
+        }
+
+        /// A row naming no harness runs on whatever the caller hands it, which
+        /// is not knowable here. The console's own harness is the best guess —
+        /// it is what a run started from this console inherits — so its names
+        /// are offered and the screen says whose they are.
+        #[tokio::test]
+        async fn a_row_naming_no_harness_is_offered_the_consoles_own_list() {
+            let jod = jod_with(store());
+            let mut app = on_the_panel(&jod);
+            app.note_models(HarnessKind::ClaudeCode, HarnessKind::ClaudeCode.models());
+
+            let offered = model_choices(&mut app);
+            assert!(offered.contains(&"claude-opus-5".to_string()), "{offered:?}");
+        }
+
+        /// Setting the harness on its own is what leaves a row describing a run
+        /// that cannot start, so the transcript says so — the panel may be left
+        /// behind before anybody looks at the row again.
+        #[tokio::test]
+        async fn setting_a_harness_says_what_the_other_columns_now_hold() {
+            let s = store();
+            s.role_set("main", RoleField::Model, Some("claude-opus-5"))
+                .unwrap();
+            let jod = jod_with(s);
+            let mut app = on_the_panel(&jod);
+            app.note_models(
+                HarnessKind::Agy,
+                jod_core::harness::models::parse(
+                    HarnessKind::Agy,
+                    "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n",
+                ),
+            );
+
+            let action = Action::SetRole {
+                role: Role::Main,
+                field: RoleField::Harness,
+                value: Some("agy".into()),
+            };
+            perform(&jod, &mut app, &options(), &mut Thread::default(), action).await;
+
+            let all = spoken(&app);
+            assert!(
+                all.iter()
+                    .any(|said| said.contains("AGY has no model called claude-opus-5")),
+                "{all:?}"
+            );
+            assert!(
+                all.iter().any(|said| said.contains("Press m")),
+                "and how to fix it: {all:?}"
+            );
+        }
+
+        /// Whose lists are worth fetching, which is the whole of the policy:
+        /// the panel needs all three, because the next keypress may set a row
+        /// to any of them and a chooser with nothing in it looks broken.
+        /// Everywhere else only the console's own harness is asked, so no
+        /// screen but this one pays for a subprocess it will not use.
+        #[test]
+        fn the_roles_panel_wants_every_harnesss_list_and_no_other_screen_does() {
+            let mut app = app_on(HarnessKind::ClaudeCode);
+            assert_eq!(wanted_models(&app), [HarnessKind::ClaudeCode]);
+            app.go(Workspace::Roles);
+            assert_eq!(wanted_models(&app), HarnessKind::ALL);
         }
     }
 
