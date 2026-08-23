@@ -280,15 +280,80 @@ impl Card {
     ///
     /// Never carries a credential: a secret card's `answer` holds a
     /// confirmation, and the value lives outside this database entirely.
+    ///
+    /// Use [`Card::answer_body_over`] wherever the card's own earlier choice is
+    /// still to hand. This spelling cannot tell a human confirming the agent's
+    /// decision from a human replacing it, because by the time it is called the
+    /// one field that held both has held only one of them.
     pub fn answer_body(&self) -> String {
+        self.answer_body_over(None)
+    }
+
+    /// The same, told against what the agent itself had already chosen.
+    ///
+    /// **The distinction this exists for is the whole of the overrule path.**
+    /// A [`CardKind::Decision`] is raised *after* the agent has acted: it says
+    /// "I picked one engineer and started them" and offers the alternatives so
+    /// the choice can be taken back. Answering it writes the human's choice
+    /// into the same `chosen` field, so the delivered text read
+    /// `chosen: 2 engineers` whether Reljod had switched the decision or agreed
+    /// with it — two opposite events spelled identically. An agent reading the
+    /// agreeing one should carry on; an agent reading the other has to undo
+    /// something. It could not tell which it had.
+    ///
+    /// `agent_chose` is what `chosen` held before the answer overwrote it.
+    /// `None` means the card carried no choice of its own — every question and
+    /// every secret — and those read exactly as they did before.
+    ///
+    /// Only a *named* alternative counts as an overrule. A decision answered in
+    /// prose, with no option picked, leaves the agent's choice standing and is
+    /// delivered as an ordinary answer: Jod cannot read a sentence and decide
+    /// it contradicts a decision, and guessing wrong here would send an agent
+    /// to undo work nobody objected to.
+    ///
+    /// The instruction to reconcile is in the body rather than in
+    /// [`crate::delivery::protocol_for`], where the rest of Jod's per-turn
+    /// prompting lives, because that function frames a whole *batch* and this
+    /// is true of one item in it. One turn routinely carries an overrule beside
+    /// four answers that changed nothing, and a batch-level "undo what you
+    /// started" would be wrong about four of the five.
+    pub fn answer_body_over(&self, agent_chose: Option<&str>) -> String {
         let mut out = format!("card #{} — {}", self.id, self.title);
+        let overruled = self.overrules(agent_chose);
+        if let Some(was) = overruled {
+            out.push_str(&format!("\nyou chose: {was}"));
+        }
         if let Some(chosen) = &self.chosen {
             out.push_str(&format!("\nchosen: {chosen}"));
         }
         if let Some(answer) = &self.answer {
             out.push_str(&format!("\nanswer: {answer}"));
         }
+        if overruled.is_some() {
+            out.push_str(
+                "\n\nReljod overruled you. Whatever you set in motion on the strength of your \
+                 own choice is now the wrong thing to be doing, so reconcile it before you \
+                 carry on: stop or redirect what is doing the old thing, and start whatever \
+                 the new answer asks for. Answering in prose changes nothing — the work is \
+                 already running.",
+            );
+        }
         out
+    }
+
+    /// What the agent had chosen, when the human replaced it with something
+    /// else. `None` when the two agree, or when there was nothing to replace.
+    ///
+    /// Compared on trimmed text rather than on identity, because the two ways
+    /// of answering a decision do not produce the same string: the rail answers
+    /// by pressing the digit of an option, and the command line answers by
+    /// typing one out. "sqlite" and "sqlite " are one decision, and a card that
+    /// claimed to have been overruled by its own choice would send an agent off
+    /// to undo work nobody objected to.
+    pub fn overrules<'a>(&self, agent_chose: Option<&'a str>) -> Option<&'a str> {
+        let was = agent_chose.map(str::trim).filter(|s| !s.is_empty())?;
+        let now = self.chosen.as_deref().map(str::trim)?;
+        (was != now).then_some(was)
     }
 }
 
@@ -558,6 +623,11 @@ impl Store {
     /// of the same decision reads to the agent as a second instruction, and the
     /// work gets done again.
     ///
+    /// **An overrule is queued as an overrule.** Answering a decision with a
+    /// different option than the agent picked is the one case where the agent
+    /// has to undo something rather than carry on, and the queued row says so
+    /// in as many words — see [`Card::answer_body_over`].
+    ///
     /// For a secret card, what is passed here is a confirmation — the value
     /// goes to the secret store and never through this function. Nothing in
     /// this database ever holds one.
@@ -580,9 +650,26 @@ impl Store {
                 )));
             }
 
+            // Read before the update overwrites it, because `chosen` holds two
+            // different people's answers at two different times: the agent's
+            // own decision until this moment, and the human's from here on.
+            // Once the row is written there is no way to tell an overrule from
+            // an agreement, and those are the two things the agent most needs
+            // told apart — see [`Card::answer_body_over`].
+            let agent_chose = card.chosen.clone();
+
+            // `coalesce`, not a plain assignment. A decision card arrives with
+            // the agent's own choice in `chosen`, and answering one in prose —
+            // no option picked, just a sentence — used to overwrite it with
+            // null: the rail was left showing a decision that had chosen
+            // nothing, and the record of what the agent actually decided was
+            // gone. Answering a decision without naming a different option
+            // leaves that decision standing, which is what the words on the
+            // card already say.
             tx.execute(
                 "UPDATE cards
-                    SET status = 'answered', delivery = 'queued', chosen = ?2, answer = ?3,
+                    SET status = 'answered', delivery = 'queued',
+                        chosen = coalesce(?2, chosen), answer = ?3,
                         answered_at_ms = ?4, updated_at_ms = ?4
                   WHERE id = ?1",
                 params![id, chosen, answer, at],
@@ -604,7 +691,7 @@ impl Store {
                 &answered.conversation_id,
                 Kind::CardAnswer,
                 &id.to_string(),
-                &answered.answer_body(),
+                &answered.answer_body_over(agent_chose.as_deref()),
                 at,
             )?;
             Ok(answered)
@@ -1607,6 +1694,115 @@ mod tests {
 
         assert!(answered.answer_body().contains("chosen: sqlite"));
         assert!(!answered.answer_body().contains("answer:"));
+    }
+
+    /// The bug Reljod reported, at the level the text is rendered.
+    ///
+    /// He asked for the work to be split between two engineers instead of one,
+    /// and the manager carried on with one. The reason is here: the agent's
+    /// choice and the human's live in the same column, so once the answer was
+    /// written the delivery said `chosen: 2 engineers` — which is exactly what
+    /// it would have said if he had agreed with one engineer and the manager
+    /// had never been contradicted at all.
+    #[test]
+    fn an_overruled_decision_says_it_was_overruled_and_what_it_replaced() {
+        let s = store();
+        let c = conversation(&s);
+        let card = s
+            .raise_card(NewCard {
+                kind: Some(CardKind::Decision),
+                options: vec!["1 engineer".into(), "2 engineers".into()],
+                chosen: Some("1 engineer".into()),
+                ..new_card(&c, "how to split the cards fix")
+            })
+            .unwrap();
+
+        s.answer_card(card.id, Some("2 engineers"), None).unwrap();
+
+        let told = &s.pending_for(&c).unwrap()[0].body;
+        assert!(
+            told.contains("you chose: 1 engineer"),
+            "the agent is not told what its own choice was, so it cannot know it changed: \
+             {told}"
+        );
+        assert!(told.contains("chosen: 2 engineers"), "{told}");
+        assert!(told.contains("Reljod overruled you"), "{told}");
+    }
+
+    /// The other half, and the one that keeps the first honest. Agreeing with
+    /// an agent must not read as overruling it: an agent told to undo work
+    /// nobody objected to costs a turn and a running engineer.
+    #[test]
+    fn agreeing_with_a_decision_is_not_delivered_as_an_overrule() {
+        let s = store();
+        let c = conversation(&s);
+        let card = s
+            .raise_card(NewCard {
+                kind: Some(CardKind::Decision),
+                options: vec!["1 engineer".into(), "2 engineers".into()],
+                chosen: Some("1 engineer".into()),
+                ..new_card(&c, "how to split the cards fix")
+            })
+            .unwrap();
+
+        // Answered by pressing the digit of the option already in force, which
+        // is how the rail confirms one.
+        s.answer_card(card.id, Some(" 1 engineer "), None).unwrap();
+
+        let told = &s.pending_for(&c).unwrap()[0].body;
+        assert!(!told.contains("overruled"), "{told}");
+        assert!(!told.contains("you chose:"), "{told}");
+    }
+
+    /// A question was never decided by the agent, so there is nothing of its
+    /// own to contradict and nothing to undo. Answering one reads as it always
+    /// has.
+    #[test]
+    fn an_answered_question_is_not_dressed_up_as_an_overrule() {
+        let s = store();
+        let c = conversation(&s);
+        let card = s.raise_card(new_card(&c, "which port?")).unwrap();
+
+        s.answer_card(card.id, Some("8443"), None).unwrap();
+
+        let told = &s.pending_for(&c).unwrap()[0].body;
+        assert_eq!(told, &format!("card #{} — which port?\nchosen: 8443", card.id));
+    }
+
+    /// Answering a decision in prose leaves the decision standing rather than
+    /// erasing it.
+    ///
+    /// The update used to write the human's `chosen` unconditionally, so an
+    /// answer that named no option wrote null over the agent's own choice: the
+    /// rail was left showing a decision that had decided nothing, and what the
+    /// agent had actually settled on was gone from the only place it was
+    /// recorded. Nothing was overruled here — a sentence is not a different
+    /// option — so the card keeps its choice and the delivery carries both.
+    #[test]
+    fn answering_a_decision_in_prose_does_not_erase_what_the_agent_chose() {
+        let s = store();
+        let c = conversation(&s);
+        let card = s
+            .raise_card(NewCard {
+                kind: Some(CardKind::Decision),
+                options: vec!["1 engineer".into(), "2 engineers".into()],
+                chosen: Some("1 engineer".into()),
+                ..new_card(&c, "how to split the cards fix")
+            })
+            .unwrap();
+
+        let answered = s
+            .answer_card(card.id, None, Some("fine, but keep an eye on the tests"))
+            .unwrap();
+
+        assert_eq!(answered.chosen.as_deref(), Some("1 engineer"));
+        let told = &s.pending_for(&c).unwrap()[0].body;
+        assert!(told.contains("chosen: 1 engineer"), "{told}");
+        assert!(
+            told.contains("answer: fine, but keep an eye on the tests"),
+            "{told}"
+        );
+        assert!(!told.contains("overruled"), "{told}");
     }
 
     // ---- the vocabulary ------------------------------------------------

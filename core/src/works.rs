@@ -1079,6 +1079,47 @@ impl Store {
                     at,
                 )?;
             }
+            // And the project's manager, which is the address that actually
+            // matters now. The two rows above were written when the main chat
+            // opened works; it does not any more — `open_work` is refused from
+            // main outright, and a project's manager is what opens them. So the
+            // one participant that owns this work had no row at all: every bus
+            // tool refused the manager with "not a member of any team or work",
+            // and its own engineers saw a roster of `main` and `reljod` with no
+            // way to reach the manager they report to. A manager could start an
+            // engineer and stop it and could not say one word to one that was
+            // already running.
+            //
+            // Read inside the transaction, like main's, and skipped when the
+            // project has no manager conversation yet — a work opened from the
+            // command line, or before this project's first instruction. An
+            // address that leads to a conversation which does not exist is
+            // worse than an absent one.
+            if let Some(project_id) = project_id {
+                let manager: Option<(String, Option<String>)> = tx
+                    .query_row(
+                        "SELECT c.id, c.harness FROM projects p
+                           JOIN conversations c ON c.id = p.manager_conversation_id
+                          WHERE p.id = ?1",
+                        params![project_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((conversation, harness)) = manager {
+                    let harness = harness
+                        .as_deref()
+                        .and_then(HarnessKind::from_id)
+                        .unwrap_or(HarnessKind::ClaudeCode);
+                    crate::team::insert_manager_member_in(
+                        tx,
+                        Scope::Work,
+                        &id,
+                        &conversation,
+                        harness,
+                        at,
+                    )?;
+                }
+            }
             tx.query_row(
                 &format!("SELECT {WORK_COLUMNS} FROM works WHERE id = ?1"),
                 params![id],
@@ -2173,6 +2214,105 @@ mod tests {
         s.attach_conversation(&c.id, work, parent, Origin::Orchestrator)
             .unwrap();
         c.id
+    }
+
+    /// A project with a manager conversation, the state `hand_to_manager`
+    /// leaves behind the first time an instruction about a repository arrives.
+    fn a_managed_project(s: &Store, name: &str) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!("jod-works-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = s
+            .add_project(crate::projects::NewProject::at(&dir).named(name))
+            .unwrap();
+        let (manager, _) = s
+            .manager_conversation(&project.id, HarnessKind::ClaudeCode)
+            .unwrap();
+        (project.id, manager)
+    }
+
+    /// The row that makes an answered card able to cascade at all.
+    ///
+    /// A work's roster used to hold the person and the main chat, which was
+    /// right when main opened works. It does not — `open_work` is refused from
+    /// main outright and a project's manager opens them — so the one
+    /// participant that owns the work had no address on its own bus. The
+    /// manager's conversation goes on the row, because that is what mail to
+    /// `manager` is handed to.
+    #[test]
+    fn a_work_puts_its_projects_manager_on_the_roster() {
+        let s = store();
+        let (project, manager) = a_managed_project(&s, "acme");
+
+        let work = s.create_work_in("split the cards fix", Some(&project)).unwrap();
+
+        let member = s
+            .member_in(Scope::Work, &work.id, crate::team::MANAGER)
+            .unwrap()
+            .expect("the manager has to be on the work it opened");
+        assert!(
+            member.session_id.is_none() && member.agent_id.is_none(),
+            "the session to resume belongs to the conversation and changes every turn; a copy \
+             here is a second value free to disagree with it"
+        );
+        // The conversation on the row is the address: mail for `manager` is
+        // handed to that transcript's delivery queue.
+        assert_eq!(
+            s.work_member_name(&work.id, &manager).unwrap().as_deref(),
+            Some(crate::team::MANAGER),
+        );
+    }
+
+    /// A work opened where there is no manager to name gets no row rather than
+    /// a row pointing at nothing. An address that leads to a conversation which
+    /// does not exist is worse than an absent one — `post` refuses an unknown
+    /// recipient out loud, and a dangling one would be recorded delivered.
+    #[test]
+    fn a_work_with_no_manager_to_name_gets_no_manager_row() {
+        let s = store();
+        let loose = s.create_work("look something up").unwrap();
+        assert!(s
+            .member_in(Scope::Work, &loose.id, crate::team::MANAGER)
+            .unwrap()
+            .is_none());
+
+        // And the same for a project that has never had an instruction, so no
+        // manager conversation has been opened for it yet.
+        let dir = std::env::temp_dir().join(format!("jod-works-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bare = s
+            .add_project(crate::projects::NewProject::at(&dir).named("bare"))
+            .unwrap();
+        let work = s.create_work_in("read the README", Some(&bare.id)).unwrap();
+        assert!(s
+            .member_in(Scope::Work, &work.id, crate::team::MANAGER)
+            .unwrap()
+            .is_none());
+    }
+
+    /// An engineer whose title slugs to the manager's address is renamed, the
+    /// same way one titled "Main" or "Reljod" already is. Without it the
+    /// session would collect every report meant for the manager, and the
+    /// manager would hear nothing and see nothing wrong.
+    #[test]
+    fn a_session_titled_manager_does_not_take_the_managers_address() {
+        let s = store();
+        let (project, manager) = a_managed_project(&s, "acme2");
+        let work = s.create_work_in("split it", Some(&project)).unwrap();
+
+        let engineer = s
+            .new_conversation(HarnessKind::ClaudeCode, "/tmp", None)
+            .unwrap();
+        s.set_conversation_title(&engineer.id, "Manager").unwrap();
+        let joined = s
+            .attach_conversation(&engineer.id, &work.id, None, Origin::Agent)
+            .unwrap();
+
+        assert_ne!(joined.name, crate::team::MANAGER, "{joined:?}");
+        assert_eq!(
+            s.work_member_name(&work.id, &manager).unwrap().as_deref(),
+            Some(crate::team::MANAGER),
+            "the address stopped pointing at the manager's own transcript"
+        );
     }
 
     /// Give a conversation a run in the state named. The join between the two
