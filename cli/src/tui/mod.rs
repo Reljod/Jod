@@ -1108,15 +1108,8 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Ask every harness whose list is wanted what models it accepts, skipping the
-/// ones already known or already being asked.
-///
-/// Two screens want a list, and they want different ones. The chat box wants
-/// the harness it is on, for `/model`. The roles panel wants whichever harness
-/// each *row* names — and on that screen all three are worth having, because
-/// the next keypress may set a row to any of them and a chooser that offers
-/// nothing is a chooser that looks broken. That costs one subprocess per
-/// harness, once per session, and only while the panel is open.
+/// Ask every harness what models it accepts, skipping the ones already known
+/// or already being asked.
 ///
 /// Blocking rather than async: `HarnessKind::models` runs a child process and
 /// waits on it, which is exactly what must not happen on the runtime's own
@@ -1126,7 +1119,7 @@ fn ask_models(
     asking: &mut HashSet<HarnessKind>,
     tx: &tokio::sync::mpsc::UnboundedSender<(HarnessKind, Vec<Model>)>,
 ) {
-    for kind in wanted_models(app) {
+    for kind in wanted_models() {
         if app.models_of(kind).is_some() || !asking.insert(kind) {
             continue;
         }
@@ -1141,15 +1134,29 @@ fn ask_models(
     }
 }
 
-/// Whose model list is worth having right now.
+/// Whose model list is worth having right now: everybody's.
 ///
-/// Its own function so the answer can be tested without a terminal or a
-/// subprocess: this is the whole of the policy above.
-fn wanted_models(app: &App) -> Vec<HarnessKind> {
-    if app.workspace == Workspace::Roles {
-        return HarnessKind::ALL.to_vec();
-    }
-    vec![app.harness]
+/// It used to be the console's own harness, and the roles panel's three only
+/// while that panel was open. That was the right amount of work and the wrong
+/// timing, because the moment a list is wanted is the moment it cannot be
+/// fetched. `/harness agy` opens the model picker on the way past —
+/// `point_at` calls `offer_models` — and `agy models` fetches over the network,
+/// measured at 3.1 seconds against agy 1.1.19. So the picker opened on a
+/// harness nobody had asked yet and offered one row, `default`, which reads as
+/// "AGY has no models" rather than "AGY has not answered yet".
+///
+/// Claude Code never had the problem: its list is a constant this build carries
+/// and it is on screen instantly. Asking all three up front is what makes the
+/// other two behave the same way.
+///
+/// The cost is two extra subprocesses, once, on blocking threads, at a moment
+/// when nothing is streaming — and a harness that is not installed costs
+/// nothing at all, because `locate` answers `None` without spawning anything.
+///
+/// Its own function, taking nothing, so the answer can be tested without a
+/// terminal or a subprocess: this is the whole of the policy above.
+fn wanted_models() -> Vec<HarnessKind> {
+    HarnessKind::ALL.to_vec()
 }
 
 /// Say that a background agent ended, and how it went.
@@ -13046,16 +13053,17 @@ mod tests {
         }
 
         /// Whose lists are worth fetching, which is the whole of the policy:
-        /// the panel needs all three, because the next keypress may set a row
-        /// to any of them and a chooser with nothing in it looks broken.
-        /// Everywhere else only the console's own harness is asked, so no
-        /// screen but this one pays for a subprocess it will not use.
+        /// everybody's, from the first tick, whatever screen is up.
+        ///
+        /// It was the console's own harness until a switch showed why that does
+        /// not work. `/harness agy` opens the model picker as it lands, and
+        /// `agy models` takes about three seconds — so the list was always
+        /// missing at exactly the moment it was put on screen. A harness that
+        /// is not installed costs nothing to ask, so there is no screen this
+        /// makes measurably slower.
         #[test]
-        fn the_roles_panel_wants_every_harnesss_list_and_no_other_screen_does() {
-            let mut app = app_on(HarnessKind::ClaudeCode);
-            assert_eq!(wanted_models(&app), [HarnessKind::ClaudeCode]);
-            app.go(Workspace::Roles);
-            assert_eq!(wanted_models(&app), HarnessKind::ALL);
+        fn every_harnesss_list_is_fetched_whatever_screen_is_up() {
+            assert_eq!(wanted_models(), HarnessKind::ALL);
         }
     }
 
