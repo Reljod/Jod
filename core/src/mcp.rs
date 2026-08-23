@@ -7760,7 +7760,7 @@ mod tests {
 
             assert!(is_error_result(&answer), "{answer}");
             let said = said(&answer);
-            assert!(said.contains("ask_assistant"), "{said}");
+            assert!(said.contains("ask_manager"), "{said}");
             assert!(said.contains("not the main chat's to call"), "{said}");
         }
 
@@ -8027,12 +8027,14 @@ mod tests {
         /// had moved, the second because main's origin is not the assistant's —
         /// so it failed open exactly as `open_work`'s did.
         ///
-        /// What actually refuses main here is the earlier
-        /// `refuse_routing_from_main` at the top of `delegate_request`, which
-        /// reads the same repaired answer, so main is stopped before it reaches
-        /// the project check at all. That leaves the project check's job to the
-        /// assistant, whose identity comes off `conversations.origin` and is
-        /// not affected by main compacting. Asserted through `delegate_request`
+        /// What refuses main here is the project check itself. `delegate` is
+        /// main's to call again, so `refuse_routing_from_main` no longer runs
+        /// at the top of `delegate_request` and main is not stopped before the
+        /// project check is reached. The check reads the same repaired answer,
+        /// sees that the `cwd` is a catalogued checkout, and refuses on that
+        /// ground, so the refusal names the project and `ask_manager` rather
+        /// than carrying the routing message. The guard that stops this moved;
+        /// what it protects did not. Asserted through `delegate_request`
         /// because a real `delegate` would want a harness on the machine.
         #[tokio::test]
         async fn delegate_into_a_project_after_a_compaction_is_still_refused_from_main() {
@@ -8054,8 +8056,8 @@ mod tests {
                 .expect_err("a compacted main is still main");
 
             let said = format!("{refused:?}");
-            assert!(said.contains("not the main chat's to call"), "{said}");
-            assert!(said.contains("ask_assistant"), "{said}");
+            assert!(said.contains("tetris"), "{said}");
+            assert!(said.contains("ask_manager"), "{said}");
             std::fs::remove_dir_all(&dir).ok();
         }
 
