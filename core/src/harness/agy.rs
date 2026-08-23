@@ -166,22 +166,51 @@ impl Harness for Agy {
                     if let Some(text) = &response {
                         self.acc.note_text(text);
                     }
-                    // Anything but SUCCESS is a failed run.
                     let status = str_at(r, "status").unwrap_or_default();
-                    if !status.is_empty() && status != "SUCCESS" {
-                        self.acc.errored = true;
+                    let not_success = !status.is_empty() && status != "SUCCESS";
+                    // AGY's own sentence about what went wrong, whenever it has
+                    // one. Emitted whatever the verdict below turns out to be:
+                    // a turn that worked around a broken tool still has to show
+                    // the thing it worked around.
+                    if not_success {
                         if let Some(msg) = str_at(r, "error") {
                             out.push(AgentEvent::Error { message: msg });
                         }
                     }
-                    // A successful run that produced nothing is AGY's headless
-                    // permission denial: a tool needed approval, nothing could
-                    // prompt for it, so it was auto-denied — and it still
-                    // reports SUCCESS and exits 0. The only other signal is a
-                    // human-readable line on stderr. Treating this as success
-                    // would report "done" for work that never happened.
-                    if status == "SUCCESS" && response.is_none() {
+                    // Whether the turn produced an answer at all — the result's
+                    // own `response`, or prose already streamed step by step.
+                    //
+                    // This, and not the status word, is what decides whether
+                    // the run failed. AGY calls a whole turn `ERROR` when any
+                    // single tool call inside it errored, even when the agent
+                    // then worked around it and answered in full. Measured
+                    // against agy 1.1.19: asked to read a file that does not
+                    // exist and then say what happened, it returned
+                    // `"status":"ERROR"` beside a complete `response` and
+                    // exited 0. Reading the word alone recorded every
+                    // tool-using turn as a failure — see X11 in
+                    // `tasks/12-main-chain-exploration.md`, where every AGY main
+                    // run that touched a tool showed `✗ failed` on the rail
+                    // having done its job correctly.
+                    //
+                    // A genuine failure is not let through by this. The same
+                    // build, given a model it does not have, returned
+                    // `"status":"ERROR"` with an empty `response` and exited 1,
+                    // so it is caught here for having no answer and again by
+                    // the exit code.
+                    let answered = response.is_some() || self.acc.last_text.is_some();
+                    if !answered {
                         self.acc.errored = true;
+                    }
+                    // A run that produced nothing and still calls itself a
+                    // success is AGY's headless permission denial: a tool
+                    // needed approval, nothing could prompt for it, so it was
+                    // auto-denied — and it reports SUCCESS and exits 0. The
+                    // only other signal is a human-readable line on stderr.
+                    // Treating it as success would report "done" for work that
+                    // never happened. A turn that already said why it failed
+                    // gets no second explanation invented for it.
+                    if !answered && !not_success {
                         out.push(AgentEvent::Error {
                             message: "AGY produced no output — a tool most likely needed a \
                                       permission that headless mode cannot prompt for and was \
@@ -283,8 +312,20 @@ impl Agy {
                     "DONE" | "ERROR" => {
                         let error = info.and_then(|i| i.get("error"));
                         let is_error = state == "ERROR" || error.is_some();
+                        // `output` is what agy 1.1.19 actually calls the field
+                        // holding a tool's result — `list_dir` came back with
+                        // `"output":"a.txt\nb.txt"` and `view_file` with
+                        // `"output":"2 lines, 5 bytes"`. Only `result` was read
+                        // before, which AGY sends under no circumstances
+                        // observed here, so every successful AGY tool call
+                        // reached the transcript with nothing beside it while
+                        // the same call under Claude Code showed what it
+                        // returned. `result` is kept behind it rather than
+                        // dropped: it costs one fallback and no build was
+                        // checked for having used it.
                         let summary = error
                             .and_then(|e| str_at(e, "message"))
+                            .or_else(|| info.and_then(|i| str_at(i, "output")))
                             .or_else(|| info.and_then(|i| str_at(i, "result")))
                             .map(|s| summarize(&Value::String(s), 400));
                         vec![AgentEvent::ToolResult {
@@ -296,8 +337,23 @@ impl Agy {
                     _ => vec![],
                 }
             }
-            // user_input, checkpoint and unknown are bookkeeping, not output.
-            _ => vec![],
+            // Bookkeeping, and named rather than assumed: these two carry
+            // nothing a reader wants and arrive on every single turn.
+            "user_input" | "checkpoint" => vec![],
+            // Anything else is surfaced rather than swallowed, which is the
+            // rule `parse_line` already follows for an event kind it does not
+            // know. The step level did not follow it, and agy 1.1.19 emits at
+            // least one type this adapter had never heard of: `error_message`,
+            // seen at the end of an otherwise ordinary turn. Whatever such a
+            // step carries, dropping it silently is how a harness gets to
+            // report a problem that never reaches the screen.
+            //
+            // Once per step rather than twice. A step arrives ACTIVE and again
+            // DONE, and the completed one is the one that holds everything.
+            _ if state == "ACTIVE" => vec![],
+            _ => vec![AgentEvent::Raw {
+                line: format!("agy {step_type}: {}", summarize(step, 400)),
+            }],
         }
     }
 }
@@ -688,13 +744,154 @@ mod tests {
         }
     }
 
+    /// A run that answered nothing is a failed run, whatever it calls itself.
     #[test]
-    fn a_non_success_status_marks_the_run_failed_even_on_a_zero_exit() {
+    fn a_non_success_status_with_no_answer_marks_the_run_failed_even_on_a_zero_exit() {
         let mut h = Agy::default();
-        h.parse_line(r#"{"event":"result","result":{"status":"ERROR","response":"nope"}}"#);
+        h.parse_line(r#"{"event":"result","result":{"status":"ERROR","response":""}}"#);
         match h.finalize(Some(0)) {
             AgentEvent::Finished { is_error, .. } => assert!(is_error),
             other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// The shape agy 1.1.19 returns for a real failure, captured verbatim:
+    /// an empty response, AGY's own sentence in `error`, and exit 1. Both
+    /// halves have to keep convicting it.
+    #[test]
+    fn a_model_agy_does_not_have_is_still_a_failed_run() {
+        let mut h = Agy::default();
+        let events = h.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"invalid model selection (--model \"opencode/deepseek-v4-flash-free\"): model is not recognized","num_turns":0}}"#,
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message } if message.contains("invalid model selection")
+            )),
+            "AGY's own words must reach the transcript: {events:?}"
+        );
+        match h.finalize(Some(1)) {
+            AgentEvent::Finished { is_error, .. } => assert!(is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// Regression for X11, and the reason the status word stopped deciding
+    /// anything on its own.
+    ///
+    /// Captured from agy 1.1.19: asked to read a file that does not exist and
+    /// then report what happened, it did exactly that, answered in full, exited
+    /// 0 — and labelled the whole result `ERROR` because one tool call inside
+    /// the turn had errored. Reading the label recorded every tool-using AGY
+    /// turn as a failure, which on Reljod's box meant every substantive main
+    /// turn showed `✗ failed` having worked.
+    #[test]
+    fn a_tool_that_errored_does_not_fail_a_turn_that_answered() {
+        let mut h = Agy::default();
+        h.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"ERROR","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","error":{"type":"TOOL_ERROR","message":"failed to read file: no such file or directory"}}}}"#,
+        );
+        let events = h.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"d0c3","status":"ERROR","response":"When attempting to view that path, the error returned was: no such file or directory."}}"#,
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message } if message.contains("produced no output")
+            )),
+            "a turn that answered was not denied a permission: {events:?}"
+        );
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, text, .. } => {
+                assert!(!is_error, "the turn answered, so the run did not fail");
+                assert!(text.is_some_and(|t| t.contains("no such file")));
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// The other half: an answer that only ever arrived step by step still
+    /// counts as an answer, so a result record with an empty `response` on top
+    /// of it is not the headless denial.
+    #[test]
+    fn prose_streamed_step_by_step_counts_as_the_turn_having_answered() {
+        let mut h = Agy::default();
+        h.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":4,"state":"DONE","step_type":"agent_response","text_delta":"Done — I renamed the file."}}"#,
+        );
+        let events = h
+            .parse_line(r#"{"event":"result","result":{"status":"SUCCESS","response":""}}"#);
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "got {events:?}"
+        );
+        match h.finalize(Some(0)) {
+            AgentEvent::Finished { is_error, .. } => assert!(!is_error),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// Regression: agy 1.1.19 reports a tool's result under `output`, and the
+    /// adapter read `result` — a field it never sends. Every successful AGY
+    /// tool call therefore reached the transcript with nothing beside it.
+    #[test]
+    fn a_tools_output_reaches_the_transcript() {
+        let mut h = Agy::default();
+        let events = h.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"list_dir","tool_info":{"name":"list_dir","parameters":{"DirectoryPath":"/work"},"output":"a.txt\nb.txt"}}}"#,
+        );
+        match &events[..] {
+            [AgentEvent::ToolResult {
+                name,
+                summary,
+                is_error,
+            }] => {
+                assert!(!is_error);
+                assert_eq!(name, "list_dir");
+                assert!(
+                    summary.as_deref().is_some_and(|s| s.contains("a.txt")),
+                    "got {summary:?}"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    /// A step type this adapter has never heard of is shown rather than
+    /// dropped — the rule `parse_line` already follows for an unknown event.
+    /// agy 1.1.19 emits `error_message`, which went nowhere at all before.
+    #[test]
+    fn an_unknown_step_type_is_surfaced_not_swallowed() {
+        let mut h = Agy::default();
+        assert!(
+            h.parse_line(
+                r#"{"event":"step_update","step_update":{"step_index":5,"state":"ACTIVE","step_type":"error_message"}}"#
+            )
+            .is_empty(),
+            "a step still running is not reported twice"
+        );
+        let events = h.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":5,"state":"DONE","step_type":"error_message","text":"the model stopped early"}}"#,
+        );
+        match &events[..] {
+            [AgentEvent::Raw { line }] => {
+                assert!(line.contains("error_message"), "got {line}");
+                assert!(line.contains("stopped early"), "got {line}");
+            }
+            other => panic!("expected Raw, got {other:?}"),
+        }
+    }
+
+    /// ...and the two that arrive on every turn carrying nothing still do not.
+    #[test]
+    fn the_bookkeeping_steps_stay_out_of_the_transcript() {
+        let mut h = Agy::default();
+        for step_type in ["user_input", "checkpoint"] {
+            let line = format!(
+                r#"{{"event":"step_update","step_update":{{"step_index":0,"state":"DONE","step_type":"{step_type}"}}}}"#
+            );
+            assert!(h.parse_line(&line).is_empty(), "{step_type} was surfaced");
         }
     }
 

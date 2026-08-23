@@ -710,7 +710,46 @@ and is marked failed.
 ---
 
 ## X11. A main turn on AGY that uses tools is recorded as failed even when it succeeds
-Status: **open — mechanism needs confirming** · Severity: high · Owner: —
+Status: **fixed — mechanism confirmed against agy 1.1.19, fix in `core/src/harness/agy.rs`** · Severity: high · Owner: the AGY-stability session
+
+**The mechanism was not the one guessed below.** `service.rs:924` is innocent:
+the supervisor records a terminal status on every run, so nothing was left in
+`running` to be reclassified. AGY was reporting the failure itself, and the
+adapter was believing it.
+
+Measured directly. Asked to read a file that does not exist and then say what
+happened, agy 1.1.19 did exactly that, answered in full and exited 0 — and
+labelled the result record `ERROR`, because one tool call inside the turn had
+errored:
+
+```
+{"event":"step_update","step_update":{"step_index":3,"state":"ERROR","step_type":"tool",
+  "tool_name":"view_file","tool_info":{"error":{"type":"TOOL_ERROR","message":"…no such file…"}}}}
+{"event":"result","result":{"status":"ERROR","response":"When attempting to view
+  `/nonexistent/…`, the following error was returned: …"}}
+AGY_EXIT=0
+```
+
+So AGY's `status` is about whether anything went wrong *inside* the turn, not
+about whether the turn worked. The adapter read `status != "SUCCESS"` as a
+failed run, which made every AGY turn that touched a tool a failure — and a
+main turn touches many, so on Reljod's configured harness nearly every
+substantive turn showed `✗ failed` having done its job.
+
+**What replaces it.** A turn failed when it produced no answer — either the
+result's own `response` or prose already streamed step by step. AGY's error
+sentence is still surfaced in the transcript whatever the verdict, so nothing is
+hidden. A real failure is not let through: the same build, given a model it does
+not have, returns `"status":"ERROR"` with an empty `response` and exits 1, and
+is caught twice over.
+
+Check: `cargo test -p jod-core --lib harness::agy`, and in particular
+`a_tool_that_errored_does_not_fail_a_turn_that_answered`. Replaying the captured
+transcript above through the adapter gives `is_error: false` where it gave
+`is_error: true`.
+
+The original reasoning is kept below because the rule it points at is still the
+right rule and should not be softened.
 
 Every AGY main run today that called a tool is recorded `failed`, and every one
 of them produced a complete, correct final answer. The one that answered without
@@ -1393,6 +1432,70 @@ happened, then decide whether to fire.
 Check: arrange a `replace` schedule whose previous run cannot be stopped, let it
 fire, and read the `fires` row. Green is a record that does not claim to have
 stopped anything, and either one run or an explicit decision to have two.
+
+---
+
+## X18. `/model` on AGY offers one row, `default`, which reads as "AGY has one model"
+Status: **fixed — `cli/src/tui/mod.rs`, `cli/src/tui/command.rs`** · Severity: medium · Owner: the AGY-stability session
+
+Reljod reported the picker showing nothing but `default` for AGY. AGY has
+fourteen models and `agy models` prints all of them, so nothing was wrong with
+the harness.
+
+**Two causes, and they compounded.**
+
+*The list was fetched only for the harness the console was already on.*
+`wanted_models` answered `vec![app.harness]` off the chat screen. But a harness
+switch opens the model picker as it lands — `point_at` calls `offer_models` with
+`/model ` — so the picker was drawn on a harness nobody had asked yet. Claude
+Code never showed this because its list is a constant this build carries and is
+on screen instantly. `agy models` fetches over the network: measured at 3.1
+seconds from cold against agy 1.1.19, next to 1.3 for `opencode models`. So the
+one moment the list was certain to be missing was the moment it was put on
+screen.
+
+*And an empty list said nothing about why it was empty.* "Not asked yet",
+"asked and still waiting", and "cannot be asked at all" all rendered as a popup
+with a single `default` row, which reads as a complete answer.
+
+**What changed.** Every harness is asked from the first tick rather than
+whichever one is on screen — one subprocess each, once per session, on blocking
+threads, and a harness that is not installed costs nothing because `locate`
+answers `None` without spawning anything. And when the list really is empty the
+popup says which of the two silences it is.
+
+Check: `cargo test -p jod-cli` — `every_harnesss_list_is_fetched_whatever_screen_is_up`,
+`an_unloaded_list_offers_the_default_and_says_why_it_is_alone`, and
+`a_harness_that_could_not_be_asked_says_so_rather_than_looking_empty`. Live:
+`/harness agy` and read the picker it opens.
+
+---
+
+## X19. Every AGY tool call reaches the transcript with nothing beside it
+Status: **fixed — `core/src/harness/agy.rs`** · Severity: medium · Owner: the AGY-stability session
+
+The adapter read a completed tool's result out of `tool_info.result`. agy
+1.1.19 calls that field `output`, and sends nothing under `result` in any
+transcript captured here — `list_dir` came back with
+`"output":"a.txt\nb.txt"`, `view_file` with `"output":"2 lines, 5 bytes"`. So
+every successful AGY tool call showed as having run and never as having
+returned anything, while the same call under Claude Code showed its result.
+Only the *error* path worked, because that reads `tool_info.error.message`,
+which AGY does send.
+
+Two smaller things went with it. A step type the adapter does not know was
+dropped silently, where `parse_line` surfaces an unknown *event* as `Raw` —
+and agy 1.1.19 emits at least one the adapter had never heard of,
+`error_message`. Unknown step types are now surfaced the same way, with
+`user_input` and `checkpoint` named as the bookkeeping they are so they stay
+out.
+
+Check: `cargo test -p jod-core --lib harness::agy` —
+`a_tools_output_reaches_the_transcript`,
+`an_unknown_step_type_is_surfaced_not_swallowed`,
+`the_bookkeeping_steps_stay_out_of_the_transcript`. `core/examples/agy_replay.rs`
+replays a captured `--output-format stream-json` file through the adapter, which
+is how all of this was measured.
 
 ---
 

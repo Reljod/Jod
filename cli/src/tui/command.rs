@@ -780,6 +780,33 @@ pub fn completions(input: &str, app: &crate::tui::App) -> Vec<Completion> {
                     .filter(|m| m.id.to_ascii_lowercase().contains(&typed))
                     .map(|m| Completion::new(format!("/{name} {}", m.id), m.label.clone())),
             );
+            // Why there is nothing under `default`, when there is nothing.
+            //
+            // An empty list has two causes and they call for opposite
+            // reactions: the harness has not answered yet, or it cannot be
+            // asked at all. Silence looked identical either way, and a picker
+            // showing one row reads as "this harness has one model". `agy
+            // models` fetches over the network and takes about three seconds
+            // from cold, which is long enough to be the whole of somebody's
+            // impression of what AGY offers.
+            //
+            // The row inserts the line already in the box, so choosing it
+            // changes nothing — it is a sentence, not an option.
+            if out.len() <= 1 {
+                let harness = app.harness.label();
+                let said = match app.models_of(app.harness) {
+                    None => format!("asking {harness} what models it accepts…"),
+                    Some([]) => format!("{harness} could not be asked what models it accepts"),
+                    Some(_) => String::new(),
+                };
+                if !said.is_empty() {
+                    out.push(Completion::usage(
+                        format!("/{name} {typed}"),
+                        said,
+                        "any name still works — this list is an aid, not a gate",
+                    ));
+                }
+            }
             out
         }
         "new" => KINDS
@@ -1025,12 +1052,49 @@ mod tests {
         assert_eq!(parse("/model default"), Some(Slash::Model(None)));
     }
 
-    /// Before the list arrives — or when the harness is not installed — the
-    /// only thing offered is the one option that is always true. A popup that
-    /// claimed the harness had no models would be a lie.
+    /// Before the list arrives the only thing offered is the one option that is
+    /// always true — and beside it, why there is nothing else. A popup that
+    /// claimed the harness had no models would be a lie, and a popup showing
+    /// one row said exactly that by saying nothing.
+    ///
+    /// The explaining row inserts the line already in the box, so choosing it
+    /// is a no-op: it is a sentence, not an option.
     #[test]
-    fn an_unloaded_list_still_offers_the_default() {
-        assert_eq!(model_lines("/model ", &fleet(&[])), vec!["/model default"]);
+    fn an_unloaded_list_offers_the_default_and_says_why_it_is_alone() {
+        let offered = completions("/model ", &fleet(&[]));
+        assert_eq!(
+            offered.iter().map(|c| c.line.clone()).collect::<Vec<_>>(),
+            vec!["/model default", "/model "]
+        );
+        assert!(
+            offered[1].label.contains("asking Claude Code"),
+            "got {:?}",
+            offered[1].label
+        );
+    }
+
+    /// A harness that answered with nothing is a different fact from one that
+    /// has not answered, and the two used to look identical.
+    #[test]
+    fn a_harness_that_could_not_be_asked_says_so_rather_than_looking_empty() {
+        let app = with_models(&[]);
+        let offered = completions("/model ", &app);
+        assert_eq!(offered.len(), 2, "{offered:?}");
+        assert!(
+            offered[1].label.contains("could not be asked"),
+            "got {:?}",
+            offered[1].label
+        );
+    }
+
+    /// ...and once a real list is in, the explanation goes away.
+    #[test]
+    fn a_loaded_list_explains_nothing() {
+        let app = with_models(&[("opus", "the latest Opus")]);
+        assert_eq!(
+            model_lines("/model ", &app),
+            vec!["/model default", "/model opus"]
+        );
     }
 
     #[test]
