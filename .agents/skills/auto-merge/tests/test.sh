@@ -307,6 +307,37 @@ scenario sub_skip_reason >/dev/null
 printf 'import pytest\n\n@pytest.mark.skip\ndef test_run():\n    assert run() == 1\n' > tests/test_app.py
 assert_blocker "skips a test" "test is skipped"
 
+# The disabled-test rule is anchored on the test function name, so an ordinary
+# Rust iterator chain is not a disabled test. `.skip(` is a normal adaptor in
+# Rust, and the gate used to report list paging as the most serious finding it
+# has.
+scenario sub_rust_iterator_ok >/dev/null
+printf 'fn page(items: &[u32]) -> Vec<u32> {\n    items.iter().skip(2).take(3).copied().collect()\n}\n' > src/page.rs
+assert_verdict "a Rust iterator chain using .skip()" auto-merge
+
+# ...and the JavaScript forms the rule was written for still fire.
+scenario sub_js_only >/dev/null
+printf "it.only('runs', () => { expect(run()).toBe(1); });\n" > tests/app.spec.ts
+assert_verdict "a suite narrowed to it.only" human-review
+
+scenario sub_js_describe_skip >/dev/null
+printf "describe.skip('app', () => { it('runs', () => {}); });\n" > tests/app.spec.ts
+assert_verdict "a suite disabled with describe.skip" human-review
+
+scenario sub_js_skip_reason >/dev/null
+printf "test.skip('runs', () => {});\n" > tests/app.spec.ts
+assert_blocker "a test disabled with test.skip" "test is skipped"
+
+# The x-prefixed Jasmine and Jest spellings are the same substitution.
+scenario sub_js_xit >/dev/null
+printf "xit('runs', () => {});\n" > tests/app.spec.ts
+assert_verdict "a test disabled with xit" human-review
+
+# Rust's own spelling of a disabled test is untouched by the narrowing.
+scenario sub_rust_ignore >/dev/null
+printf '#[test]\n#[ignore]\nfn slow() {}\n' > tests/slow.rs
+assert_verdict "a Rust test marked #[ignore]" human-review
+
 scenario sub_except >/dev/null
 printf 'def run():\n    try:\n        go()\n    except:\n        pass\n' > src/app.py
 assert_verdict "swallows a failure" human-review

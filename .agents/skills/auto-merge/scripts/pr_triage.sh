@@ -194,7 +194,16 @@ scan()      { _scan "$added" "$@"; }
 scan_code() { _scan "$added_code" "$@"; }
 
 if [ -n "$added_code" ]; then
-  scan_code '@pytest\.mark\.(skip|xfail)|pytest\.skip\(|#\[ignore\]|t\.Skip\(|@Ignore\b|\b(xit|xdescribe)\(|\.(skip|only)\(' \
+  # The JavaScript half of this rule is anchored on the test function name —
+  # `it`, `test`, `describe` and friends — rather than on a bare `.skip(`.
+  # A bare `.skip(` is a normal iterator adaptor in Rust, so the old spelling
+  # reported `options.iter().enumerate().skip(start)` as a disabled test, and
+  # a rule that fires on ordinary paging code is how people learn to wave
+  # substitution warnings through. Every other spelling of a disabled test
+  # keeps its own alternative: `#[ignore]` for Rust, `t.Skip(` for Go,
+  # `@Ignore` for JUnit, the pytest marks for Python, and the `x`-prefixed
+  # forms for Jasmine and Jest.
+  scan_code '@pytest\.mark\.(skip|xfail)|pytest\.skip\(|#\[ignore\]|t\.Skip\(|@Ignore\b|\b(xit|xtest|xdescribe|xcontext|xspecify)\(|\b(it|test|describe|context|suite|specify)(\.(concurrent|sequential|each|failing))?\.(only|skip|skipIf|todo|failing)\b' \
     substitution "a test is skipped, disabled, or narrowed to .only"
   scan_code 'except[[:space:]]*:|except[[:space:]]+Exception|catch[[:space:]]*\([^)]*\)[[:space:]]*\{[[:space:]]*\}|catch[[:space:]]*\{[[:space:]]*\}' \
     substitution "a failure is swallowed by a bare or empty catch"
