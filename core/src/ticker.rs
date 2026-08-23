@@ -6445,6 +6445,7 @@ mod tests {
             let waiting = store
                 .plan_injection(&manager, false)
                 .unwrap()
+                .speak()
                 .expect("the manager must have a turn waiting");
             assert!(
                 waiting.prompt.contains("you chose: 1 engineer")
@@ -6912,6 +6913,7 @@ mod tests {
             let injection = store
                 .plan_injection(&manager, false)
                 .unwrap()
+                .speak()
                 .expect("the manager must have a turn waiting");
             assert!(
                 injection.prompt.contains("the tests are green"),
