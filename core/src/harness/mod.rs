@@ -258,6 +258,45 @@ impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         Role::ALL.into_iter().find(|r| r.as_str() == s)
     }
+
+    /// What this layer runs on when nobody has configured it.
+    ///
+    /// Below the `roles` row and above the harness's own default, which is the
+    /// rung a built-in belongs on: a row Reljod set outranks this, and this
+    /// outranks "whatever the binary would have picked".
+    ///
+    /// **Only the assistant has one, and the reason is what it does.** It reads
+    /// one message and answers one question — can this wait — in a conversation
+    /// that lives for a single turn. That is not work a frontier model does
+    /// better, and it happens every time Reljod types into a chat that is
+    /// already busy, so it is the one layer where the default model matters more
+    /// than the default quality. Every other layer inherits, because every other
+    /// layer is doing work where the model is the whole of the value.
+    ///
+    /// This deliberately does **not** seed the `roles` table. An empty table
+    /// still means "nothing is configured" — see [`crate::store::RoleRow`] — and
+    /// a row written by an installer would be indistinguishable from one Reljod
+    /// chose, so he could never tell what he had set from what Jod assumed.
+    pub fn default_spawn(self) -> Option<(HarnessKind, &'static str)> {
+        match self {
+            // `gpt-oss-120b-medium` is AGY's own spelling, read off
+            // `agy models` rather than guessed — it is the only 120B variant
+            // that binary offers, and a name it does not know is dropped at
+            // spawn with nothing said.
+            Role::Assistant => Some((HarnessKind::Agy, "gpt-oss-120b-medium")),
+            _ => None,
+        }
+    }
+
+    /// The harness this layer runs on when nobody has configured it.
+    pub fn default_harness(self) -> Option<HarnessKind> {
+        self.default_spawn().map(|(kind, _)| kind)
+    }
+
+    /// The model this layer runs on when nobody has configured it.
+    pub fn default_model(self) -> Option<&'static str> {
+        self.default_spawn().map(|(_, model)| model)
+    }
 }
 
 /// How hard the model should think, when somebody has said.

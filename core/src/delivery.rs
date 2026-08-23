@@ -159,6 +159,16 @@ impl Kind {
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Queued,
+    /// A doorman is reading this, working out whether it can wait for the turn
+    /// in flight or has to stop it.
+    ///
+    /// Its own state rather than a flag on the row, because it is what stops a
+    /// second doorman being started: a row being judged is not queued, so the
+    /// next tick finds nothing waiting for that conversation and starts
+    /// nothing. A verdict puts the row back to `Queued` with `reviewed_at_ms`
+    /// stamped, and that stamp is what stops the same message being judged
+    /// twice.
+    Reviewing,
     Delivered,
     /// Handed over and something went wrong on the way — a spawn that failed,
     /// a run that died before its first turn. Distinct from `Undeliverable`
@@ -179,6 +189,7 @@ impl State {
     pub fn as_str(&self) -> &'static str {
         match self {
             State::Queued => "queued",
+            State::Reviewing => "reviewing",
             State::Delivered => "delivered",
             State::Failed => "failed",
             State::Undeliverable => "undeliverable",
@@ -191,6 +202,7 @@ impl State {
     /// has not happened yet.
     pub fn parse(s: &str) -> State {
         match s {
+            "reviewing" => State::Reviewing,
             "delivered" => State::Delivered,
             "failed" => State::Failed,
             "undeliverable" => State::Undeliverable,
@@ -221,6 +233,14 @@ pub struct Pending {
     pub detail: Option<String>,
     pub queued_at_ms: i64,
     pub delivered_at_ms: Option<i64>,
+    /// When a doorman finished reading this, if one ever did.
+    ///
+    /// Set once and never cleared, because the question it answers is "has
+    /// this already been judged", not "when was it last looked at". Without
+    /// it, a message a doorman decided could wait would go back to `Queued`
+    /// and be judged again on the next tick, and again after that, for as long
+    /// as the turn it is waiting behind keeps running.
+    pub reviewed_at_ms: Option<i64>,
 }
 
 /// What the handler decided to do for one conversation.
@@ -241,6 +261,73 @@ impl Injection {
     pub fn count(&self) -> usize {
         self.items.len()
     }
+}
+
+/// What should happen to a conversation's queue right now.
+///
+/// Three answers rather than two. `Option<Injection>` could say "speak" and
+/// "do not speak yet", and for card answers and mail those are the only two
+/// that exist — a card answer waits for the turn to end and loses nothing by
+/// waiting. A message Reljod typed into a chat that is already working is
+/// different: he is looking at the screen, and the reason he typed while it
+/// was busy is often that the turn in flight is going the wrong way. Somebody
+/// has to read it and say whether it can wait, and that somebody cannot be the
+/// conversation itself, because the conversation is the thing that is busy.
+///
+/// So the third answer names the case and hands it on. All the judgement here
+/// is still in *when*, and none of it is in a model: `Judge` is returned as a
+/// value, the same as the other two, and what to do with it is the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// Nothing to say, or nothing that may be said yet.
+    Hold,
+    /// Say all of this now.
+    Speak(Injection),
+    /// A turn is in flight and something is queued behind it that nobody has
+    /// judged. Start a doorman on these rows.
+    Judge {
+        conversation_id: String,
+        items: Vec<Pending>,
+    },
+}
+
+impl Plan {
+    /// What this plan says to say now, or `None` when it says anything else.
+    ///
+    /// Both other answers mean "not yet" to a caller that only wants to know
+    /// whether to speak, and most callers are exactly that. The ones that have
+    /// to tell a hold from a judgement match on the enum.
+    pub fn speak(self) -> Option<Injection> {
+        match self {
+            Plan::Speak(injection) => Some(injection),
+            Plan::Hold | Plan::Judge { .. } => None,
+        }
+    }
+
+    /// Whether this plan says a doorman should be started.
+    pub fn is_judge(&self) -> bool {
+        matches!(self, Plan::Judge { .. })
+    }
+}
+
+/// What a conversation's turn in flight is doing, for the doorman to read.
+///
+/// Deliberately small. The doorman is deciding one thing — can this wait — and
+/// the whole of what it needs is what the turn was asked to do and the last
+/// thing it said. Handing it the transcript would invite it to form an opinion
+/// about the work, which is not its job and which it is not equipped for: it
+/// runs on a cheap model in a conversation one second old.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlight {
+    /// The run to stop, if stopping is the answer.
+    pub run_id: String,
+    /// What the run answers to in the fleet.
+    pub name: String,
+    /// The turn's own opening prompt — what it was asked to do.
+    pub asked: Option<String>,
+    /// The last thing it has said, which is as close as anything gets to
+    /// "where has it got to".
+    pub said: Option<String>,
 }
 
 /// The synthetic user turn a batch becomes.
@@ -449,15 +536,17 @@ impl Store {
                 let Ok(card_id) = ref_id.parse::<i64>() else {
                     continue;
                 };
-                // The rail has three words, not four: to a person waiting on an
-                // answer, "the spawn failed and will be retried" and "it has
-                // not gone yet" are the same fact, and a card that said
-                // `failed` would invite answering it again. `Failed` is the
-                // bus's word for something it will try once more.
+                // The rail has three words, not five: to a person waiting on an
+                // answer, "the spawn failed and will be retried", "an assistant
+                // is reading it" and "it has not gone yet" are the same fact,
+                // and a card that said `failed` would invite answering it
+                // again. `Failed` is the bus's word for something it will try
+                // once more, and `Reviewing` is a doorman's word for something
+                // still on its way.
                 let card_state = match state {
                     State::Delivered => "delivered",
                     State::Undeliverable => "undeliverable",
-                    State::Queued | State::Failed => "queued",
+                    State::Queued | State::Failed | State::Reviewing => "queued",
                 };
                 tx.execute(
                     "UPDATE cards SET delivery = ?2, delivered_at_ms = ?3, updated_at_ms = ?4
@@ -516,32 +605,266 @@ impl Store {
     /// is, and keeping it out of the spawning means it can be tested without a
     /// harness binary, a tmux server, or a running agent.
     ///
-    /// Returns `None` — deliberately, in each case — when:
+    /// Returns [`Plan::Hold`] — deliberately, in each case — when:
     ///
-    /// - **A turn is in flight.** This is the rule the whole module exists for.
-    ///   The running turn's prompt was assembled before any of this arrived, so
-    ///   splicing it in produces an answer to a question the agent has already
-    ///   moved past. It waits; nothing is lost.
     /// - **Nothing is queued.** Waking an agent to tell it nothing burns a turn
     ///   and a context window.
+    /// - **A turn is in flight and everything queued behind it has already been
+    ///   judged.** The running turn's prompt was assembled before any of this
+    ///   arrived, so splicing it in produces an answer to a question the agent
+    ///   has already moved past. It waits; nothing is lost.
+    ///
+    /// A turn in flight with something queued that *has not* been judged is
+    /// [`Plan::Judge`] rather than a hold, and that is the whole of what
+    /// changed here. It used to be a hold, and the cost of that was a message
+    /// Reljod typed to stop a turn going the wrong way sitting in a queue until
+    /// the turn it was trying to stop had finished.
     ///
     /// Everything queued goes into **one** injection. Ten cards answered while a
     /// run was mid-turn arrive as one turn carrying ten, not ten turns: cheaper,
     /// and the better answer as well, because an agent reading everything that
     /// changed in one go responds more coherently than one woken ten times with
     /// a line each.
-    pub fn plan_injection(&self, conversation_id: &str, busy: bool) -> Result<Option<Injection>> {
-        if busy {
-            return Ok(None);
-        }
+    pub fn plan_injection(&self, conversation_id: &str, busy: bool) -> Result<Plan> {
         let items = self.pending_for(conversation_id)?;
         if items.is_empty() {
-            return Ok(None);
+            return Ok(Plan::Hold);
         }
-        Ok(Some(Injection {
+        if busy {
+            // Two filters, and both of them save money.
+            //
+            // **Only what a person typed.** A card answer and a peer's message
+            // have no reason to want a turn stopped: the agent asked a question
+            // and is being told the answer, and it can be told when the turn
+            // ends. Reading every queued row with a model would put an
+            // assistant in front of every card answered while anything was
+            // running.
+            //
+            // **Only what nobody has read yet.** A doorman that held a message
+            // left its stamp on the row, and re-judging it would start a fresh
+            // doorman every tick for as long as the turn ran — the same
+            // message, the same verdict, paid for again each minute.
+            let unjudged: Vec<Pending> = items
+                .into_iter()
+                .filter(|p| p.kind == Kind::Human && p.reviewed_at_ms.is_none())
+                .collect();
+            if unjudged.is_empty() {
+                return Ok(Plan::Hold);
+            }
+            return Ok(Plan::Judge {
+                conversation_id: conversation_id.to_string(),
+                items: unjudged,
+            });
+        }
+        Ok(Plan::Speak(Injection {
             conversation_id: conversation_id.to_string(),
             prompt: render_injection(&items),
             items,
+        }))
+    }
+
+    /// Take these rows out of the queue while a doorman reads them.
+    ///
+    /// The claim is what makes "only one doorman at a time" true, so it is an
+    /// atomic move off `queued` rather than a read followed by a write: two
+    /// ticks overlapping — a daemon tick and a console that has just been typed
+    /// into — would otherwise both see the same queued row and both pay for a
+    /// model to read it.
+    ///
+    /// Returns how many rows it actually claimed. Zero means somebody else got
+    /// there first, and the caller must start nothing.
+    pub fn claim_for_review(&self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.write(|tx| {
+            let placeholders = (2..2 + ids.len())
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut args: Vec<rusqlite::types::Value> =
+                vec![rusqlite::types::Value::Text(State::Queued.as_str().into())];
+            args.extend(ids.iter().map(|id| rusqlite::types::Value::Integer(*id)));
+            let sql = format!(
+                "UPDATE pending_deliveries SET state = 'reviewing'
+                  WHERE state = ?1 AND id IN ({placeholders})"
+            );
+            Ok(tx.execute(&sql, params_from_iter(args))?)
+        })
+    }
+
+    /// Put reviewed rows back in the queue, with the verdict stamped on them.
+    ///
+    /// Every path out of a review comes back through here — a doorman that held,
+    /// a doorman that interrupted, and a doorman that died without saying
+    /// anything.
+    ///
+    /// **The third case is not hypothetical and it was not covered.** This
+    /// comment used to claim it was, and the code did not: every caller was a
+    /// path where the *spawn* failed, so a doorman that started and then ended
+    /// — held, crashed, or interrupted — left its rows in `Reviewing` for ever.
+    /// [`Store::pending_for`] cannot see them, so the message was gone while the
+    /// console went on saying an assistant was reading it. Found by an explorer
+    /// session typing "STOP - urgent, forget the essay" into a busy chat and
+    /// watching it never arrive. [`Store::release_stale_reviews`] is what closes
+    /// it, and this is what it calls.
+    pub fn finish_review(&self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let at = now_ms();
+        self.write(|tx| {
+            let placeholders = (3..3 + ids.len())
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut args: Vec<rusqlite::types::Value> = vec![
+                rusqlite::types::Value::Text(State::Reviewing.as_str().into()),
+                rusqlite::types::Value::Integer(at),
+            ];
+            args.extend(ids.iter().map(|id| rusqlite::types::Value::Integer(*id)));
+            let sql = format!(
+                "UPDATE pending_deliveries SET state = 'queued', reviewed_at_ms = ?2
+                  WHERE state = ?1 AND id IN ({placeholders})"
+            );
+            tx.execute(&sql, params_from_iter(args))?;
+            Ok(())
+        })
+    }
+
+    /// Say which run is doing the reading, so the sweep knows whose review it is.
+    ///
+    /// Written after the spawn, because the run id does not exist before it.
+    /// That leaves a gap — claimed, not yet stamped — and
+    /// [`Store::release_stale_reviews`] deliberately treats a row in that gap as
+    /// releasable. The two failure modes are not the same size: releasing early
+    /// means a doorman's verdict is ignored and the message is delivered
+    /// normally when the turn ends, and not releasing means the message is lost.
+    ///
+    /// Reuses `run_id` rather than adding a column. The column means "which run
+    /// last had this", and a doorman reading it is a run having it; delivery
+    /// overwrites it with the run that actually carried it.
+    pub fn record_reviewer(&self, ids: &[i64], run_id: &str) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.write(|tx| {
+            let placeholders = (3..3 + ids.len())
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut args: Vec<rusqlite::types::Value> = vec![
+                rusqlite::types::Value::Text(State::Reviewing.as_str().into()),
+                rusqlite::types::Value::Text(run_id.into()),
+            ];
+            args.extend(ids.iter().map(|id| rusqlite::types::Value::Integer(*id)));
+            let sql = format!(
+                "UPDATE pending_deliveries SET run_id = ?2
+                  WHERE state = ?1 AND id IN ({placeholders})"
+            );
+            tx.execute(&sql, params_from_iter(args))?;
+            Ok(())
+        })
+    }
+
+    /// Put back every message whose doorman has stopped reading it.
+    ///
+    /// **A review ends when the run doing it ends.** Whatever the doorman
+    /// decided, it has already done by the time its run is over: an interrupt is
+    /// a tool call it has made, and a hold is a tool call it has decided not to
+    /// make. Either way nobody is reading the message any more, so leaving it
+    /// out of the queue can only lose it.
+    ///
+    /// That rule needs no timeout and no guess about what the verdict was, which
+    /// is why it is this rule and not a stale-after-N-minutes one. It also does
+    /// not care *why* the run ended — held, crashed, killed, or recorded
+    /// `failed` by a harness that mislabels a successful run, which AGY
+    /// currently does. All four mean the same thing here.
+    ///
+    /// A row with no reviewer recorded is released too. Either the spawn never
+    /// happened or the process died between claiming and stamping, and in both
+    /// cases nothing is reading it.
+    ///
+    /// Returns how many it put back, so a tick can say so out loud.
+    pub fn release_stale_reviews(&self) -> Result<usize> {
+        let at = now_ms();
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE pending_deliveries
+                    SET state = 'queued', reviewed_at_ms = coalesce(reviewed_at_ms, ?1)
+                  WHERE state = 'reviewing'
+                    AND (run_id IS NULL
+                         OR NOT EXISTS (SELECT 1 FROM runs r
+                                         WHERE r.id = pending_deliveries.run_id
+                                           AND r.status = 'running'))",
+                params![at],
+            )?)
+        })
+    }
+
+    /// Everything a doorman was left holding, oldest first.
+    ///
+    /// Its own reader because [`Store::pending_for`] answers about the queue and
+    /// these rows are deliberately not in it. The sweep that puts a crashed
+    /// doorman's rows back needs to find them, and so does a test that wants to
+    /// prove they were claimed.
+    pub fn under_review_for(&self, conversation_id: &str) -> Result<Vec<Pending>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let sql = format!(
+            "SELECT {PENDING_COLUMNS} FROM pending_deliveries
+              WHERE conversation_id = ?1 AND state = 'reviewing'
+              ORDER BY id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![conversation_id], row_to_pending)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The turn this conversation currently has in flight, if it has one.
+    ///
+    /// The other half of [`Store::conversation_is_busy`]: that answers whether
+    /// there is one, and this says what it is. Read off the same join, so the
+    /// two can never disagree about which run is meant.
+    ///
+    /// The newest running run wins if somehow there are two. That is not a
+    /// state the console produces, but a delivery injected at the moment a turn
+    /// was starting could, and stopping the older of the two would leave the
+    /// one Reljod is actually watching alive.
+    pub fn in_flight_turn(&self, conversation_id: &str) -> Result<Option<InFlight>> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let found: Option<(String, String)> = conn
+            .query_row(
+                "SELECT r.id, r.name FROM runs r
+                  WHERE r.status = 'running'
+                    AND EXISTS (SELECT 1 FROM messages m
+                                 WHERE m.run_id = r.id AND m.conversation_id = ?1)
+                  ORDER BY r.created_at_ms DESC LIMIT 1",
+                params![conversation_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((run_id, name)) = found else {
+            return Ok(None);
+        };
+        let text_of = |role: &str, order: &str| -> Option<String> {
+            conn.query_row(
+                &format!(
+                    "SELECT text FROM messages
+                      WHERE run_id = ?1 AND role = ?2 AND text <> ''
+                      ORDER BY id {order} LIMIT 1"
+                ),
+                params![run_id, role],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        };
+        Ok(Some(InFlight {
+            asked: text_of("user", "ASC"),
+            said: text_of("assistant", "DESC"),
+            run_id,
+            name,
         }))
     }
 }
@@ -553,7 +876,7 @@ fn now_ms() -> i64 {
 }
 
 const PENDING_COLUMNS: &str = "id, conversation_id, kind, ref_id, body, state, run_id, detail,
-     queued_at_ms, delivered_at_ms";
+     queued_at_ms, delivered_at_ms, reviewed_at_ms";
 
 /// The one insert, so the queue has one shape.
 ///
@@ -590,6 +913,7 @@ fn row_to_pending(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
         detail: r.get(7)?,
         queued_at_ms: r.get(8)?,
         delivered_at_ms: r.get(9)?,
+        reviewed_at_ms: r.get(10)?,
     })
 }
 
@@ -644,10 +968,83 @@ mod tests {
         );
     }
 
+    /// And so does one an assistant is part-way through reading.
+    ///
+    /// **The state the compaction fork did not know about.** Its filter said
+    /// `queued` because that was the only state meaning "still owed" when it
+    /// was written; `reviewing` matched neither that nor the `delivered` case
+    /// the filter exists to exclude, so a message being judged when a
+    /// compaction landed was left on a conversation nobody opens again. The
+    /// sweep then released it — onto the dead thread, where it was delivered
+    /// into a transcript Reljod is not reading. Two correct-looking pieces, one
+    /// silent hole between them.
+    ///
+    /// Not rare in this configuration, which is why it is pinned rather than
+    /// noted: a doorman takes tens of seconds and main compacts every few
+    /// minutes, so the overlap is ordinary. Observed as delivery 12, which
+    /// entered `reviewing` fifteen seconds before the evening's fourth
+    /// compaction and stayed on the old conversation for the rest of the night.
+    #[test]
+    fn a_message_being_judged_follows_the_main_chat_through_a_compaction() {
+        let s = store();
+        let main = s
+            .main_conversation(crate::harness::HarnessKind::ClaudeCode, "/tmp")
+            .unwrap();
+        for turn in 0..3 {
+            s.append_prompt(&main, &format!("run-{turn}"), "go").unwrap();
+        }
+        let queued = s
+            .enqueue_delivery(&main, Kind::Human, "typed", "STOP — wrong repository")
+            .unwrap();
+        // A doorman has it when the compaction lands.
+        s.claim_for_review(&[queued.id]).unwrap();
+        run_with_status(&s, "doorman-1", "running");
+        s.record_reviewer(&[queued.id], "doorman-1").unwrap();
+
+        s.continue_as_new(&main, "so far", "full").unwrap();
+        let now = s.pinned_conversation().unwrap().unwrap();
+        assert_ne!(now, main, "the pin moved, which is the premise");
+
+        assert_eq!(
+            s.under_review_for(&now).unwrap().len(),
+            1,
+            "a message being read is owed to whichever conversation is main now"
+        );
+        assert!(
+            s.under_review_for(&main).unwrap().is_empty(),
+            "and nothing is left on the thread that was compacted away"
+        );
+
+        // The doorman dies. The sweep releases it onto the *new* thread, which
+        // is the one Reljod is looking at.
+        run_with_status(&s, "doorman-1", "failed");
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.conversations_awaiting_delivery().unwrap(), vec![now]);
+    }
+
     fn conversation(s: &Store) -> String {
         s.new_conversation(HarnessKind::ClaudeCode, "/tmp/repo", None)
             .expect("conversation")
             .id
+    }
+
+    /// A run row in a given state, which is the whole of what
+    /// [`Store::release_stale_reviews`] reads to decide whether anybody is
+    /// still reading a message.
+    fn run_with_status(s: &Store, id: &str, status: &str) {
+        s.save_run(&crate::store::StoredRun {
+            id: id.into(),
+            name: format!("doorman {id}"),
+            harness: "agy".into(),
+            status: status.into(),
+            cwd: "/tmp".into(),
+            session_id: None,
+            pid: None,
+            pgid: None,
+            created_at_ms: 0,
+            summary: serde_json::Value::Null,
+        })
+        .expect("a run row");
     }
 
     /// A card raised and answered, which is the ordinary way something reaches
@@ -727,7 +1124,7 @@ mod tests {
 
         assert_eq!(s.pending_for(&a).unwrap().len(), 1);
         assert!(s.pending_for(&b).unwrap().is_empty());
-        assert!(s.plan_injection(&b, false).unwrap().is_none());
+        assert!(s.plan_injection(&b, false).unwrap().speak().is_none());
     }
 
     // ---- the judgement -------------------------------------------------
@@ -742,13 +1139,230 @@ mod tests {
         s.enqueue_delivery(&c, Kind::Mail, "1", "answer me")
             .unwrap();
 
-        assert!(s.plan_injection(&c, true).unwrap().is_none());
+        assert!(s.plan_injection(&c, true).unwrap().speak().is_none());
         assert_eq!(
             s.pending_for(&c).unwrap().len(),
             1,
             "holding is not dropping: it is still queued"
         );
-        assert!(s.plan_injection(&c, false).unwrap().is_some());
+        assert!(s.plan_injection(&c, false).unwrap().speak().is_some());
+    }
+
+    /// The one thing that is allowed to want a turn stopped, and what happens
+    /// to it. Reljod typing into a chat that is already working is the only
+    /// case where waiting is the wrong answer often enough to be worth reading,
+    /// so it is planned as `Judge` and everything else still holds.
+    #[test]
+    fn a_message_typed_into_a_busy_chat_is_judged_once_and_then_waits() {
+        let s = store();
+        let c = conversation(&s);
+        let queued = s
+            .enqueue_delivery(&c, Kind::Human, "typed", "no, the other repo")
+            .unwrap();
+
+        let plan = s.plan_injection(&c, true).unwrap();
+        let Plan::Judge { items, .. } = &plan else {
+            panic!("a message nobody has read yet is judged, not held: {plan:?}");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, queued.id);
+
+        // Claimed, so a second tick finds nothing to start a second doorman on.
+        assert_eq!(s.claim_for_review(&[queued.id]).unwrap(), 1);
+        assert!(s.pending_for(&c).unwrap().is_empty());
+        assert_eq!(s.under_review_for(&c).unwrap().len(), 1);
+        assert_eq!(
+            s.plan_injection(&c, true).unwrap(),
+            Plan::Hold,
+            "a queue somebody is already reading is not a queue to read again"
+        );
+        assert_eq!(
+            s.claim_for_review(&[queued.id]).unwrap(),
+            0,
+            "and a second claim takes nothing"
+        );
+
+        // The doorman held, so the message goes back to waiting — stamped, so
+        // the next tick does not pay to have it read all over again.
+        s.finish_review(&[queued.id]).unwrap();
+        let back = s.pending_for(&c).unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(back[0].reviewed_at_ms.is_some());
+        assert_eq!(
+            s.plan_injection(&c, true).unwrap(),
+            Plan::Hold,
+            "read once is read: it waits for the turn to end like anything else"
+        );
+
+        // And when the turn ends it is delivered, exactly as before.
+        let injection = s.plan_injection(&c, false).unwrap().speak().expect("speaks");
+        assert_eq!(injection.count(), 1);
+        assert!(injection.prompt.contains("no, the other repo"));
+    }
+
+    /// A card answer or a peer's message is not what this is for. Only a person
+    /// typing has any reason to want a turn stopped, and reading every queued
+    /// row with a model would put an assistant in front of every card answered
+    /// while something was running.
+    #[test]
+    fn only_a_message_from_reljod_is_worth_reading_mid_turn() {
+        let s = store();
+        let c = conversation(&s);
+        s.enqueue_delivery(&c, Kind::CardAnswer, "1", "yes, go ahead")
+            .unwrap();
+        assert_eq!(s.plan_injection(&c, true).unwrap(), Plan::Hold);
+
+        s.enqueue_delivery(&c, Kind::Mail, "2", "a peer asks something")
+            .unwrap();
+        assert_eq!(s.plan_injection(&c, true).unwrap(), Plan::Hold);
+    }
+
+    /// Everything queued behind the turn goes to one doorman, not one doorman
+    /// each. Three lines typed in quick succession are one thought most of the
+    /// time, and reading them separately would let two of them disagree.
+    #[test]
+    fn everything_typed_behind_one_turn_is_judged_together() {
+        let s = store();
+        let c = conversation(&s);
+        for n in 0..3 {
+            s.enqueue_delivery(&c, Kind::Human, "typed", &format!("line {n}"))
+                .unwrap();
+        }
+        let Plan::Judge { items, .. } = s.plan_injection(&c, true).unwrap() else {
+            panic!("three lines behind one turn are judged");
+        };
+        assert_eq!(items.len(), 3);
+    }
+
+    /// **A review ends when the run doing it ends**, whatever the verdict was
+    /// and whatever the harness recorded about how the run finished.
+    ///
+    /// The regression this pins is the one that made the whole assistant tier
+    /// worse than not having it: every release path was a *spawn failure*, so a
+    /// doorman that started and then ended — held, crashed, or recorded
+    /// `failed` by a harness that mislabels success — left the message in
+    /// `Reviewing`, where `pending_for` cannot see it. The console went on
+    /// saying an assistant was reading it and the message was gone.
+    #[test]
+    fn a_message_goes_back_in_the_queue_when_its_doorman_stops_reading_it() {
+        for ended_as in ["completed", "failed", "killed"] {
+            let s = store();
+            let c = conversation(&s);
+            let queued = s
+                .enqueue_delivery(&c, Kind::Human, "typed", "STOP — urgent")
+                .unwrap();
+            s.claim_for_review(&[queued.id]).unwrap();
+            run_with_status(&s, "doorman-1", "running");
+            s.record_reviewer(&[queued.id], "doorman-1").unwrap();
+
+            assert_eq!(
+                s.release_stale_reviews().unwrap(),
+                0,
+                "a doorman still reading it keeps it: {ended_as}"
+            );
+            assert!(s.pending_for(&c).unwrap().is_empty());
+
+            run_with_status(&s, "doorman-1", ended_as);
+            assert_eq!(s.release_stale_reviews().unwrap(), 1, "{ended_as}");
+
+            let back = s.pending_for(&c).unwrap();
+            assert_eq!(back.len(), 1, "{ended_as}");
+            assert!(
+                back[0].reviewed_at_ms.is_some(),
+                "read once and not read again: {ended_as}"
+            );
+            assert!(s
+                .plan_injection(&c, false)
+                .unwrap()
+                .speak()
+                .is_some_and(|i| i.prompt.contains("STOP — urgent")));
+        }
+    }
+
+    /// A stuck review must not stop the *next* message being read.
+    ///
+    /// Checked because it was reported as the worst part of the stranding bug —
+    /// one failure disabling the assistant for that chat for good, with the
+    /// counter going up and nothing ever reading any of it. It is not what this
+    /// code does: a claim is per row, not per conversation, so a message nobody
+    /// is reading any more does not hold the door shut on the ones behind it.
+    ///
+    /// Worth a test either way. The claim was plausible enough to be believed,
+    /// and "one failure and the tier is dead" and "one message is late" call for
+    /// very different fixes.
+    #[test]
+    fn a_message_stuck_under_review_does_not_stop_the_next_one_being_read() {
+        let s = store();
+        let c = conversation(&s);
+        let stuck = s.enqueue_delivery(&c, Kind::Human, "typed", "STOP - urgent").unwrap();
+        s.claim_for_review(&[stuck.id]).unwrap();
+        run_with_status(&s, "doorman-1", "failed");
+        s.record_reviewer(&[stuck.id], "doorman-1").unwrap();
+
+        // Two more typed behind it while the first is still stranded.
+        s.enqueue_delivery(&c, Kind::Human, "typed", "seriously, stop").unwrap();
+        s.enqueue_delivery(&c, Kind::Human, "typed", "are you listening").unwrap();
+
+        let Plan::Judge { items, .. } = s.plan_injection(&c, true).unwrap() else {
+            panic!("a stranded row must not hold the door shut on the ones behind it");
+        };
+        assert_eq!(items.len(), 2);
+
+        // And the sweep brings the stranded one back to join them.
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 3);
+    }
+
+    /// A row claimed by a process that died before it could say which run was
+    /// reading it. Nothing is reading it, so it goes back.
+    ///
+    /// Released rather than held, deliberately: releasing early costs a
+    /// doorman's verdict being ignored and the message arriving when the turn
+    /// ends, and holding costs the message.
+    #[test]
+    fn a_review_nobody_owns_is_not_a_review() {
+        let s = store();
+        let c = conversation(&s);
+        let queued = s
+            .enqueue_delivery(&c, Kind::Human, "typed", "still here")
+            .unwrap();
+        s.claim_for_review(&[queued.id]).unwrap();
+        assert!(s.under_review_for(&c).unwrap()[0].run_id.is_none());
+
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 1);
+    }
+
+    /// And a reviewer that was never a run at all — a row naming a run this
+    /// database has no record of — is not something to wait on for ever.
+    #[test]
+    fn a_reviewer_that_does_not_exist_releases_the_message() {
+        let s = store();
+        let c = conversation(&s);
+        let queued = s.enqueue_delivery(&c, Kind::Human, "typed", "hello").unwrap();
+        s.claim_for_review(&[queued.id]).unwrap();
+        s.record_reviewer(&[queued.id], "a-run-that-never-was").unwrap();
+
+        assert_eq!(s.release_stale_reviews().unwrap(), 1);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 1);
+    }
+
+    /// A doorman that died without saying anything must not take the message
+    /// with it. `finish_review` is the one way out of `Reviewing`, and it is
+    /// reached from the verdict, from a failed spawn, and from a sweep.
+    #[test]
+    fn a_message_left_under_review_can_always_be_put_back() {
+        let s = store();
+        let c = conversation(&s);
+        let queued = s
+            .enqueue_delivery(&c, Kind::Human, "typed", "still here")
+            .unwrap();
+        s.claim_for_review(&[queued.id]).unwrap();
+        assert!(s.pending_for(&c).unwrap().is_empty());
+
+        s.finish_review(&[queued.id]).unwrap();
+        assert_eq!(s.under_review_for(&c).unwrap().len(), 0);
+        assert_eq!(s.pending_for(&c).unwrap().len(), 1);
     }
 
     /// Waking an agent to tell it nothing burns a turn and a context window.
@@ -756,7 +1370,7 @@ mod tests {
     fn an_idle_session_with_an_empty_queue_is_left_alone() {
         let s = store();
         let c = conversation(&s);
-        assert!(s.plan_injection(&c, false).unwrap().is_none());
+        assert!(s.plan_injection(&c, false).unwrap().speak().is_none());
     }
 
     /// The batching guarantee, stated exactly as the spec does: ten answers
@@ -769,9 +1383,9 @@ mod tests {
             answered_card(&s, &c, &format!("question {n}"), &format!("answer {n}"));
         }
         // Nothing while it is busy...
-        assert!(s.plan_injection(&c, true).unwrap().is_none());
+        assert!(s.plan_injection(&c, true).unwrap().speak().is_none());
 
-        let injection = s.plan_injection(&c, false).unwrap().expect("one injection");
+        let injection = s.plan_injection(&c, false).unwrap().speak().expect("one injection");
         assert_eq!(injection.count(), 10);
         assert_eq!(injection.conversation_id, c);
         for n in 0..10 {
@@ -796,7 +1410,7 @@ mod tests {
         s.enqueue_delivery(&c, Kind::Mail, "9", "from lead: hurry up")
             .unwrap();
 
-        let injection = s.plan_injection(&c, false).unwrap().expect("one injection");
+        let injection = s.plan_injection(&c, false).unwrap().speak().expect("one injection");
         assert_eq!(injection.count(), 2);
         assert!(injection.prompt.contains("chat DB"));
         assert!(injection.prompt.contains("hurry up"));
@@ -818,7 +1432,7 @@ mod tests {
             .unwrap();
         answered_card(&s, &c, "log format", "json lines");
 
-        let injection = s.plan_injection(&c, false).unwrap().expect("one injection");
+        let injection = s.plan_injection(&c, false).unwrap().speak().expect("one injection");
         assert_eq!(
             injection.count(),
             5,
@@ -860,7 +1474,7 @@ mod tests {
             .unwrap();
         s.enqueue_delivery(&c, Kind::Human, "", "second").unwrap();
 
-        let injection = s.plan_injection(&c, false).unwrap().unwrap();
+        let injection = s.plan_injection(&c, false).unwrap().speak().unwrap();
         assert!(
             injection.prompt.starts_with(
                 "[message from another agent]\nfrom lead: first\n\n[message from Reljod]\nsecond"
@@ -888,7 +1502,7 @@ mod tests {
         let with_mail = conversation(&s);
         s.enqueue_delivery(&with_mail, Kind::Mail, "1", "which port?")
             .unwrap();
-        let mail = s.plan_injection(&with_mail, false).unwrap().unwrap();
+        let mail = s.plan_injection(&with_mail, false).unwrap().speak().unwrap();
         assert!(
             mail.prompt.contains("call `reply`"),
             "mail arrived with no way to answer it: {}",
@@ -898,7 +1512,7 @@ mod tests {
         let with_answer = conversation(&s);
         s.enqueue_delivery(&with_answer, Kind::CardAnswer, "2", "use SQLite")
             .unwrap();
-        let answer = s.plan_injection(&with_answer, false).unwrap().unwrap();
+        let answer = s.plan_injection(&with_answer, false).unwrap().speak().unwrap();
         assert!(
             !answer.prompt.contains("call `reply`"),
             "an answer to the agent's own question told it to reply to somebody: {}",
@@ -916,7 +1530,7 @@ mod tests {
             .enqueue_delivery(&c, Kind::Human, "", "stop and show me")
             .unwrap();
 
-        let injection = s.plan_injection(&c, false).unwrap().unwrap();
+        let injection = s.plan_injection(&c, false).unwrap().speak().unwrap();
         assert_eq!(
             injection.prompt,
             format!("{}\n{}", Kind::Human.label(), queued.body)
@@ -934,7 +1548,7 @@ mod tests {
         s.enqueue_delivery(&c, Kind::Mail, "4", "which port do you want")
             .unwrap();
 
-        let injection = s.plan_injection(&c, false).unwrap().unwrap();
+        let injection = s.plan_injection(&c, false).unwrap().speak().unwrap();
         assert!(injection.prompt.starts_with(Kind::Mail.label()));
         assert!(injection.prompt.contains("which port do you want"));
     }
@@ -947,13 +1561,13 @@ mod tests {
         let c = conversation(&s);
         s.enqueue_delivery(&c, Kind::Mail, "1", "one").unwrap();
         s.enqueue_delivery(&c, Kind::Mail, "2", "two").unwrap();
-        let injection = s.plan_injection(&c, false).unwrap().unwrap();
+        let injection = s.plan_injection(&c, false).unwrap().speak().unwrap();
         let ids: Vec<i64> = injection.items.iter().map(|p| p.id).collect();
 
         s.mark_deliveries_delivered(&ids, Some("run-7")).unwrap();
 
         assert!(s.pending_for(&c).unwrap().is_empty());
-        assert!(s.plan_injection(&c, false).unwrap().is_none());
+        assert!(s.plan_injection(&c, false).unwrap().speak().is_none());
         let settled = s.write(|tx| require_pending(tx, ids[0])).unwrap();
         assert_eq!(settled.state, State::Delivered);
         assert_eq!(settled.run_id.as_deref(), Some("run-7"));

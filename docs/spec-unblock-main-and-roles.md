@@ -1,8 +1,27 @@
 # SPEC — main only delegates, an assistant does the routing, and scratch work cleans up after itself
 
-> **Shipped.** Kept because one code comment cites `SPEC B4` and because the
-> numbered checks below are the names the tests still carry. It is a record of
-> what was built, not work to pick up.
+> **Shipped, and its first change has since been reversed.** Kept because one
+> code comment cites `SPEC B4` and because the numbered checks below are the
+> names the tests still carry. It is a record of what was built, not work to
+> pick up.
+>
+> **What is no longer true is the first of the three changes: main does not
+> hand every instruction to an assistant.** It answers what needs no repository
+> and routes the rest itself, `ask_assistant` no longer exists as a tool, and
+> `ask_manager` and `delegate` are no longer refused to main. The assistant
+> survives with a different job — it reads what Reljod types into a chat that is
+> already working and decides whether that message can wait for the turn to end
+> or has to stop it. Everything in section A below about intake, the
+> answer-or-delegate branch living in the assistant's brief, and the refusals at
+> the tool boundary describes a shape that is gone. See
+> `docs/decisions.md`, *Main answers again, and the assistant guards the door
+> instead*, for what was learned and why.
+>
+> **The other two changes stand unchanged.** The scratch lane still tidies
+> itself away, and the roles panel is still where each layer's harness and model
+> are configured — with one addition, that the assistant now has a built-in
+> default rather than inheriting, and one change to its shape, that the
+> assistant is drawn at the root because nothing delegates to it any more.
 >
 > It arrived here from the branch `feat/unblock-main-and-roles`, where it sat as
 > a root `SPEC.md`. Everything below is as written **except** the four places

@@ -4455,3 +4455,116 @@ Thinking still never crosses: reasoning blocks are signed by the model that
 produced them, so `Store::handoff` drops them before they reach any carrier. Nor
 does structure, when the target is AGY, which has no import path. The transcript
 itself no longer goes with them.
+
+## Main answers again, and the assistant guards the door instead
+
+The entry *Main hands every instruction to an assistant and answers nothing
+itself* is left standing because it is the honest record of what was believed at
+the time, and the diagnosis in it was right. What was wrong was the cure.
+
+A blocked input box is a problem in the terminal. It was solved with a model: an
+extra layer, on every instruction, whose entire job was to stop main from having
+to think while the box was shut. Nothing else solves it that way. In Claude
+Code, Codex and OpenCode the agent you type at both answers and delegates, and
+typing while it works is handled where the typing happens — the message is
+queued, and there is a key that interrupts. Anthropic's own guidance on
+multi-agent systems prices the extra hop at three to ten times the tokens and
+says to split work only where context can genuinely be isolated. Routing an
+instruction isolates nothing: the second layer needs everything the first one
+had.
+
+So the branch is back with main, `ask_manager` and `delegate` are no longer
+refused to it, and `ask_assistant` is gone as a tool. The block is broken
+instead of avoided, in three parts:
+
+- **What you type into a busy chat goes into the store**, as a `Kind::Human`
+  row in `pending_deliveries`, rather than into a `Vec<String>` only the
+  terminal could see. That queue already existed and already had a variant
+  meaning "Reljod, typing into a running session"; nothing had ever written one.
+  Now the console, the daemon and anything else that grows a way in all fill the
+  same queue, and a message survives the terminal being closed.
+- **An assistant reads it.** `plan_injection` used to answer "speak" or "not
+  yet", and a turn in flight was always "not yet". It has a third answer now,
+  and the layer that made every routing decision has exactly one job: read what
+  was typed, read what the turn in flight is doing, and say whether the message
+  can wait. That is a job main structurally cannot do, because main is the thing
+  that is busy. It runs on AGY's `gpt-oss-120b-medium` by default, which is the
+  first built-in any role has had — the decision is small, it happens every time
+  somebody types into a busy chat, and paying frontier prices for it is the
+  thing the roles table was built to stop.
+- **Escape stops the turn in front of you, and `Shift-Esc` stops everything.**
+  Both keep every conversation: the run dies, the harness session survives, and
+  each chat carries on the moment somebody says what to do instead.
+
+**An interrupt is a kill and a resume, not a splice, and that is a real loss.**
+`delivery.rs` rests on a prompt being assembled once at spawn, and `proc.rs`
+closes the harness's stdin deliberately, so there is no way to put a sentence
+into a turn that is already running. Stopping it and delivering the message as
+the next turn is what is left. Whatever the stopped turn had not written down is
+gone. True mid-turn steering, the way Codex does it, would mean holding stdin
+open and would work on one of the three harnesses; if it is ever wanted it is
+its own spec.
+
+**The doorman holds when it cannot tell, and the brief says why rather than just
+saying so.** The two mistakes are different sizes. A message wrongly held costs
+a wait that ends by itself when the turn finishes. A message wrongly acted on
+throws away a turn Reljod asked for, and nothing brings it back.
+
+**Found by running it, not by reading it.** Two things only a live run showed.
+The doorman brief named `interrupt_main` and the model answered "stopping it —
+you switched to a different repository" in prose without calling anything, so
+the turn it had decided to stop carried happily on; the verb now travels in the
+turn itself as well as in the brief, which is the same remedy
+`delivery::protocol_for` was written for and for the same reason. And the
+built-in default was applied a column at a time, so a `roles` row moving the
+assistant to Claude Code still handed it AGY's model — a whole spawn wasted on
+"there's an issue with the selected model". The built-in is a pair now: the
+model half only applies on its own harness.
+
+**A review ends when the run doing it ends.** The first version of this shipped
+a claim with no release: `finish_review` had three callers and all three covered
+a doorman that never *started*. A doorman that started and then ended — held,
+crashed, or recorded `failed` by AGY, which marks a run that used tools as
+failed even when it succeeded — left its rows in `reviewing`, where
+`pending_for` cannot see them. The console went on saying an assistant was
+reading a message that was gone. An explorer session found it by typing "STOP -
+urgent, forget the essay" into a busy chat and watching it never arrive.
+
+The rule needs no timeout and no guess at what the verdict was, because by the
+time the run is over the doorman has already done whatever it decided: an
+interrupt is a tool call it made, a hold is one it decided not to make. So the
+sweep asks one question — is the run that claimed this still running — and puts
+back everything where the answer is no. A row with no reviewer recorded goes
+back too: releasing early costs a verdict being ignored and the message arriving
+when the turn ends, and not releasing costs the message.
+
+**A message being judged follows the main chat too.** Compaction forks main and
+moves the pin, and the fork carries everything still owed to the thread across
+with it. That statement filtered on `state = 'queued'`, because when it was
+written that was the only state meaning "still owed" — `delivered` must not
+move, since it records where a message actually went. Adding `reviewing` opened
+a hole between the two arms: a message an assistant was part-way through reading
+matched neither, so it stayed on a conversation nobody opens again. The sweep
+above then released it, correctly, onto the dead thread — where it was delivered
+into a transcript Reljod is not reading. Two correct-looking pieces with a
+silent hole between them, and neither one's tests could see it.
+
+The window is not rare. A doorman takes tens of seconds and main compacts every
+few minutes, so a message being judged when a compaction lands is ordinary
+rather than a corner case. `0033` moves the rows already stranded; the fork
+carries them from now on.
+
+**A tool that stops a run reads the runs back first.** An MCP server is a fresh
+process that has started nothing, so its map of running agents is empty and
+`kill_agent` refuses a run that is plainly alive. `stop_agent` had always called
+`rehydrate` first; `interrupt_main` was written without it and was therefore
+strictly worse than the tool beside it, recovering nothing where its sibling
+recovered anything inside the window. Pinned as parity between the two rather
+than as one tool's rule, so the next verb that stops a run inherits the
+question.
+
+Rehydrating is not sufficient and was never meant to be. It loads the most
+recent rows, and the main chat is the oldest thing on the box — every new run
+pushes it further down — so the one run a doorman ever wants to stop is the one
+most likely to have fallen out of the window. What closes that is `kill_agent`
+falling back to the stored process group, which landed separately.
