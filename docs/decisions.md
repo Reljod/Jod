@@ -4318,3 +4318,63 @@ The `--effort ""` in the same error line is **not** Jod's. Checked by running
 all: AGY prints its own effort setting, empty, as part of the message. Jod's
 adapters emit no `--effort` when nothing asked for one, which is what
 `SpawnRequest::effort` being an `Option` is for.
+
+## `jod main --wait` has four endings, and only one of them exits 0
+
+`jod main --wait` reported a dead run as a finished one. The turn failed, the
+run row said `failed`, and the store held the harness's own sentence naming the
+model it had rejected and listing every model it would have accepted — and the
+command printed nothing at all, on stdout or stderr, and exited 0. A person read
+that as success. So did every script, cron entry and agent that blocks on the
+exit code, which is the whole reason `--wait` exists.
+
+Two separate holes made one silence. The live view matched on `Message`,
+`Thinking` and `ToolCall` and let everything else fall through, so the harness's
+prose reached the database as `Raw` events and went no further; and the wait
+ended at the `Finished` event without ever reading what that event said, so
+`is_error` and the exit code were both thrown away.
+
+The fix is to name the endings this command can actually observe and give each
+one its own sentence, rather than deciding "failed or not" and losing the rest:
+
+| Ending | On stderr | Exits |
+|---|---|---|
+| The orchestrator answered | nothing — the answer is already on stdout | 0 |
+| The run failed and said why | `the run failed. This is what it said:` and the run's own last words, verbatim | the harness's exit code, or 1 |
+| The run failed and recorded nothing | `the run failed, and it recorded no reason for it.` plus where to look | the harness's exit code, or 1 |
+| Somebody stopped the run | `the run was stopped before it answered.` | 1 |
+| The run vanished without a verdict | it says the run may still be going, and how to pick it up | 1 |
+
+Three of those distinctions are the point. **A deliberate stop is not a crash**,
+so it does not borrow the word "failed" — a reader sent looking for a bug that
+is not there is a worse outcome than a vague message. **"Failed, and no reason
+was recorded" is said out loud** rather than left as silence, because it is
+honest and it tells the reader the store is the next place to look. And
+**losing the event stream is not a verdict on the run**: this process stopped
+hearing about a run that may well still be going, and reporting that as a
+failure would be a claim nobody checked.
+
+The exit codes are `jod run`'s, deliberately, down to sharing
+`render::exit_status`. A run flagged as an error exits non-zero whatever its
+harness claimed — AGY exits 0 when a tool is auto-denied in headless mode — and
+a harness's own non-zero code passes through as it stands. A second rule for the
+same question is how these two commands came to disagree in the first place.
+
+**The fourth ending was worse than the exit code, and it was a hang.** A run
+whose supervisor is killed before it can write anything leaves no `Finished`
+event and a row still saying `running`. The event stream cannot report that: the
+broadcast sender belongs to the process's own service rather than to the run, so
+it never closes, and `jod main --wait` blocked for ever on a run that had ended
+seconds earlier. Reproduced by signalling a run's process group in the window
+before the supervisor installs its handlers, which happened on four of ten
+attempts. The wait now asks the run itself whenever two seconds pass with
+nothing arriving: a process group that is gone ends the wait, and the run's row
+is read one more time first, because a supervisor that wrote its verdict and
+died before this process read the event still left a real answer behind.
+
+**The stop had to be read from the run's row, not from its event.** A signalled
+harness has no exit code and sets no error flag, so its `Finished` event is
+identical to a clean one. Only the supervisor saw the signal, and it writes what
+it saw to `runs.status` on the statement after the event — so a status that
+still says `running` means the read landed between those two writes, and the
+wait re-reads for half a second rather than calling a stop a success.
