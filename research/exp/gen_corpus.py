@@ -46,16 +46,45 @@ FILLER = [
     "Callers receive a typed error rather than a string so failures can be matched on.",
 ]
 
-# T5: restart-safety is decided by the COMBINATION of two sentences, so no
-# single grep answers it. Safe iff it holds no durable state AND keeps no
-# open handle across restarts.
+# T5: restart-safety is decided by the COMBINATION of two properties, and each
+# property is expressed by one of several paraphrases. That combination is what
+# makes the task genuinely semantic: no single grep answers it, and an agent
+# cannot know the paraphrase set in advance to grep for all of them.
 STATE_SENTENCES = {
-    True: "This module owns no state of its own beyond its input arguments.",
-    False: "This module keeps a durable write-ahead journal on local disk.",
+    True: [
+        "This module owns no state of its own beyond its input arguments.",
+        "Nothing is persisted here; every value is derived on demand from the request.",
+        "The component is purely functional and keeps nothing between invocations.",
+        "All working data is discarded once the call returns.",
+        "It stores nothing locally and defers every write to the caller.",
+        "Between requests this component retains no information whatsoever.",
+    ],
+    False: [
+        "This module keeps a durable write-ahead journal on local disk.",
+        "Progress is checkpointed to a local file so a restart can resume.",
+        "The component maintains an on-disk index that outlives the process.",
+        "State accumulates in a local database file under the data directory.",
+        "A spool directory on disk holds pending items until they are acknowledged.",
+        "It persists its cursor locally so that it can pick up where it left off.",
+    ],
 }
 HANDLE_SENTENCES = {
-    True: "All external connections are opened per request and closed on return.",
-    False: "A long-lived socket to the upstream service is held open by this module.",
+    True: [
+        "All external connections are opened per request and closed on return.",
+        "Every outbound call uses a fresh connection that is torn down afterwards.",
+        "No file descriptor is retained once the operation completes.",
+        "Connections are borrowed from the caller and never cached here.",
+        "The component holds nothing open while it is idle.",
+        "Sockets are short-lived and scoped to a single exchange.",
+    ],
+    False: [
+        "A long-lived socket to the upstream service is held open by this module.",
+        "It maintains a persistent connection pool for the lifetime of the process.",
+        "A watch is registered upstream and kept open until shutdown.",
+        "The component pins an open file handle for as long as it runs.",
+        "A streaming subscription stays connected between requests.",
+        "It keeps a session open upstream rather than reconnecting each time.",
+    ],
 }
 
 
@@ -85,8 +114,8 @@ def build(outdir, n_files, facts_per_topic, chain_len, filler_paras, seed):
     for p in files:
         stateless = rng.random() < 0.5
         no_handle = rng.random() < 0.5
-        contents[p].append(STATE_SENTENCES[stateless])
-        contents[p].append(HANDLE_SENTENCES[no_handle])
+        contents[p].append(rng.choice(STATE_SENTENCES[stateless]))
+        contents[p].append(rng.choice(HANDLE_SENTENCES[no_handle]))
         safe_map[p] = stateless and no_handle
     ground["restart_safe"] = sorted(p for p in files if safe_map[p])
 
@@ -127,10 +156,13 @@ def build(outdir, n_files, facts_per_topic, chain_len, filler_paras, seed):
     for p in files:
         full = os.path.join(outdir, p)
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        body = ["# %s" % os.path.basename(p).replace(".md", ""),
-                filler_block(rng, filler_paras),
-                "\n".join(contents[p]),
-                filler_block(rng, filler_paras)]
+        # Scatter the planted lines through the filler rather than leaving them
+        # in one block. A contiguous block would let an agent find everything
+        # from a single hit's surrounding lines.
+        blocks = [rng.choice(FILLER) for _ in range(filler_paras * 2)]
+        for line in contents[p]:
+            blocks.insert(rng.randint(0, len(blocks)), line)
+        body = ["# %s" % os.path.basename(p).replace(".md", "")] + blocks
         with open(full, "w") as fh:
             fh.write("\n\n".join(body) + "\n")
 
