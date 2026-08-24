@@ -94,10 +94,43 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
     ap.add_argument("--judges", default="")
+    ap.add_argument("--no-rescore", action="store_true")
     a = ap.parse_args()
     rows = load(a.results)
     rows = [r for r in rows if not r.get("failed")]
     print("loaded %d successful runs" % len(rows))
+
+    # Rescore from the stored answer text using the current parser, so a parser
+    # fix applies to runs already collected instead of forcing a costly rerun.
+    if not a.no_rescore:
+        import sys as _s
+        import os as _o
+        _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+        import tasks as _T
+        grounds = {}
+        for name, p in (("small", "/home/reljod/.claude/jobs/95056dbd/tmp/"
+                                  "bench/ground_truth.json"),
+                        ("huge", "/home/reljod/.claude/jobs/95056dbd/tmp/"
+                                 "bench_huge/ground_truth.json")):
+            try:
+                grounds[name] = json.load(open(p))
+            except OSError:
+                pass
+        changed = 0
+        for r in rows:
+            g = grounds.get(r.get("bench", "small"))
+            if not g or not r.get("answer"):
+                continue
+            try:
+                new = _T.score(r["task"], "ANSWER: " + r["answer"], g)
+            except (KeyError, TypeError):
+                continue
+            if abs(new["score"] - r.get("score", 0)) > 1e-6:
+                changed += 1
+            r.update(new)
+        if changed:
+            print("rescored %d runs whose stored answer parses differently "
+                  "under the current parser" % changed)
     tot_cost = sum(r.get("cost_usd", 0) for r in rows)
     print("total spend on runs: $%.2f" % tot_cost)
 

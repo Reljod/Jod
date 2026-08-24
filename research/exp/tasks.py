@@ -112,7 +112,15 @@ def parse_pairs(ans):
 
 
 def parse_paths(ans):
-    return set(re.findall(r"[a-z]+/note_\d{3}\.md", ans))
+    """Accept a note path with or without its .md suffix.
+
+    Requiring the suffix scored a correct answer as a total failure purely
+    because the agent wrote 'billing/note_012' instead of
+    'billing/note_012.md'. That measures formatting, not capability, and the
+    two are counted separately here.
+    """
+    return {m if m.endswith(".md") else m + ".md"
+            for m in re.findall(r"[a-z]+/note_\d{3}(?:\.md)?", ans)}
 
 
 def parse_int(ans):

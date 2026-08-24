@@ -90,6 +90,14 @@ def build_plan(trials):
         for tt in T:
             add("E7_silent", "small", "t4_sum", mode, tt, **kw)
 
+    # E8 - the ambiguous-return case, found by accident and then made into a
+    # controlled comparison. On t5 the worker's answer type (file paths) is the
+    # same as its input type (file paths), so a bare list is indistinguishable
+    # from the worker's own assignment and the merger discards it. Does making
+    # the return self-describing fix it?
+    for ret, t in itertools.product(["thin", "labelled"], range(4)):
+        add("E8_labelled", "small", "t5_classify", "fanout", t, ret=ret)
+
     return plan
 
 

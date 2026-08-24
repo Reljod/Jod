@@ -131,6 +131,17 @@ def mode_fanout(objective, corpus, model, workers=4, brief="rich",
         if ret == "thin":
             head += ("\nReply with ONLY the single ANSWER line. No explanation,\n"
                      "no preamble, no reasoning.\n")
+        elif ret == "labelled":
+            # Same content as 'thin', but the worker states what its list
+            # MEANS. Without this, a worker whose answer type matches its input
+            # type - a list of file paths, when it was assigned a list of file
+            # paths - returns something the merger cannot tell apart from its
+            # own assignment.
+            head += ("\nReply with ONLY the single ANSWER line, and make the line\n"
+                     "self-describing: it must say that these are the items you\n"
+                     "CONFIRMED satisfy the task, not the items you were asked to\n"
+                     "examine. Write it as:\n"
+                     "ANSWER: confirmed matches in my slice = <items>\n")
         else:
             head += ("\nExplain your reasoning fully, file by file, showing what\n"
                      "you found in each, then give the ANSWER line.\n")
@@ -145,7 +156,9 @@ def mode_fanout(objective, corpus, model, workers=4, brief="rich",
     parts = []
     for i, r in enumerate(results):
         body = r["text"] if ret == "fat" else T.extract_answer(r["text"])
-        parts.append("--- worker %d ---\n%s" % (i + 1, body))
+        head = ("--- worker %d: ITEMS THIS WORKER CONFIRMED MATCH THE TASK ---"
+                if ret == "labelled" else "--- worker %d ---")
+        parts.append((head % (i + 1)) + "\n" + body)
     merge_prompt = (
         "You are the lead agent. You split a task across %d workers, each of\n"
         "which saw a different slice of the files. Their replies follow.\n\n"
@@ -207,7 +220,8 @@ def main():
     ap.add_argument("--model", default="haiku")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--brief", default="rich", choices=["rich", "vague"])
-    ap.add_argument("--ret", default="thin", choices=["thin", "fat"])
+    ap.add_argument("--ret", default="thin",
+                    choices=["thin", "fat", "labelled"])
     ap.add_argument("--passes", type=int, default=1)
     ap.add_argument("--clean", default="1")
     ap.add_argument("--trial", type=int, default=0)
