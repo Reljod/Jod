@@ -61,6 +61,7 @@ def fmt_group(rows):
         "cost": co, "wall": wa, "turns": tu, "fmt_fail": ff,
         "dup": st.mean(dup) if dup else None,
         "cost_per_point": (co / sc) if sc > 0.01 else float("inf"),
+        "spawned": st.mean([r.get("spawned", 0) for r in rows]),
     }
 
 
@@ -70,9 +71,9 @@ def table(title, groups, order=None, note=""):
     if note:
         print(note)
     print()
-    hdr = ("%-34s %3s %7s %6s %6s %9s %7s %6s %6s"
-           % ("config", "n", "score", "sd", "exact", "cost$", "wall_s",
-              "turns", "fmtF"))
+    hdr = ("%-30s %3s %7s %6s %6s %9s %9s %7s %6s"
+           % ("config", "n", "score", "sd", "exact", "cost$", "$/point",
+              "wall_s", "fmtF"))
     print(hdr)
     print("-" * len(hdr))
     keys = order or sorted(groups)
@@ -80,10 +81,13 @@ def table(title, groups, order=None, note=""):
         if k not in groups:
             continue
         g = groups[k]
+        cpp = ("%9.4f" % g["cost_per_point"]
+               if g["cost_per_point"] != float("inf") else "        -")
         dup = ("  dup=%.2f" % g["dup"]) if g["dup"] is not None else ""
-        print("%-34s %3d %7.3f %6.3f %6d %9.4f %7.0f %6.1f %6d%s"
+        spw = ("  spawned=%.1f" % g["spawned"]) if g.get("spawned") else ""
+        print("%-30s %3d %7.3f %6.3f %6d %9.4f %s %7.0f %6d%s%s"
               % (k, g["n"], g["score"], g["sd"], g["exact"], g["cost"],
-                 g["wall"], g["turns"], g["fmt_fail"], dup))
+                 cpp, g["wall"], g["fmt_fail"], dup, spw))
 
 
 def main():
