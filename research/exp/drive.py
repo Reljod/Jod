@@ -79,6 +79,17 @@ def build_plan(trials):
         add("E6_verify", "small", "t5_classify", "verify", t,
             passes=passes, clean=clean)
 
+    # E7 - the silent-failure case. Every configuration got t4_sum wrong in the
+    # same way (an over-broad match that swept in the other topics), and a
+    # scalar answer gives no partial credit and no visible symptom. The
+    # question is whether a second look catches what more agents did not.
+    for mode, kw, t in [("verify", {"passes": 1, "clean": "1"}, None),
+                        ("verify", {"passes": 1, "clean": "0"}, None),
+                        ("verify", {"passes": 2, "clean": "1"}, None),
+                        ("fanout", {"workers": 4}, None)]:
+        for tt in T:
+            add("E7_silent", "small", "t4_sum", mode, tt, **kw)
+
     return plan
 
 
