@@ -1,8 +1,8 @@
 # Phase 4 — What the experiments found
 
-131 agent runs on a generated benchmark with objective ground truth, plus 100
+147 agent runs on a generated benchmark with objective ground truth, plus 100
 judge verdicts and 15 independent ranking ballots. Total spend on model calls,
-about $25.
+about $64.
 
 Everything below is scored against generated ground truth, not by a model.
 Where a number rests on few trials, the n is given and the claim is weakened to
@@ -32,16 +32,25 @@ input is the previous step's output, and the orchestration overhead is pure loss
 On a 400-file corpus of roughly 316,000 tokens — well past the worker model's
 200k window — the two tasks behave completely differently:
 
-| task on the 316k corpus | solo | delegation offered | fan-out ×4 |
+| task on the 316k corpus (n=5) | solo | delegation offered | fan-out ×4 |
 |---|---|---|---|
-| t2_join (searchable) | **1.000 @ $0.07** | 0.674 @ $0.11 | 1.000 @ **$2.43** |
-| t5_classify (must read everything) | **0.188** @ $0.32 | **0.446** @ $0.31 | 0.358 @ $2.24 |
+| t2_join (searchable) | 0.874 @ **$0.07** | 0.869 @ $0.09 | 0.995 @ **$2.57** |
+| t5_classify (must read everything) | **0.118** @ $0.22 | 0.259 @ $0.24 | **0.284** @ $2.54 |
 
-On the searchable task, a corpus five times the context window causes no
-trouble at all: the agent greps, never loads the corpus, and beats fan-out by
-**35× on cost**. On the semantic task, where the paraphrased criteria cannot be
-found by search and every file must actually be read, solo accuracy collapses
-from 0.986 to 0.188 and delegation roughly doubles it.
+On the searchable task, a corpus five times the context window causes almost no
+trouble: the agent greps, never loads the corpus, and reaches 0.874 for seven
+cents where fan-out pays **36× more** for 0.995. What fan-out actually buys
+there is *consistency* rather than capability — solo is usually perfect but
+occasionally fails outright (sd 0.282) where fan-out is steady (sd 0.010).
+Paying 36× for that is still a poor trade.
+
+On the semantic task, where the paraphrased criteria cannot be found by search
+and every file must be read, solo collapses from 0.986 to 0.118 and delegation
+gives **2.4×** the accuracy for 11× the cost.
+
+Note that the fan-out figures on the semantic row are a **lower bound**: those
+runs used the bare worker return that section 2 shows fails about half the time
+on this task. With a self-describing return the gap would be wider.
 
 **So the crossover is not "the corpus is bigger than the context window." It is
 "the task requires reading more than fits."** Those are different conditions,
@@ -293,8 +302,8 @@ not claimed as results of this study.
 
 ## Threats to validity
 
-- **Small n.** Most cells are n=3, the over-window cells n=2–5. Cost and latency
-  differences are large enough (4–35×) to survive this easily; accuracy
+- **Small n.** Most cells are n=3, the over-window cells n=5. Cost and latency
+  differences are large enough (4–36×) to survive this easily; accuracy
   differences of a few points are not, and are reported as inconclusive.
 - **One worker model.** Everything ran on a small fast model. A larger model
   would likely raise every baseline and shrink the headroom where verification

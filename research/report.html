@@ -320,10 +320,10 @@ footer code{font-family:var(--mono);font-size:12.5px}
     <dl class="ledger">
       <div><dt>Approaches surveyed</dt><dd>32</dd></div>
       <div><dt>Hypotheses</dt><dd>52</dd></div>
-      <div><dt>Live agent runs</dt><dd>131</dd></div>
+      <div><dt>Live agent runs</dt><dd>147</dd></div>
       <div><dt>Judge verdicts</dt><dd>100</dd></div>
       <div><dt>Panel ballots</dt><dd>15</dd></div>
-      <div><dt>Model spend</dt><dd>$25</dd></div>
+      <div><dt>Model spend</dt><dd>$64</dd></div>
     </dl>
   </div>
 </header>
@@ -335,7 +335,7 @@ footer code{font-family:var(--mono);font-size:12.5px}
   <div class="thesis">
     <p>The pattern is called <strong>orchestrator&ndash;worker</strong>. It works &mdash; but only
     above one line. Delegate when the task cannot be narrowed by search before reading, and
-    not otherwise. Below that line it costs 4&ndash;35&times; for no accuracy at all.</p>
+    not otherwise. Below that line it costs 4&ndash;36&times; for little or no accuracy.</p>
   </div>
   <p class="note">Everything below is scored against generated ground truth, so no model
   graded the agents. Where a number rests on few trials, the n is given.</p>
@@ -382,13 +382,13 @@ footer code{font-family:var(--mono);font-size:12.5px}
     <div class="bar-row">
       <div class="bar-label">Join across files<span>searchable &middot; 316k tokens</span></div>
       <div class="bar-track"><div class="bar-fill" style="width:100%;background:var(--loss)"></div></div>
-      <div class="bar-val" style="color:var(--loss)">35&times; &middot; no gain</div>
+      <div class="bar-val" style="color:var(--loss)">36&times; &middot; +0.12</div>
     </div>
 
     <div class="bar-row">
       <div class="bar-label">Semantic classify<span>must read all &middot; 316k tokens</span></div>
-      <div class="bar-track"><div class="bar-fill" style="width:20%;background:var(--gain)"></div></div>
-      <div class="bar-val" style="color:var(--gain)">7.0&times; &middot; 2&times; accuracy</div>
+      <div class="bar-track"><div class="bar-fill" style="width:32%;background:var(--gain)"></div></div>
+      <div class="bar-val" style="color:var(--gain)">11&times; &middot; 2.4&times; accuracy</div>
     </div>
 
     <div class="key">
@@ -398,25 +398,28 @@ footer code{font-family:var(--mono);font-size:12.5px}
   </figure>
 
   <p>The fourth row is the important one. A corpus <strong>five times larger than the context
-  window</strong> caused no trouble at all &mdash; the agent searched instead of reading, scored a
-  perfect 1.000, and beat fan-out by thirty-five times on cost. Only when the criteria were
-  paraphrased so that search could not find them, forcing every file to be read, did the single
-  agent collapse.</p>
+  window</strong> caused almost no trouble &mdash; the agent searched instead of reading and
+  scored 0.874, while fan-out paid thirty-six times more to reach 0.995. Only when the criteria
+  were paraphrased so that search could not find them, forcing every file to be read, did the
+  single agent collapse.</p>
 
   <div class="scroll">
     <table>
-      <caption>The same 316k-token corpus, two task shapes</caption>
+      <caption>The same 316k-token corpus, two task shapes &mdash; n=5 per cell</caption>
       <thead>
         <tr><th>Task on 316k corpus</th><th>Solo</th><th>Fan-out &times;4</th><th>Verdict</th></tr>
       </thead>
       <tbody>
-        <tr><td>Join (searchable)</td><td>1.000 &middot; $0.07</td><td>1.000 &middot; $2.43</td><td class="loss">solo wins 35&times;</td></tr>
-        <tr><td>Classify (must read all)</td><td>0.188 &middot; $0.32</td><td>0.358 &middot; $2.24</td><td class="gain">delegation doubles it</td></tr>
+        <tr><td>Join (searchable)</td><td>0.874 &middot; $0.07</td><td>0.995 &middot; $2.57</td><td class="loss">36&times; for +0.12</td></tr>
+        <tr><td>Classify (must read all)</td><td>0.118 &middot; $0.22</td><td>0.284 &middot; $2.54</td><td class="gain">11&times; for 2.4&times;</td></tr>
       </tbody>
     </table>
   </div>
-  <p class="note">n = 2&ndash;5 per cell with high variance; the direction is consistent, the exact
-  magnitudes are soft.</p>
+  <p class="note">On the searchable task, fan-out buys <em>consistency</em> rather than
+  capability: solo is usually perfect but occasionally fails outright (sd 0.282) where fan-out
+  is steady (sd 0.010). Paying 36&times; for that is still a poor trade. Note also that the
+  fan-out figures on the classify row are a <em>lower bound</em> &mdash; those runs used the
+  bare worker return that finding 2 shows fails about half the time.</p>
 
   <div class="thesis" style="margin-top:30px">
     <p>The trigger is <strong>not</strong> &ldquo;my data is bigger than the context window.&rdquo;
@@ -645,7 +648,7 @@ footer code{font-family:var(--mono);font-size:12.5px}
 
   <h3>What would change the answer</h3>
   <ul>
-    <li>Most cells are n=3, over-window cells n=2&ndash;5. Cost differences of 4&ndash;35&times;
+    <li>Most cells are n=3, over-window cells n=5. Cost differences of 4&ndash;36&times;
     survive that easily; accuracy differences of a few points do not, and are reported as
     inconclusive.</li>
     <li>One small worker model throughout. A larger model would raise every baseline and shrink
@@ -663,8 +666,8 @@ footer code{font-family:var(--mono);font-size:12.5px}
 
 <footer>
   <div class="wrap">
-    <p>131 live agent runs, 100 judge verdicts, 15 ranking ballots. Scored against generated
-    ground truth. Benchmark generator, orchestration harness, judge panel and raw result logs
-    are in <code>research/</code>.</p>
+    <p>147 live agent runs, 100 judge verdicts, 15 ranking ballots, $64 of model spend. Scored
+    against generated ground truth. Benchmark generator, orchestration harness, judge panel and
+    raw result logs are in <code>research/</code>.</p>
   </div>
 </footer>

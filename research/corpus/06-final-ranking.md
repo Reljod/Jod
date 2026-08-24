@@ -29,10 +29,11 @@ seems big, or because delegation looks diligent.
 accuracy at 4× the cost on breadth tasks, and **7.4× the cost with 6× the
 latency** on a sequential task. On a 316,000-token corpus — five times the
 worker's context window — a *searchable* task still favoured a single agent by
-**35× on cost** (1.000 at $0.07 against 1.000 at $2.43), because the agent
-searched instead of reading. Only when the criteria were paraphrased so that
-search could not find them, forcing every file to be read, did the single agent
-collapse from 0.986 to 0.188 — and delegation roughly doubled accuracy.
+**36× on cost** (0.874 at $0.07 against 0.995 at $2.57), because the agent
+searched instead of reading; what the extra spend bought was consistency, not
+capability. Only when the criteria were paraphrased so that search could not
+find them, forcing every file to be read, did the single agent collapse from
+0.986 to 0.118 — and delegation gave 2.4× the accuracy.
 
 **Why it matters most.** This is the single decision that determines whether the
 architecture pays for itself, and it is the one the published record gets
@@ -179,7 +180,7 @@ a scalar.
 The pattern is called orchestrator-worker, or a supervisor, and when it is
 packaged it is called an agent harness. It works, but only above a specific
 line: delegate when the task cannot be narrowed by search before reading, and
-not otherwise, because below that line it costs 4–35× for no accuracy at all.
+not otherwise, because below that line it costs 4–36× for little or no accuracy.
 When you do delegate, the failures that remain are not reasoning failures but
 communication failures — the merge step is the weak point, and the fix is that
 every worker states what its answer means. Verify with something that can fail

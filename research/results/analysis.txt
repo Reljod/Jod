@@ -1,6 +1,6 @@
-loaded 126 successful runs
-rescored 5 runs whose stored answer parses differently under the current parser
-total spend on runs: $37.55
+loaded 147 successful runs
+rescored 9 runs whose stored answer parses differently under the current parser
+total spend on runs: $63.98
 
 ### E1 t1_scan (breadth-easy)
 
@@ -46,19 +46,19 @@ fanout                           3   0.000  0.000      0    0.2178         -    
 
 config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
 -------------------------------------------------------------------------------------------
-deleg                            2   0.674  0.429      0    0.1066    0.1583      95      0
-fanout-w4                        2   1.000  0.000      0    2.4343    2.4343     162      0  dup=0.00
-fanout-w8                        2   0.976  0.034      0    1.5713    1.6096     164      0  dup=0.00
+deleg                            5   0.869  0.279      0    0.0868    0.0998      63      0
+fanout-w4                        5   0.995  0.010      0    2.5687    2.5807     167      0  dup=0.00
+fanout-w8                        5   0.971  0.032      0    1.5044    1.5490     164      0  dup=0.00
 solo                             5   0.874  0.282      1    0.0713    0.0816      37      0
 
 ### E2 over-window t5_classify (400-file corpus, ~316k tokens)
 
 config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
 -------------------------------------------------------------------------------------------
-deleg                            2   0.446  0.383      0    0.3096    0.6941     195      0  spawned=0.5
-fanout-w4                        2   0.358  0.507      0    2.2446    6.2611     181      0  dup=0.00
-fanout-w8                        2   0.358  0.507      0    1.5023    4.1905     190      0  dup=0.00
-solo                             2   0.188  0.265      0    0.3184    1.6981     188      0
+deleg                            5   0.259  0.305      0    0.2413    0.9302     153      0  spawned=0.6
+fanout-w4                        5   0.284  0.389      0    2.5363    8.9220     178      0  dup=0.00
+fanout-w8                        5   0.287  0.393      0    1.5205    5.3018     184      1  dup=0.00
+solo                             5   0.118  0.171      0    0.2226    1.8898     139      0
 
 ### E3 worker count (t5_classify, small corpus)
 H5 predicts an early knee; H6 predicts superlinear cost.
@@ -128,12 +128,12 @@ ret=labelled                     4   0.978  0.025      2    0.2270    0.2320    
 
 mode                         n    out_tok     in_tok   cache_rd   cache_cr    calls
 -----------------------------------------------------------------------------------
-deleg                       19       5318         73     322899      15624      1.0
+deleg                       25       4793         74     329504      14342      1.0
 fanout-w1                    3       9567         26      71700      43042      2.0
 fanout-w2                    3      10467         43     126371      47314      3.0
-fanout-w4                   51      18943        112     381934     117525      5.0
-fanout-w8                    7      43438        178     669528     350332      9.0
-solo                        22       4928         86     390544      17228      1.0
+fanout-w4                   57      23083        124     484015     223962      5.0
+fanout-w8                   13      52526        202     861916     432459      9.0
+solo                        25       5405         93     428467      17697      1.0
 verify                      21      13550        244     910701      41876      2.4
 
 ### Judge panel: how well does each judge track the objective score?
