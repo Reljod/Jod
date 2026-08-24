@@ -33,8 +33,27 @@ BASE_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 
 
 def run_claude(prompt, cwd, model="haiku", tools=None, timeout=600,
-               extra_args=None):
-    """One headless agent call. Returns a normalised record."""
+               extra_args=None, attempts=3):
+    """One headless agent call, retried on infrastructure failure.
+
+    A call that fails to return parseable output has told us nothing about the
+    orchestration strategy under test, so retrying it is not cherry-picking -
+    scoring it as zero would be the distortion. A call that returns a bad
+    answer is kept as-is.
+    """
+    last = None
+    for i in range(attempts):
+        last = _run_once(prompt, cwd, model, tools, timeout, extra_args)
+        if last["ok"] or not str(last.get("error", "")).startswith(
+                ("unparseable", "exit", "timeout")):
+            return last
+        last["retries"] = i + 1
+        time.sleep(2 * (i + 1))
+    return last
+
+
+def _run_once(prompt, cwd, model="haiku", tools=None, timeout=600,
+              extra_args=None):
     tools = tools or BASE_TOOLS
     cmd = ["claude", "-p", prompt, "--model", model,
            "--output-format", "json", "--allowedTools"] + tools
@@ -55,8 +74,13 @@ def run_claude(prompt, cwd, model="haiku", tools=None, timeout=600,
     try:
         d = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return {"ok": False, "error": "unparseable stdout", "text": "",
-                "cost": 0.0, "wall": wall, "usage": {}, "turns": 0}
+        # Keep the head of stdout/stderr. Without it an infrastructure failure
+        # is indistinguishable from a model that answered badly, and the two
+        # call for completely different conclusions.
+        return {"ok": False,
+                "error": "unparseable stdout: out=%r err=%r"
+                         % (proc.stdout[:200], proc.stderr[:200]),
+                "text": "", "cost": 0.0, "wall": wall, "usage": {}, "turns": 0}
     u = d.get("usage", {}) or {}
     return {
         "ok": not d.get("is_error", False),
