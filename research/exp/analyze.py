@@ -198,6 +198,32 @@ def main():
                      "verify-p1-shared", "verify-p2-shared"],
               note="H33-H36: clean-context critic vs shared-context self-review.")
 
+    # ---- E7: does a second look catch a blind spot that more agents did not?
+    e7 = [r for r in rows if r.get("exp") == "E7_silent"]
+    solo4 = [r for r in rows if r.get("exp") == "E1_shape"
+             and r["task"] == "t4_sum" and r["mode"] == "solo"]
+    if e7:
+        g = _group(e7, lambda r: (
+            "verify-p%d-%s" % (r["passes"],
+                               "clean" if str(r["clean"]) == "1" else "shared")
+            if r["mode"] == "verify" else "fanout-w%d" % r["workers"]))
+        if solo4:
+            g["solo (no verify)"] = fmt_group(solo4)
+        table("E7 the silent-failure case (t4_sum, scalar answer)", g,
+              order=["solo (no verify)", "fanout-w4", "verify-p1-clean",
+                     "verify-p1-shared", "verify-p2-clean"],
+              note="Every configuration failed this identically at baseline. "
+                   "H40: is a second look worth more than a second agent?")
+
+    # ---- E8: self-describing worker returns
+    e8 = [r for r in rows if r.get("exp") == "E8_labelled"]
+    if e8:
+        table("E8 self-describing worker returns (t5_classify)",
+              _group(e8, lambda r: "ret=" + r["ret"]),
+              order=["ret=thin", "ret=labelled"],
+              note="A bare list of paths is indistinguishable from the worker's "
+                   "own assignment. Does one clause of self-description fix it?")
+
     # ---- cost structure (H6, H7, H29, H30)
     print()
     print("### Token structure by mode (H6, H7, H23, H29, H30)")
