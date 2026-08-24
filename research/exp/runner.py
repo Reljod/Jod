@@ -72,6 +72,10 @@ def run_claude(prompt, cwd, model="haiku", tools=None, timeout=600,
             "cache_create": u.get("cache_creation_input_tokens", 0),
         },
         "denials": d.get("permission_denials", []),
+        # Whether the agent actually took up the offer to delegate. Without
+        # this the "delegation allowed" condition is unfalsifiable: a run that
+        # looks like solo may be one that simply declined to delegate.
+        "spawned": (d.get("subagent_stats") or {}).get("spawned", 0),
     }
 
 
@@ -236,6 +240,7 @@ def main():
         "cache_read": sum(c["usage"].get("cache_read", 0) for c in calls),
         "cache_create": sum(c["usage"].get("cache_create", 0) for c in calls),
         "turns": sum(c["turns"] for c in calls),
+        "spawned": sum(c.get("spawned", 0) for c in calls),
         "errors": [c["error"] for c in calls if not c["ok"]],
         "answer": T.extract_answer(res["text"])[:1200],
     }
