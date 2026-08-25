@@ -1627,6 +1627,44 @@ pub struct Handed {
     pub project: Option<crate::projects::Resolution>,
 }
 
+/// Whether main's spawn is tagged with the `main` role, so `apply_role` reads it.
+///
+/// **Not while the console is deliberately moving main to another harness.**
+/// [`crate::service::apply_role`] sets a request's harness whenever the resume
+/// is `Fresh`, and `Store::resume_for` returns `Fresh` for exactly one reason on
+/// an existing main chat: this turn is the first on a harness `/harness` has
+/// just switched to. Tagging the role there drags the thread straight back to
+/// whatever the row names, and the switch is silently defeated rather than
+/// merely overridden — the new session is minted on the old harness and every
+/// later turn resumes it.
+///
+/// Main's very first turn is the other `Fresh` case and it is the opposite
+/// situation: nobody has expressed a preference yet, so the row is the only
+/// thing that has said anything and it should be honoured. The two are told
+/// apart by whether a main chat existed before this call.
+///
+/// **This is an inference, and it is worth saying so plainly.** What the
+/// condition really means is "the operator has just switched harness", and it
+/// works that out from two things standing in for it: a main chat already
+/// existed, and the resume came back `Fresh`. Nothing records the switch
+/// directly. The clean expression is a `harness_named: bool` on
+/// [`SpawnRequest`] — the caller knows whether anybody chose the harness, and
+/// `harness` being a bare [`HarnessKind`] is the only reason it cannot say so —
+/// and that is where to start if anyone revisits this.
+///
+/// **A function rather than the expression it replaces, because the expression
+/// was inverted and nothing caught it.** It read `(existed || resume != Fresh)`,
+/// which is true in precisely the case the paragraphs above say must be false
+/// and false in the case they say must be true: a `/harness` switch was tagged
+/// and dragged back, and main's first turn was left untagged so the `main` row
+/// was ignored exactly once — on the only turn where it is the sole thing that
+/// has spoken. Both halves were invisible because no test named either one, so
+/// the four cases are enumerated in `tests`.
+fn main_role_tag(existed: bool, resume: &Resume) -> Option<Role> {
+    let switching_harness = existed && *resume == Resume::Fresh;
+    (!switching_harness).then_some(Role::Main)
+}
+
 /// Give an instruction to the pinned main chat.
 ///
 /// **Every way into the main chat comes through here.** `jod main`, the TUI's
@@ -1758,34 +1796,10 @@ pub async fn hand_to_orchestrator(
                 // off that row goes straight to a program that never issued it.
                 resume: resume.clone(),
                 tools: Some(ToolAccess::Orchestrate),
-                // **Not while the console is deliberately moving main to
-                // another harness.** `apply_role` sets a request's harness
-                // whenever the resume is `Fresh`, and `resume_for` returns
-                // `Fresh` for exactly one reason on an existing main chat: this
-                // turn is the first on a harness `/harness` has just switched
-                // to. Tagging the role there would drag the thread straight
-                // back to whatever the row names, and the switch would be
-                // silently defeated rather than merely overridden — the new
-                // session would be minted on the old harness and every later
-                // turn would resume it.
-                //
-                // Main's very first turn is the other `Fresh` case and it is
-                // the opposite situation: nobody has expressed a preference
-                // yet, so the row is the only thing that has said anything and
-                // it should be honoured. The two are told apart by whether a
-                // main chat existed before this call.
-                //
-                // **This is an inference, and it is worth saying so plainly.**
-                // What the condition below really means is "the operator has
-                // just switched harness", and it works that out from two
-                // things standing in for it: a main chat already existed, and
-                // the resume came back `Fresh`. Nothing records the switch
-                // directly. The clean expression is a `harness_named: bool` on
-                // [`SpawnRequest`] — the caller knows whether anybody chose the
-                // harness, and `harness` being a bare `HarnessKind` is the only
-                // reason it cannot say so — and that is where to start if
-                // anyone revisits this.
-                role: (existed || resume != Resume::Fresh).then_some(Role::Main),
+                // Tagged unless this turn is the first on a harness `/harness`
+                // has just switched to — see [`main_role_tag`], which owns the
+                // reasoning and the four cases.
+                role: main_role_tag(existed, &resume),
                 ..SpawnRequest::default()
             },
             RunConversation::Existing(id.clone()),
@@ -2629,6 +2643,63 @@ mod tests {
     use super::*;
 
     const DAY: i64 = 24 * 60 * 60 * 1000;
+
+    // ---- which turns read the `main` row ----
+    //
+    // Four cases and all four are named, because the expression these replaced
+    // was inverted in two of them and carried a correct paragraph of prose
+    // above it the whole time. Prose is not a check.
+
+    /// The case the old condition got backwards, and the one Reljod reported:
+    /// `/harness` moves the console, the next turn is tagged `main`,
+    /// `apply_role` overwrites the harness with the row's because the resume is
+    /// `Fresh`, and the switch is undone on the turn that was supposed to
+    /// perform it. The console then names one harness while the run goes to
+    /// another.
+    #[test]
+    fn the_turn_that_performs_a_harness_switch_does_not_read_the_row() {
+        assert_eq!(
+            main_role_tag(true, &Resume::Fresh),
+            None,
+            "a `/harness` switch was dragged straight back to whatever the row named"
+        );
+    }
+
+    /// The other half of the same inversion. On the first turn of all there is
+    /// no session, so the resume is `Fresh` and the old condition read
+    /// `existed == false` as "do not tag" — leaving the `main` row ignored on
+    /// the one turn where it is the only thing that has expressed a preference.
+    #[test]
+    fn mains_very_first_turn_reads_the_row() {
+        assert_eq!(
+            main_role_tag(false, &Resume::Fresh),
+            Some(Role::Main),
+            "the roles panel did nothing at all until the second turn"
+        );
+    }
+
+    /// The ordinary turn: a main chat that exists and has a session to resume.
+    /// Tagged, so the row's model, thinking level and permission ceiling apply
+    /// — while `apply_role` leaves the harness alone, because a session id
+    /// belongs to the harness that minted it.
+    #[test]
+    fn an_ordinary_resumed_turn_reads_the_row() {
+        assert_eq!(
+            main_role_tag(true, &Resume::Session("s-1".into())),
+            Some(Role::Main)
+        );
+    }
+
+    /// No pinned conversation but a session to resume is not a state the
+    /// console produces; it is asserted so the function is total rather than
+    /// accidentally right in three cases out of four.
+    #[test]
+    fn a_session_without_a_pinned_chat_still_reads_the_row() {
+        assert_eq!(
+            main_role_tag(false, &Resume::Session("s-1".into())),
+            Some(Role::Main)
+        );
+    }
 
     // ---- what the chat may do ----
 

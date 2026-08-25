@@ -4455,3 +4455,47 @@ Thinking still never crosses: reasoning blocks are signed by the model that
 produced them, so `Store::handoff` drops them before they reach any carrier. Nor
 does structure, when the target is AGY, which has no import path. The transcript
 itself no longer goes with them.
+
+## The main chat and the `main` role are one setting, read in one order
+
+The status bar read `Claude Code · gemini-3.7-flash-medium`, which is a pair no
+harness can run. Neither half was wrong. `roles.main` named AGY and its model,
+`hand_to_orchestrator` tags its spawn `Role::Main`, and `apply_role` overwrites
+the request's harness with the row's on any fresh run — so the turn really did
+go to AGY, and AGY really did report that model. The console had simply never
+read the row. With no `default.harness` stored it sat on the built-in Claude
+Code and printed that beside what the other harness had said.
+
+Two screens answering "what does main run on" from two tables will always drift.
+So the console reads `roles.main` at startup, under a `-H`/`-m` flag and over
+the `default.*` preferences — the same rung `apply_role` puts the role on at
+spawn time. Reading it in the same order as the code that acts on it is the
+whole fix. `/harness` and `/model` in the main chat write the row back, so the
+panel cannot describe a setting three switches out of date.
+
+Harness and model move as a pair or not at all. A model id belongs to exactly
+one harness, so a row carries a model only on the harness it names, and a switch
+clears the model column in the same breath.
+
+### The condition that decided this was inverted, and nothing checked it
+
+`hand_to_orchestrator` read `role: (existed || resume != Resume::Fresh)`, above
+four correct paragraphs explaining that a turn performing a `/harness` switch
+must *not* be tagged — tagging it lets `apply_role` drag the harness back to the
+row's and the switch is silently undone. The expression said the opposite in
+both `Fresh` cases: a switch was tagged and defeated, and main's very first turn
+was left untagged, so the roles panel was ignored on the one turn where the row
+is the only thing that has expressed a preference.
+
+It survived because it was an inline expression with no test naming any of its
+four cases, and a paragraph of accurate prose sitting directly above it. Prose
+is not a check. It is now `main_role_tag`, with one test per case.
+
+### A row with no harness may still not hand Claude Code another harness's model
+
+`apply_role` applied a harness-less row's model to whatever harness the run was
+on. Claude Code is the one harness where that can be refused without running
+anything: its model list is a build constant in `harness::models`, so absence
+from it is a fact rather than a binary that failed to answer. Every other
+harness is asked over a process or a network, where an empty list means "could
+not look" and must not be read as "does not have".
