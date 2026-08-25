@@ -1,0 +1,673 @@
+<title>The Delegation Crossover</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+
+<style>
+:root{
+  --ground:#F1F3F3;
+  --raise:#FFFFFF;
+  --ink:#14191B;
+  --muted:#59656A;
+  --hair:#D3DADB;
+  --accent:#0E6E6B;
+  --accent-soft:#DCEAE9;
+  --loss:#A8452C;
+  --loss-soft:#F2E1DB;
+  --gain:#2E7D5B;
+  --gain-soft:#DDEBE3;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --col:68ch;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1315;
+    --raise:#161C1E;
+    --ink:#E4EAEA;
+    --muted:#93A2A6;
+    --hair:#2A3336;
+    --accent:#4FB3AE;
+    --accent-soft:#12302F;
+    --loss:#D9825F;
+    --loss-soft:#332019;
+    --gain:#68BC90;
+    --gain-soft:#16301F;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1315;
+  --raise:#161C1E;
+  --ink:#E4EAEA;
+  --muted:#93A2A6;
+  --hair:#2A3336;
+  --accent:#4FB3AE;
+  --accent-soft:#12302F;
+  --loss:#D9825F;
+  --loss-soft:#332019;
+  --gain:#68BC90;
+  --gain-soft:#16301F;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--ground);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:17px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--col);margin:0 auto;padding:0 24px}
+.wide{max-width:1000px;margin:0 auto;padding:0 24px}
+
+/* ---------- masthead ---------- */
+header{
+  border-bottom:1px solid var(--hair);
+  padding:72px 0 0;
+}
+.eyebrow{
+  font-family:var(--mono);
+  font-size:11.5px;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:var(--accent);
+  margin:0 0 20px;
+}
+h1{
+  font-family:var(--serif);
+  font-weight:600;
+  font-size:clamp(38px,6.4vw,60px);
+  line-height:1.04;
+  letter-spacing:-.02em;
+  margin:0 0 20px;
+  text-wrap:balance;
+}
+.standfirst{
+  font-family:var(--serif);
+  font-size:20px;
+  line-height:1.5;
+  color:var(--muted);
+  margin:0 0 40px;
+  text-wrap:balance;
+}
+.standfirst em{color:var(--ink);font-style:italic}
+
+.ledger{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+  gap:1px;
+  background:var(--hair);
+  border-top:1px solid var(--hair);
+  margin-top:8px;
+}
+.ledger div{background:var(--ground);padding:18px 4px 22px}
+.ledger dt{
+  font-family:var(--mono);
+  font-size:10.5px;
+  letter-spacing:.11em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin:0 0 6px;
+}
+.ledger dd{
+  margin:0;
+  font-family:var(--mono);
+  font-size:23px;
+  font-weight:500;
+  font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;
+}
+
+/* ---------- prose ---------- */
+main{padding:64px 0 96px}
+section{margin-bottom:76px}
+h2{
+  font-family:var(--serif);
+  font-weight:600;
+  font-size:29px;
+  line-height:1.2;
+  letter-spacing:-.015em;
+  margin:0 0 8px;
+  text-wrap:balance;
+}
+h3{
+  font-family:var(--sans);
+  font-weight:600;
+  font-size:17px;
+  margin:36px 0 8px;
+}
+p{margin:0 0 18px}
+a{color:var(--accent)}
+strong{font-weight:600}
+.lede{font-size:19px;font-family:var(--serif);line-height:1.55}
+
+.sechead{
+  border-top:2px solid var(--ink);
+  padding-top:14px;
+  margin-bottom:26px;
+}
+
+/* the thesis pull */
+.thesis{
+  border-left:3px solid var(--accent);
+  background:var(--accent-soft);
+  padding:22px 26px;
+  margin:0 0 12px;
+}
+.thesis p{margin:0;font-family:var(--serif);font-size:19px;line-height:1.55}
+
+/* ---------- findings ---------- */
+.finding{
+  display:grid;
+  grid-template-columns:44px 1fr;
+  gap:20px;
+  padding-top:26px;
+  border-top:1px solid var(--hair);
+  margin-top:34px;
+}
+.rank{
+  font-family:var(--mono);
+  font-size:26px;
+  font-weight:600;
+  color:var(--accent);
+  font-variant-numeric:tabular-nums;
+  line-height:1.15;
+}
+.finding h3{margin-top:0;font-size:21px;font-family:var(--serif);font-weight:600;line-height:1.25}
+.verdict{
+  display:inline-block;
+  font-family:var(--mono);
+  font-size:10.5px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  padding:3px 8px;
+  border-radius:2px;
+  margin-bottom:12px;
+}
+.v-measured{background:var(--gain-soft);color:var(--gain)}
+.v-lit{background:var(--loss-soft);color:var(--loss)}
+
+/* ---------- tables ---------- */
+.scroll{overflow-x:auto;margin:0 0 10px;-webkit-overflow-scrolling:touch}
+table{
+  border-collapse:collapse;
+  width:100%;
+  font-family:var(--mono);
+  font-size:13.5px;
+  font-variant-numeric:tabular-nums;
+}
+caption{
+  text-align:left;
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  padding-bottom:9px;
+}
+th,td{
+  text-align:right;
+  padding:9px 14px;
+  border-bottom:1px solid var(--hair);
+  white-space:nowrap;
+}
+th:first-child,td:first-child{text-align:left}
+thead th{
+  font-weight:500;
+  font-size:11px;
+  letter-spacing:.07em;
+  text-transform:uppercase;
+  color:var(--muted);
+  border-bottom:1px solid var(--ink);
+}
+tbody tr:last-child td{border-bottom:none}
+td.loss{color:var(--loss);font-weight:500}
+td.gain{color:var(--gain);font-weight:500}
+.note{font-size:13.5px;color:var(--muted);margin-top:10px;font-style:italic}
+
+/* ---------- chart ---------- */
+figure{margin:0 0 12px}
+figcaption{
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  padding-bottom:16px;
+}
+.bar-row{
+  display:grid;
+  grid-template-columns:minmax(140px,1.1fr) 1fr minmax(96px,auto);
+  align-items:center;
+  gap:14px;
+  padding:9px 0;
+  border-bottom:1px solid var(--hair);
+}
+.bar-row:last-of-type{border-bottom:none}
+.bar-label{font-size:14px;line-height:1.3}
+.bar-label span{display:block;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.bar-track{height:19px;background:var(--hair);border-radius:1px;overflow:hidden}
+.bar-fill{height:100%;border-radius:1px}
+.bar-val{
+  font-family:var(--mono);
+  font-size:13.5px;
+  font-variant-numeric:tabular-nums;
+  text-align:right;
+  font-weight:500;
+}
+.key{
+  display:flex;
+  flex-wrap:wrap;
+  gap:20px;
+  font-family:var(--mono);
+  font-size:11.5px;
+  color:var(--muted);
+  padding-top:16px;
+}
+.key i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:7px;vertical-align:-1px;font-style:normal}
+
+/* ---------- scorecard ---------- */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px}
+.card{
+  background:var(--raise);
+  border:1px solid var(--hair);
+  padding:20px 22px;
+}
+.card h4{
+  margin:0 0 10px;
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.11em;
+  text-transform:uppercase;
+  color:var(--muted);
+}
+.card p{margin:0 0 12px;font-size:15px;line-height:1.55}
+.card p:last-child{margin-bottom:0}
+.card .h{font-weight:600;color:var(--loss);font-family:var(--sans)}
+
+ul{margin:0 0 18px;padding-left:20px}
+li{margin-bottom:9px}
+
+footer{
+  border-top:1px solid var(--hair);
+  padding:34px 0 72px;
+  font-size:14px;
+  color:var(--muted);
+}
+footer code{font-family:var(--mono);font-size:12.5px}
+
+@media (max-width:620px){
+  body{font-size:16px}
+  .finding{grid-template-columns:32px 1fr;gap:14px}
+  .bar-row{grid-template-columns:1fr;gap:6px}
+  .bar-val{text-align:left}
+}
+</style>
+
+<header>
+  <div class="wrap">
+    <p class="eyebrow">Agent architecture &middot; measured, not surveyed</p>
+    <h1>The Delegation Crossover</h1>
+    <p class="standfirst">One agent that manages its own context and hands work to others is the
+    dominant 2026 pattern. It is also, most of the time, a way to spend
+    <em>four to thirty-five times more</em> for exactly the same answer. This is where the line
+    actually falls.</p>
+  </div>
+  <div class="wide">
+    <dl class="ledger">
+      <div><dt>Approaches surveyed</dt><dd>32</dd></div>
+      <div><dt>Hypotheses</dt><dd>52</dd></div>
+      <div><dt>Live agent runs</dt><dd>147</dd></div>
+      <div><dt>Judge verdicts</dt><dd>100</dd></div>
+      <div><dt>Panel ballots</dt><dd>15</dd></div>
+      <div><dt>Model spend</dt><dd>$64</dd></div>
+    </dl>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+<section>
+  <div class="thesis">
+    <p>The pattern is called <strong>orchestrator&ndash;worker</strong>. It works &mdash; but only
+    above one line. Delegate when the task cannot be narrowed by search before reading, and
+    not otherwise. Below that line it costs 4&ndash;36&times; for little or no accuracy.</p>
+  </div>
+  <p class="note">Everything below is scored against generated ground truth, so no model
+  graded the agents. Where a number rests on few trials, the n is given.</p>
+</section>
+
+<section>
+  <div class="sechead"><h2>The contradiction this had to settle</h2></div>
+  <p class="lede">The published record disagrees with itself, and both sides are credible.</p>
+  <p>Anthropic reports a multi-agent research system beating a single agent by
+  <strong>90.2%</strong>, at roughly fifteen times the tokens. Cognition published
+  &ldquo;Don&rsquo;t Build Multi-Agents,&rdquo; arguing that dispersed decisions and incomplete
+  context sharing make such systems fragile, and that context engineering matters more.</p>
+  <p>Both are right. They sit on opposite sides of a crossover nobody had located precisely.
+  Locating it was the point of the experiment &mdash; and the answer is not the one usually
+  given.</p>
+</section>
+
+<section>
+  <div class="sechead"><h2>Where the line actually falls</h2></div>
+  <p>A single agent and a four-worker fan-out ran the same tasks over generated corpora with
+  known answers. The tasks differ in <em>shape</em>, not just size.</p>
+
+  <figure>
+    <figcaption>Cost of fan-out relative to one agent &mdash; and whether it bought anything</figcaption>
+
+    <div class="bar-row">
+      <div class="bar-label">Sequential chain<span>depth &middot; 60 files</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:21%;background:var(--loss)"></div></div>
+      <div class="bar-val" style="color:var(--loss)">7.4&times; &middot; no gain</div>
+    </div>
+
+    <div class="bar-row">
+      <div class="bar-label">Flat scan<span>breadth &middot; 60 files</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:11%;background:var(--loss)"></div></div>
+      <div class="bar-val" style="color:var(--loss)">4.0&times; &middot; no gain</div>
+    </div>
+
+    <div class="bar-row">
+      <div class="bar-label">Join across files<span>breadth &middot; 60 files</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:7%;background:var(--loss)"></div></div>
+      <div class="bar-val" style="color:var(--loss)">2.6&times; &middot; no gain</div>
+    </div>
+
+    <div class="bar-row">
+      <div class="bar-label">Join across files<span>searchable &middot; 316k tokens</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:100%;background:var(--loss)"></div></div>
+      <div class="bar-val" style="color:var(--loss)">36&times; &middot; +0.12</div>
+    </div>
+
+    <div class="bar-row">
+      <div class="bar-label">Semantic classify<span>must read all &middot; 316k tokens</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:32%;background:var(--gain)"></div></div>
+      <div class="bar-val" style="color:var(--gain)">11&times; &middot; 2.4&times; accuracy</div>
+    </div>
+
+    <div class="key">
+      <span><i style="background:var(--loss)"></i>delegation wasted</span>
+      <span><i style="background:var(--gain)"></i>delegation paid</span>
+    </div>
+  </figure>
+
+  <p>The fourth row is the important one. A corpus <strong>five times larger than the context
+  window</strong> caused almost no trouble &mdash; the agent searched instead of reading and
+  scored 0.874, while fan-out paid thirty-six times more to reach 0.995. Only when the criteria
+  were paraphrased so that search could not find them, forcing every file to be read, did the
+  single agent collapse.</p>
+
+  <div class="scroll">
+    <table>
+      <caption>The same 316k-token corpus, two task shapes &mdash; n=5 per cell</caption>
+      <thead>
+        <tr><th>Task on 316k corpus</th><th>Solo</th><th>Fan-out &times;4</th><th>Verdict</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Join (searchable)</td><td>0.874 &middot; $0.07</td><td>0.995 &middot; $2.57</td><td class="loss">36&times; for +0.12</td></tr>
+        <tr><td>Classify (must read all)</td><td>0.118 &middot; $0.22</td><td>0.284 &middot; $2.54</td><td class="gain">11&times; for 2.4&times;</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">On the searchable task, fan-out buys <em>consistency</em> rather than
+  capability: solo is usually perfect but occasionally fails outright (sd 0.282) where fan-out
+  is steady (sd 0.010). Paying 36&times; for that is still a poor trade. Note also that the
+  fan-out figures on the classify row are a <em>lower bound</em> &mdash; those runs used the
+  bare worker return that finding 2 shows fails about half the time.</p>
+
+  <div class="thesis" style="margin-top:30px">
+    <p>The trigger is <strong>not</strong> &ldquo;my data is bigger than the context window.&rdquo;
+    Search makes most large corpora fit. The trigger is that the work itself
+    <strong>cannot be narrowed before reading</strong>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>The five that matter</h2></div>
+  <p>Ranked by how much the system degrades without them. The numbering is a real ordering,
+  and it is not the ranking this study started with &mdash; two entries changed once the
+  evidence arrived.</p>
+
+  <div class="finding">
+    <div class="rank">1</div>
+    <div>
+      <h3>Gate delegation on task shape, not corpus size</h3>
+      <span class="verdict v-measured">measured</span>
+      <p>Delegate only when the task cannot be narrowed by search before reading. Below that
+      line delegation is strictly dominated: identical accuracy at 4&times; cost on breadth
+      tasks, and <strong>7.4&times; cost with 6&times; latency</strong> on a sequential task,
+      where there is nothing to parallelise because each step&rsquo;s input is the previous
+      step&rsquo;s output.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="rank">2</div>
+    <div>
+      <h3>Make every worker return say what it is</h3>
+      <span class="verdict v-measured">measured</span>
+      <p>The largest effect found anywhere in this study, and the cheapest to apply.</p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Worker return</th><th>Score</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td>Bare answer</td><td class="loss">0.000 &nbsp;(4/4 failed)</td><td>$0.18</td></tr>
+            <tr><td>+ one clause of self-description</td><td class="gain">0.978</td><td>$0.23</td></tr>
+            <tr><td>Full reasoning, then answer</td><td class="gain">1.000</td><td>$0.27</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Found by accident. Fan-out scored zero on a task where the workers were demonstrably
+      <em>right</em> &mdash; between them they found every target file. The merging agent threw
+      their work away and asked for reports it had already been given, because on that task the
+      answer type (file paths) matched the input type (file paths). A bare answer was
+      indistinguishable from the worker&rsquo;s own assignment.</p>
+      <p>The fix is not verbosity. Full reasoning works because it is self-evidently a set of
+      findings; one clause achieves the same thing at a fifth of the extra cost.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="rank">3</div>
+    <div>
+      <h3>Isolation is the mechanism; worker count is the cost dial</h3>
+      <span class="verdict v-measured">measured</span>
+      <p>The value of a sub-agent is that it burns its own context and returns a summary &mdash;
+      not that it runs in parallel. But every worker starts a fresh prefix and pays for it.</p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Mode</th><th>Output tokens</th><th>Cache created</th><th>Calls</th></tr></thead>
+          <tbody>
+            <tr><td>Solo</td><td>4,928</td><td>17,228</td><td>1</td></tr>
+            <tr><td>Fan-out &times;4</td><td>18,943</td><td>117,525</td><td>5</td></tr>
+            <tr><td>Fan-out &times;8</td><td>43,438</td><td class="loss">350,332</td><td>9</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Cache creation is <strong>20&times; higher</strong> at eight workers. Delegation and
+      prompt-cache efficiency pull directly against each other, which is rarely said out loud.
+      Watch the ratio of tokens a worker burns to tokens it returns: near 1 means the isolation
+      is doing nothing and you are paying for a round trip.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="rank">4</div>
+    <div>
+      <h3>Verify by a different method, not a second opinion</h3>
+      <span class="verdict v-measured">measured</span>
+      <p>Every configuration got one task wrong, and wrong <em>identically</em>: asked to sum
+      only one category, agents returned the sum of all four. Fifteen runs across five
+      configurations produced <strong>zero catches</strong>.</p>
+      <div class="scroll">
+        <table>
+          <caption>Nothing caught the shared blind spot</caption>
+          <thead><tr><th>Configuration</th><th>Score</th></tr></thead>
+          <tbody>
+            <tr><td>Solo</td><td class="loss">0.000</td></tr>
+            <tr><td>Fan-out &times;4</td><td class="loss">0.000</td></tr>
+            <tr><td>Critic &times;1, clean context</td><td class="loss">0.000</td></tr>
+            <tr><td>Critic &times;1, shared context</td><td class="loss">0.000</td></tr>
+            <tr><td>Critic &times;2, clean context</td><td class="loss">0.000</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The critic re-reads the task and misreads it the same way, because the error is in how
+      the task is read, not in the arithmetic. Only a check by a genuinely different method
+      &mdash; an assertion, a recomputation by another route, ground truth &mdash; catches this
+      class of error.</p>
+      <p>Verification also has a headroom condition. On a task already scoring 0.986, adding a
+      critic <em>lowered</em> it to 0.752. A critic that cannot improve a correct answer can
+      only damage it.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="rank">5</div>
+    <div>
+      <h3>Durable execution with an inbox</h3>
+      <span class="verdict v-lit">not measured here</span>
+      <p>Persist the run so it can resume, and put a queue in front of it so a human can
+      interrupt or redirect without losing work. This is the one entry in the five that this
+      study did <strong>not</strong> test. It is included on two other grounds: an independent
+      panel of five model families put durable execution on <strong>15 of 15</strong> ballots
+      with the most first-place votes, and the agent inbox topped the tally outright. And it
+      follows from the requirement &mdash; once a task outlives a process, resumability is the
+      difference between a system and a demonstration.</p>
+      <p>It is labelled separately because it is not a result.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>Five things I expected that were wrong</h2></div>
+  <p>The refuted hypotheses were more useful than the confirmed ones.</p>
+  <div class="cards">
+    <div class="card">
+      <h4>Hypothesis 8</h4>
+      <p class="h">Agents over-delegate when offered the option.</p>
+      <p>They declined. <code>spawned: 0</code> on every task that fit in context. Recording the
+      spawn count is what made this falsifiable &mdash; without it, &ldquo;delegation
+      allowed&rdquo; and &ldquo;delegation used&rdquo; are indistinguishable.</p>
+    </div>
+    <div class="card">
+      <h4>Hypothesis 15</h4>
+      <p class="h">Terse worker returns beat verbose ones.</p>
+      <p>The opposite, decisively: 0.000 against 1.000. Size was the wrong variable. Ambiguity
+      was the right one.</p>
+    </div>
+    <div class="card">
+      <h4>Hypothesis 33</h4>
+      <p class="h">A clean-context critic beats a shared-context one.</p>
+      <p>It measured worse (0.752 against 0.970). Lacking the original reasoning, it re-derives
+      from scratch and sometimes overwrites a correct answer.</p>
+    </div>
+    <div class="card">
+      <h4>Hypothesis 40</h4>
+      <p class="h">A second look beats a second agent.</p>
+      <p>Neither worked. When author and critic share a blind spot, both are blind. Only an
+      independent method catches it.</p>
+    </div>
+    <div class="card">
+      <h4>Hypothesis 13</h4>
+      <p class="h">A rich worker brief beats a vague one.</p>
+      <p>No measurable difference &mdash; both scored 1.000 on the unambiguous task. The
+      dominant failure was somewhere else entirely.</p>
+    </div>
+    <div class="card">
+      <h4>Hypothesis 27</h4>
+      <p class="h">Reciting the objective prevents drift.</p>
+      <p>Adherence was <strong>1.000 in every condition</strong> at 122k tokens. Drift never
+      appeared. What degraded was recall &mdash; a different problem.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>Can you trust an LLM to grade this?</h2></div>
+  <p class="lede">Mostly not &mdash; which is why this study generated its own ground truth.</p>
+  <p>Because every answer already had an objective score, the judges could be measured rather
+  than trusted. Five conditions crossed model family, rubric style, and whether the judge could
+  read the source.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Judge condition</th><th>Rank corr. w/ truth</th><th>Mean abs. error</th></tr></thead>
+      <tbody>
+        <tr><td>Claude, open rubric</td><td>0.669</td><td>40.6</td></tr>
+        <tr><td>Gemini, open rubric</td><td>0.628</td><td>16.5</td></tr>
+        <tr><td>Claude, fixed taxonomy</td><td>0.581</td><td>27.4</td></tr>
+        <tr><td>Gemini, <em>allowed to read the corpus</em></td><td>0.563</td><td>23.0</td></tr>
+        <tr><td>Gemini, fixed taxonomy</td><td>0.552</td><td>24.6</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>No condition exceeded <strong>0.67</strong>. Judges separate good from bad on average
+  &mdash; 72.1 on perfect answers against 25.4 on worthless ones &mdash; but the tail is what
+  bites: <strong>29% of objectively worthless answers scored above 50, and 21% scored above
+  70</strong>.</p>
+  <p>The clearest case was an answer that emitted the literal template
+  <code>CODE=84,CODE=134,&hellip;</code> containing no real data whatsoever. True score 0.00.
+  All five judges rated it <strong>68&ndash;90</strong> &mdash; including the one that could
+  open the files. Giving a judge access to the evidence is not the same as it using the
+  evidence.</p>
+  <p>One intervention clearly worked: a fixed checklist rubric cut cross-family judge
+  disagreement from <strong>34.2 points to 13.2</strong>. Model family drove verdicts more than
+  rubric did (34.2 across families against 14.5 within one).</p>
+</section>
+
+<section>
+  <div class="sechead"><h2>How it was built</h2></div>
+  <p>A generator writes a tree of notes and records the answers as it writes them, so scoring is
+  set overlap against known truth rather than a model&rsquo;s opinion. Two corpora: 60 files
+  (~50k tokens) and 400 files (~316k tokens, past the worker&rsquo;s window).</p>
+  <p>Two design choices carry the validity. Planted lines are <strong>scattered</strong> through
+  filler, so one search hit does not hand over everything nearby. And the semantic task&rsquo;s
+  criteria are written as <strong>six paraphrases each</strong>, combined pairwise &mdash; no
+  single pattern match answers it, and an agent cannot know the paraphrase set in advance.
+  Without that, the &ldquo;semantic&rdquo; task collapses into a search task and every
+  configuration scores the same.</p>
+
+  <h3>Three things checked rather than assumed</h3>
+  <ul>
+    <li><strong>The ground truth was re-derived from disk.</strong> When five runs returned the
+    same wrong total, the benchmark was the first suspect. It was correct; the agents were
+    consistently making the same mistake.</li>
+    <li><strong>The scheduling simulation was rewritten</strong> after reporting pipelining as
+    0.63&times; &mdash; worse than a barrier. It had booked future worker slots nothing needed.
+    Corrected, it shows pipelining helps only when the pool is not the bottleneck (1.07&ndash;1.14&times;).</li>
+    <li><strong>Harness failures were separated from model failures</strong> by their stored
+    stdout, and two cells were re-run. Scoring a flaky call as zero would have penalised
+    whichever configuration happened to hit it.</li>
+  </ul>
+
+  <h3>What would change the answer</h3>
+  <ul>
+    <li>Most cells are n=3, over-window cells n=5. Cost differences of 4&ndash;36&times;
+    survive that easily; accuracy differences of a few points do not, and are reported as
+    inconclusive.</li>
+    <li>One small worker model throughout. A larger model would raise every baseline and shrink
+    the headroom where verification helps.</li>
+    <li>Each call pays a fixed harness prompt, inflating fan-out cost against a bare API
+    orchestrator. Directions hold; magnitudes are an upper bound.</li>
+    <li>Every task here was read-only, so the strongest structural claim in the literature
+    &mdash; that writes should stay single-threaded &mdash; could not be tested and is not
+    claimed.</li>
+  </ul>
+</section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>147 live agent runs, 100 judge verdicts, 15 ranking ballots, $64 of model spend. Scored
+    against generated ground truth. Benchmark generator, orchestration harness, judge panel and
+    raw result logs are in <code>research/</code>.</p>
+  </div>
+</footer>

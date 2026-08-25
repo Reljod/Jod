@@ -1,0 +1,162 @@
+loaded 147 successful runs
+rescored 9 runs whose stored answer parses differently under the current parser
+total spend on runs: $63.98
+
+### E1 t1_scan (breadth-easy)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo                             3   0.991  0.015      0    0.0590    0.0595      48      0
+deleg                            3   0.667  0.577      0    0.0497    0.0746      40      1
+fanout                           3   1.000  0.000      0    0.2346    0.2346      92      0  dup=0.00
+
+### E1 t2_join (breadth-join)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo                             3   1.000  0.000      1    0.0746    0.0746      50      0
+deleg                            3   0.933  0.115      0    0.0747    0.0800      50      0
+fanout                           3   1.000  0.000      0    0.1907    0.1907      67      0  dup=0.00
+
+### E1 t3_chain (depth)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo                             3   1.000  0.000      3    0.0406    0.0406      16      0
+deleg                            3   1.000  0.000      3    0.0403    0.0403      16      0
+fanout                           3   1.000  0.000      3    0.2986    0.2986      98      0  dup=0.00
+
+### E1 t4_sum (breadth-reduce)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo                             3   0.000  0.000      0    0.0731         -      36      0
+deleg                            3   0.000  0.000      0    0.0675         -      36      0
+fanout                           3   0.000  0.000      0    0.1765         -      39      0  dup=0.00
+
+### E1 t5_classify (breadth-semantic)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo                             3   0.986  0.025      2    0.2036    0.2066      91      0
+deleg                            3   0.912  0.152      2    0.1503    0.1647      84      0
+fanout                           3   0.000  0.000      0    0.2178         -      94      0  dup=0.00
+
+### E2 over-window t2_join (400-file corpus, ~316k tokens)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+deleg                            5   0.869  0.279      0    0.0868    0.0998      63      0
+fanout-w4                        5   0.995  0.010      0    2.5687    2.5807     167      0  dup=0.00
+fanout-w8                        5   0.971  0.032      0    1.5044    1.5490     164      0  dup=0.00
+solo                             5   0.874  0.282      1    0.0713    0.0816      37      0
+
+### E2 over-window t5_classify (400-file corpus, ~316k tokens)
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+deleg                            5   0.259  0.305      0    0.2413    0.9302     153      0  spawned=0.6
+fanout-w4                        5   0.284  0.389      0    2.5363    8.9220     178      0  dup=0.00
+fanout-w8                        5   0.287  0.393      0    1.5205    5.3018     184      1  dup=0.00
+solo                             5   0.118  0.171      0    0.2226    1.8898     139      0
+
+### E3 worker count (t5_classify, small corpus)
+H5 predicts an early knee; H6 predicts superlinear cost.
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+fanout-w1                        3   0.000  0.000      0    0.1442         -      84      0  dup=0.00
+fanout-w2                        3   0.000  0.000      0    0.1639         -      59      0  dup=0.00
+fanout-w4                        3   0.319  0.552      0    0.1871    0.5868      70      1  dup=0.00
+fanout-w8                        3   0.638  0.552      0    0.2782    0.4362     107      1  dup=0.00
+
+### E4 worker brief quality (t2_join)
+H13/H14: does an explicit boundary change accuracy and overlap?
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+brief=rich                       3   1.000  0.000      0    0.1941    0.1941      58      0  dup=0.00
+brief=vague                      3   1.000  0.000      0    0.2173    0.2173      70      0  dup=0.00
+
+### E4 worker brief quality (t5_classify)
+H13/H14: does an explicit boundary change accuracy and overlap?
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+brief=rich                       3   0.000  0.000      0    0.1846         -      91      0  dup=0.00
+brief=vague                      3   0.333  0.577      1    0.2029    0.6086      85      0  dup=0.00
+
+### E5 worker return size (t5_classify)
+H15/H16: does returning reasoning instead of an answer help?
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+ret=fat                          3   1.000  0.000      3    0.2724    0.2724      99      0  dup=0.00
+ret=thin                         3   0.000  0.000      0    0.1818         -      57      1  dup=0.00
+
+### E6 verification (t5_classify)
+H33-H36: clean-context critic vs shared-context self-review.
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo (no verify)                 3   0.986  0.025      2    0.2036    0.2066      91      0
+verify-p1-clean                  3   0.752  0.313      1    0.2873    0.3819     163      0
+verify-p2-clean                  3   0.912  0.152      2    0.5073    0.5560     337      0  spawned=1.0
+verify-p1-shared                 3   0.970  0.052      2    0.4261    0.4394     224      0  spawned=0.3
+verify-p2-shared                 3   1.000  0.000      3    0.4388    0.4388     293      0  spawned=0.7
+
+### E7 the silent-failure case (t4_sum, scalar answer)
+Every configuration failed this identically at baseline. H40: is a second look worth more than a second agent?
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+solo (no verify)                 3   0.000  0.000      0    0.0731         -      36      0
+fanout-w4                        3   0.000  0.000      0    0.1620         -      45      0  dup=0.00
+verify-p1-clean                  3   0.000  0.000      0    0.1186         -      70      0
+verify-p1-shared                 3   0.000  0.000      0    0.0894         -      62      0
+verify-p2-clean                  3   0.000  0.000      0    0.1959         -     155      0
+
+### E8 self-describing worker returns (t5_classify)
+A bare list of paths is indistinguishable from the worker's own assignment. Does one clause of self-description fix it?
+
+config                           n   score     sd  exact     cost$   $/point  wall_s   fmtF
+-------------------------------------------------------------------------------------------
+ret=thin                         4   0.000  0.000      0    0.1766         -      47      1  dup=0.00
+ret=labelled                     4   0.978  0.025      2    0.2270    0.2320      55      0  dup=0.00
+
+### Token structure by mode (H6, H7, H23, H29, H30)
+
+mode                         n    out_tok     in_tok   cache_rd   cache_cr    calls
+-----------------------------------------------------------------------------------
+deleg                       25       4793         74     329504      14342      1.0
+fanout-w1                    3       9567         26      71700      43042      2.0
+fanout-w2                    3      10467         43     126371      47314      3.0
+fanout-w4                   57      23083        124     484015     223962      5.0
+fanout-w8                   13      52526        202     861916     432459      9.0
+solo                        25       5405         93     428467      17697      1.0
+verify                      21      13550        244     910701      41876      2.4
+
+### Judge panel: how well does each judge track the objective score?
+
+Every answer already has a true score from generated ground truth,
+so the judges are what is being measured here, not the agents.
+
+condition             n  spearman  mean_abs  judge_mu unparsed
+--------------------------------------------------------------
+agy_grounded         19     0.563      23.0      59.2       1
+agy_open             20     0.628      16.5      68.0       0
+agy_taxonomy         20     0.552      24.6      61.0       0
+claude_open          20     0.669      40.6      33.8       0
+claude_taxonomy      20     0.581      27.4      54.3       0
+
+Pairwise judge agreement (mean absolute difference in points):
+  agy_grounded       vs agy_open           n=19  mad= 15.0
+  agy_grounded       vs agy_taxonomy       n=19  mad=  7.9
+  agy_grounded       vs claude_open        n=19  mad= 27.8
+  agy_grounded       vs claude_taxonomy    n=19  mad= 14.3
+  agy_open           vs agy_taxonomy       n=20  mad= 14.5
+  agy_open           vs claude_open        n=20  mad= 34.2
+  agy_open           vs claude_taxonomy    n=20  mad= 14.7
+  agy_taxonomy       vs claude_open        n=20  mad= 27.4
+  agy_taxonomy       vs claude_taxonomy    n=20  mad= 13.2
+  claude_open        vs claude_taxonomy    n=20  mad= 21.9

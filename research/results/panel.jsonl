@@ -1,0 +1,15 @@
+{"model": "gemini-3.7-flash-high", "seed": 2, "picks": ["A1", "B4", "C4", "C2", "C1"], "wall_s": 15.3}
+{"model": "gemini-3.7-flash-high", "seed": 0, "picks": ["C2", "C1", "C4", "A1", "B4"], "wall_s": 15.8}
+{"model": "gemini-3.7-flash-high", "seed": 1, "picks": ["C2", "C4", "A1", "B4", "C1"], "wall_s": 26.8}
+{"model": "gemini-3.1-pro-high", "seed": 0, "picks": ["C1", "C4", "B4", "C2", "B5"], "wall_s": 27.6}
+{"model": "claude-sonnet-4-6", "seed": 0, "picks": ["C4", "C2", "B1", "B4", "C1"], "wall_s": 7.7}
+{"model": "claude-sonnet-4-6", "seed": 1, "picks": ["C4", "C2", "B1", "A2", "D1"], "wall_s": 9.5}
+{"model": "claude-sonnet-4-6", "seed": 2, "picks": ["C2", "C4", "B5", "B4", "C1"], "wall_s": 7.4}
+{"model": "gemini-3.6-flash-high", "seed": 0, "picks": ["C2", "C1", "C4", "A1", "B4"], "wall_s": 24.7}
+{"model": "gemini-3.1-pro-high", "seed": 1, "picks": ["C4", "C2", "B4", "A2", "C1"], "wall_s": 85.8}
+{"model": "gemini-3.1-pro-high", "seed": 2, "picks": ["C1", "C4", "B4", "B1", "C2"], "wall_s": 86.1}
+{"model": "gpt-oss-120b-medium", "seed": 0, "picks": ["C1", "C4", "A1", "B5", "C2"], "wall_s": 6.4}
+{"model": "gemini-3.6-flash-high", "seed": 1, "picks": ["C2", "C4", "B4", "A2", "C1"], "wall_s": 32.9}
+{"model": "gpt-oss-120b-medium", "seed": 1, "picks": ["B1", "C1", "C4", "C2", "D3"], "wall_s": 7.2}
+{"model": "gpt-oss-120b-medium", "seed": 2, "picks": ["A1", "B1", "C1", "C2", "C4"], "wall_s": 9.0}
+{"model": "gemini-3.6-flash-high", "seed": 2, "picks": ["C4", "C2", "B4", "A1", "B1"], "wall_s": 43.7}
