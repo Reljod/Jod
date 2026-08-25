@@ -17,7 +17,9 @@ use crate::cards::{CardKind, Importance, NewCard, Source};
 use crate::conversation::{Conversation, NewMessage};
 use crate::error::{JodError, Result};
 use crate::event::{AgentEnvelope, AgentEvent, Usage};
-use crate::harness::{Effort, HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess};
+use crate::harness::{
+    models, Effort, HarnessKind, PermissionPolicy, Resume, SpawnRequest, ToolAccess,
+};
 use crate::heartbeat::{Heartbeat, Watching};
 use crate::store::{Store, StoredRun};
 use crate::workdir::Workdir;
@@ -532,6 +534,40 @@ pub fn apply_role(store: &Store, req: &mut SpawnRequest) {
                         named.label(),
                         req.harness.label()
                     );
+                }
+            }
+            // A row that names no harness is deliberately harness-agnostic, so
+            // its model is whatever it says — with one exception that can be
+            // settled without running anything.
+            //
+            // **Claude Code's list is a build constant, not a query.** Every
+            // other harness is asked for its models over a process or a
+            // network, so "not in the list" there may only mean the binary was
+            // missing and the answer came back empty. Claude Code's is written
+            // down in `harness::models`, which makes absence from it a fact
+            // rather than a failure to look — and that is exactly the shape
+            // that reached Reljod: a row holding `gemini-3.7-flash-medium`
+            // handed to a Claude Code run, which fails before it reaches a
+            // model at all and reports neither the name nor the reason.
+            //
+            // Only a row that genuinely names nothing. A spelling this build
+            // does not recognise is a row written by a newer one, and not
+            // knowing what it says is not the same as knowing it disagrees —
+            // that case falls through and keeps the behaviour it already had.
+            None if row.harness.is_none() && req.harness == HarnessKind::ClaudeCode => {
+                match &row.model {
+                    Some(model)
+                        if !models::accepts(model, &HarnessKind::ClaudeCode.models()) =>
+                    {
+                        eprintln!(
+                            "[jod] the `{}` role asks for `{model}` and names no harness, and \
+                             Claude Code — the harness this run is going to — has no model by \
+                             that name. Leaving the model to the harness rather than failing \
+                             the run on a name it does not have.",
+                            role.as_str()
+                        )
+                    }
+                    _ => req.model = row.model.clone(),
                 }
             }
             _ => req.model = row.model.clone(),
@@ -4622,6 +4658,51 @@ mod tests {
 
         let mut req = SpawnRequest {
             resume: Resume::Session("a-claude-code-session".into()),
+            ..scratch_request()
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(req.model.as_deref(), Some("haiku"));
+    }
+
+    /// **Reljod's report, as a check.** A row holding a model and no harness
+    /// used to hand that model to whatever harness the run happened to be on.
+    /// With `gemini-3.7-flash-medium` in the column and a Claude Code run, the
+    /// spawn goes out with `--model gemini-3.7-flash-medium` and dies before it
+    /// reaches a model, reporting neither the name nor the reason.
+    ///
+    /// Claude Code is the only harness this can be said of without running
+    /// anything, because its list is a constant in `harness::models` rather
+    /// than an answer a missing binary could have left empty.
+    #[test]
+    fn a_row_with_no_harness_does_not_hand_claude_code_another_harnesss_model() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("gemini-3.7-flash-medium"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            harness: HarnessKind::ClaudeCode,
+            ..scratch_request()
+        };
+        apply_role(&store, &mut req);
+        assert_eq!(
+            req.model, None,
+            "no model at all beats a name Claude Code will refuse the run over"
+        );
+    }
+
+    /// The other side of the same line, so the guard above cannot grow into
+    /// "a row without a harness never supplies a model". A name Claude Code
+    /// does have is still applied.
+    #[test]
+    fn a_row_with_no_harness_still_supplies_a_model_claude_code_knows() {
+        let store = Store::in_memory().unwrap();
+        store
+            .role_set("scratch", RoleField::Model, Some("haiku"))
+            .unwrap();
+
+        let mut req = SpawnRequest {
+            harness: HarnessKind::ClaudeCode,
             ..scratch_request()
         };
         apply_role(&store, &mut req);

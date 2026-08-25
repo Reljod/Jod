@@ -47,6 +47,24 @@ conversation's stored model is dropped for the same reason: a harness on its
 own default answers, and a harness handed another harness's spelling refuses
 the run before it reaches a model.
 
+## The main chat and the `main` role are one setting
+
+The roles panel and the console's status bar answer the same question — what
+does main run on — so they read and write the same row. The console opens on
+whatever `roles.main` names, under a `-H` or `-m` flag and over the stored
+`default.*` preferences, which is exactly where the role sits at spawn time.
+Typing `/harness` or `/model` in the main chat writes that row back, so the
+panel is never describing a setting three switches out of date.
+
+They are written as a pair or not at all. A model id belongs to exactly one
+harness, so a row is only allowed to carry a model on the harness it names, and
+a harness switch clears the model column in the same breath.
+
+Both halves used to be missing, and together they produced a status bar reading
+`Claude Code · gemini-3.7-flash-medium` — the console showing its own built-in
+default beside the model the harness the role had actually sent the turn to
+reported back. Neither half was wrong on its own and the pair was impossible.
+
 The permission mode is four levels: `plan` (read and reason, change nothing),
 `ask` (check first), `edits` (file edits go through), `auto` (everything
 auto-approved). `auto` is the default. What each maps to per harness is in

@@ -2416,7 +2416,21 @@ async fn begin_crossing(
         return;
     }
     let store = jod.store();
-    match crossing(store.map(Arc::as_ref), app, thread, to) {
+    // Asked before the crossing, because a crossing carries the pin onto a
+    // conversation it mints and the question "was I in the main chat" would
+    // then be asked of the answer rather than of the state that produced it.
+    let was_in_main = thread.in_main(store.map(Arc::as_ref));
+    let outcome = crossing(store.map(Arc::as_ref), app, thread, to);
+    // A switch that actually happened is a statement about what main runs on,
+    // so the `main` row hears it — with the model cleared, because a model id
+    // belongs to exactly one harness and the row must not be left holding the
+    // old harness's name. `Crossing::Stay` changed nothing and says nothing.
+    if was_in_main && !matches!(outcome, Crossing::Stay) {
+        if let Some(store) = store.as_deref() {
+            record_main_harness(store, to);
+        }
+    }
+    match outcome {
         // Said rather than silently done. `/harness claude` on Claude Code used
         // to reset the session cursor and the model — a no-op that quietly threw
         // away the conversation you were in the middle of.
@@ -3227,6 +3241,26 @@ fn say_role_objections(app: &mut App, role: Role) {
     let models = app.role_models(row.harness_kind());
     for said in roles::objections(&row, &models) {
         app.push(Entry::Notice(said));
+    }
+
+    // **The one disagreement the row cannot see on its own.** `main` is the
+    // only role with a conversation open in front of it, and moving that
+    // conversation to another harness is not a column write — the thread has to
+    // be carried across, which is what `/harness` exists to do. Setting the row
+    // alone leaves the panel naming one harness while the chat box goes on
+    // talking to another, which is the shape of the bug this whole change is
+    // about; the row is not wrong, it is just not the whole move.
+    if role == Role::Main {
+        if let Some(named) = row.harness_kind() {
+            if named != app.harness {
+                app.push(Entry::Notice(format!(
+                    "the main chat is still on {} — type /harness {} to carry the thread \
+                     across, or this row and the chat box will go on disagreeing",
+                    app.harness.label(),
+                    named.id()
+                )));
+            }
+        }
     }
 }
 
@@ -6671,7 +6705,15 @@ fn remember_mode(mode: PermissionPolicy) -> Action {
 /// impossible to diagnose.
 fn write_setting(store: &Store, conversation: &str, setting: &Setting) -> Option<String> {
     let wrote = match setting {
-        Setting::Model(model) => store.set_conversation_model(conversation, model.as_deref()),
+        Setting::Model(model) => {
+            let wrote = store.set_conversation_model(conversation, model.as_deref());
+            // The `main` row is the screen that answers "what does main run
+            // on", so a `/model` typed at the main chat has to reach it too —
+            // otherwise the panel goes on naming the model somebody chose three
+            // switches ago while the status bar names this one.
+            mirror_onto_main_role(store, conversation, model.as_deref());
+            wrote
+        }
         Setting::Mode(mode) => store.set_conversation_permission(conversation, Some(*mode)),
     };
     match wrote {
@@ -6683,6 +6725,76 @@ fn write_setting(store: &Store, conversation: &str, setting: &Setting) -> Option
         Err(e) => Some(format!(
             "could not remember that for next time, so it applies to this turn only: {e}"
         )),
+    }
+}
+
+/// Carry a harness switch performed in the main chat onto the `main` role row.
+///
+/// The model column is cleared in the same breath, and that is not tidiness.
+/// `claude-sonnet-5` means nothing to OpenCode or AGY, so a row left naming the
+/// old harness's model would describe a spawn that fails before it reaches a
+/// model at all — the failure `docs/harness-config.md` has documented for the
+/// conversation's own model all along, arriving by a different door. `point_at`
+/// drops the model on the app for exactly this reason; this is the same drop,
+/// on the row that outlives the process.
+fn record_main_harness(store: &Store, to: HarnessKind) {
+    let main = Role::Main.as_str();
+    for (field, value) in [
+        (RoleField::Harness, Some(to.id())),
+        (RoleField::Model, None),
+    ] {
+        if let Err(e) = store.role_set(main, field, value) {
+            eprintln!(
+                "[jod] could not record the {} on the `main` role: {e}",
+                field.as_str()
+            );
+        }
+    }
+}
+
+/// Carry a model chosen in the main chat onto the `main` role row.
+///
+/// **The roles panel and the status bar were two answers to one question.**
+/// `/model` writes `conversations.model`; the panel reads `roles.main`. Nothing
+/// joined them, so the screen that exists to say what main runs on could sit
+/// there naming a model no turn had used for weeks — and because a model id
+/// belongs to exactly one harness, the stale half was not merely out of date,
+/// it was a name the running harness would refuse.
+///
+/// **Written as a pair, or not at all.** The harness the conversation is
+/// actually on goes down beside the model, which is the invariant every other
+/// reader of this table already assumes: [`jod_core::service::apply_role`]
+/// applies a row's model only on the harness that row names, and the panel dims
+/// a model that is not its harness's. A row holding a model with no harness
+/// beside it is the one shape that can be handed to a program that has never
+/// heard of it.
+///
+/// Only for the main chat, and only ever best-effort. This is a mirror of a
+/// choice that has already been recorded where it counts; a settings row that
+/// cannot be written is not a reason to fail the command that set the model.
+fn mirror_onto_main_role(store: &Store, conversation: &str, model: Option<&str>) {
+    if !matches!(store.pinned_conversation(), Ok(Some(pinned)) if pinned == conversation) {
+        return;
+    }
+    let harness = store
+        .conversation(conversation)
+        .ok()
+        .flatten()
+        .and_then(|c| c.harness_kind());
+    // Without knowing the harness there is no pair to write, and half a pair is
+    // the shape this function exists to keep out of the table.
+    let Some(harness) = harness else { return };
+    let main = Role::Main.as_str();
+    for (field, value) in [
+        (RoleField::Harness, Some(harness.id())),
+        (RoleField::Model, model),
+    ] {
+        if let Err(e) = store.role_set(main, field, value) {
+            eprintln!(
+                "[jod] could not mirror the {} onto the `main` role: {e}",
+                field.as_str()
+            );
+        }
     }
 }
 
@@ -6798,6 +6910,65 @@ fn load_preferences(app: &mut App, store: &Store, opts: &Options) {
                 app.mode = *mode;
             }
             _ => {}
+        }
+    }
+    adopt_main_role(app, store, opts);
+}
+
+/// Open the console on whatever the `main` role says main runs on.
+///
+/// **The header was allowed to name one harness while the turn went to
+/// another.** `hand_to_orchestrator` tags its spawn `Role::Main`, and
+/// `service::apply_role` then overwrites the request's harness with the `main`
+/// row's on every fresh run. The console never read that row, so with
+/// `roles.main` set to `agy`/`gemini-3.7-flash-medium` and no `default.harness`
+/// stored, `app.harness` stayed on the built-in Claude Code, the run went to
+/// AGY, AGY reported its model, and the status bar printed the two side by side
+/// as `Claude Code · gemini-3.7-flash-medium`. Neither half was wrong on its
+/// own and the pair was impossible.
+///
+/// So the row is read here, one rung above the `default.*` preferences and one
+/// below the launch flags, which is exactly where `apply_role` puts it at spawn
+/// time. Reading it in the same order as the code that acts on it is the whole
+/// fix: the settings screen and the status bar stop being two answers to one
+/// question.
+///
+/// **Harness and model move together or not at all.** A model id belongs to
+/// exactly one harness, so a row is only allowed to set the model when the
+/// console ends up on the harness that row names — the same line `apply_role`
+/// draws, and it has to be the same line, because this is the screen that
+/// claims what that code will do.
+fn adopt_main_role(app: &mut App, store: &Store, opts: &Options) {
+    let row = match store.role_get(Role::Main.as_str()) {
+        Ok(Some(row)) => row,
+        // Nothing configured, which is the answer on every machine whose owner
+        // has never opened the panel. The preferences above already stand.
+        Ok(None) => return,
+        Err(e) => {
+            app.push(Entry::Notice(format!(
+                "could not read the `main` role: {e}"
+            )));
+            return;
+        }
+    };
+
+    // An unknown spelling is not a disagreement, it is a row written by a build
+    // that knows something this one does not. Left alone rather than guessed at.
+    let named = row.harness.as_deref().and_then(HarnessKind::from_id);
+    if let Some(kind) = named {
+        if opts.harness.is_none() {
+            app.harness = kind;
+        }
+    }
+
+    // Only on its own harness. A launch flag that picks a different one strands
+    // the row's model exactly the way a `/harness` switch strands the
+    // conversation's, and for the same reason: a harness on its own default
+    // answers, and a harness handed another harness's spelling refuses the run
+    // before it reaches a model.
+    if opts.model.is_none() && named == Some(app.harness) {
+        if let Some(model) = &row.model {
+            app.model = Some(model.clone());
         }
     }
 }
@@ -14263,6 +14434,122 @@ mod tests {
             HarnessKind::OpenCode,
             "-H opencode wins over the choice"
         );
+    }
+
+    /// A row write is not a harness move. Setting `main` to AGY from the panel
+    /// while the chat box is on Claude Code leaves the two disagreeing, and the
+    /// only way to close it is the switch that carries the thread across — so
+    /// the panel says which key does that rather than letting the reader find
+    /// out at the next turn.
+    #[test]
+    fn setting_mains_harness_from_the_panel_names_the_switch_that_finishes_it() {
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        app.roles = vec![jod_core::store::RoleRow {
+            role: "main".into(),
+            harness: Some("agy".into()),
+            model: None,
+            thinking: None,
+            permission: None,
+        }];
+
+        say_role_objections(&mut app, Role::Main);
+        let said = last_notice(&app);
+        assert!(said.contains("still on Claude Code"), "{said}");
+        assert!(said.contains("/harness agy"), "{said}");
+    }
+
+    /// And it stays quiet when there is nothing to disagree about, so the
+    /// notice above cannot become a line printed on every edit.
+    #[test]
+    fn a_main_row_that_matches_the_console_says_nothing() {
+        let mut app = app_on(HarnessKind::Agy);
+        app.roles = vec![jod_core::store::RoleRow {
+            role: "main".into(),
+            harness: Some("agy".into()),
+            model: None,
+            thinking: None,
+            permission: None,
+        }];
+
+        say_role_objections(&mut app, Role::Main);
+        assert!(
+            app.transcript.is_empty(),
+            "a coherent row and a matching console is the ordinary case"
+        );
+    }
+
+    /// **The screenshot, as a check.** `roles.main` says AGY on
+    /// `gemini-3.7-flash-medium`, nothing is stored under `default.harness`,
+    /// and the console opened on its built-in Claude Code. The turn went to AGY
+    /// — `apply_role` overwrites the harness on a fresh run — AGY reported its
+    /// model, and the status bar printed `Claude Code · gemini-3.7-flash-medium`:
+    /// a harness and a model that cannot go together, each half true on its own.
+    #[test]
+    fn the_console_opens_on_the_harness_and_model_the_main_role_names() {
+        let store = store();
+        store
+            .role_set("main", RoleField::Harness, Some("agy"))
+            .unwrap();
+        store
+            .role_set("main", RoleField::Model, Some("gemini-3.7-flash-medium"))
+            .unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &options());
+
+        assert_eq!(
+            app.harness,
+            HarnessKind::Agy,
+            "the console named Claude Code while every turn went to AGY"
+        );
+        assert_eq!(app.model.as_deref(), Some("gemini-3.7-flash-medium"));
+        assert_eq!(
+            app.identity(),
+            "AGY · gemini-3.7-flash-medium",
+            "the status bar has to name a pair that can actually run"
+        );
+    }
+
+    /// The pair rule, from the side that breaks it. A launch flag picks the
+    /// harness, so the row's model belongs to a harness this session is not on
+    /// and must not be carried across — the same drop `/harness` performs.
+    #[test]
+    fn a_harness_named_at_launch_leaves_the_main_rows_model_behind() {
+        let store = store();
+        store
+            .role_set("main", RoleField::Harness, Some("agy"))
+            .unwrap();
+        store
+            .role_set("main", RoleField::Model, Some("gemini-3.7-flash-medium"))
+            .unwrap();
+
+        let launched_on = options_launched_on(HarnessKind::ClaudeCode, PermissionPolicy::default());
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &launched_on);
+
+        assert_eq!(app.harness, HarnessKind::ClaudeCode, "-H wins over the row");
+        assert_eq!(
+            app.model, None,
+            "AGY's model on a Claude Code session is the impossible pair, not a preference"
+        );
+    }
+
+    /// An empty `roles` table is the state on every machine whose owner has
+    /// never opened the panel, and it must leave the stored preferences exactly
+    /// where they were.
+    #[test]
+    fn no_main_row_leaves_the_stored_preferences_alone() {
+        let store = store();
+        config::write(
+            &store,
+            config::Pref::Harness,
+            &config::Value::Harness(HarnessKind::OpenCode),
+        )
+        .unwrap();
+
+        let mut app = app_on(HarnessKind::ClaudeCode);
+        load_preferences(&mut app, &store, &options());
+        assert_eq!(app.harness, HarnessKind::OpenCode);
     }
 
     /// The point of the preference: choose the model once and every later
