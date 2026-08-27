@@ -1,0 +1,97 @@
+{
+  "_meta": {
+    "note": "Hard filters run before scoring. A candidate that fails one is not a low-scoring option, it is not an option. Weighted averages otherwise let a brilliant model paper over 'the quota is bound to a client you cannot use'.",
+    "scale": "every criterion is scored 0-5; see schema.md for what each score means",
+    "brief": "Two jobs: (1) an LLM that browses the web at volume, (2) a Claude Code replacement for coding at limits comparable to a Max plan. Cheap matters; minimal guardrails matters more; the user asked to prioritise flat-rate subscriptions with good limits, benchmarked against OpenCode."
+  },
+
+  "hard_filters": [
+    {
+      "id": "flat_rate_plan",
+      "test": "a flat monthly subscription exists, open to new signups, with a quota the vendor publishes in some checkable unit",
+      "why": "the stated priority. Pay-as-you-go has no ceiling, and an agent left running overnight is exactly the workload that discovers this. Failing this is not a criticism: several PAYG options are excellent and are recommended in the report as overflow capacity."
+    },
+    {
+      "id": "open_harness",
+      "test": "capacity is reachable from an arbitrary client with a plain API key over an OpenAI- or Anthropic-compatible endpoint",
+      "why": "Jod drives several harnesses and must not be bound to one vendor's binary. This is the filter that eliminates Claude Max, ChatGPT Pro, Google AI Ultra, Copilot, Cursor and Warp, and since 9 January 2026 it eliminates them by the vendors' own enforcement rather than by preference."
+    },
+    {
+      "id": "agentic_capable",
+      "test": "the plan's best model supports tool/function calling and offers at least a 128K context window",
+      "why": "both jobs are agentic. A model that cannot call a tool cannot browse or edit a repo, however unfiltered it is. This is the filter that removes almost the entire self-described uncensored hosting market."
+    },
+    {
+      "id": "no_provider_moderation_layer",
+      "test": "the provider does not run its own non-disableable classifier over requests or responses, beyond whatever the model itself was trained to refuse",
+      "why": "the stated requirement. Note what this does and does not buy: it removes a filter the developer cannot see or control, and it leaves the model's own training entirely in place. 'Configurable' passes, because a filter you can lower is one you control."
+    },
+    {
+      "id": "published_limits",
+      "test": "the quota is stated in a unit that can be converted to work done before you pay, and the retention policy is published",
+      "why": "an unpublished limit is not a limit, it is a surprise. This removes the free CLIs and the anonymous uncensored gateways, whose terms are the product's weakest part."
+    }
+  ],
+
+  "criteria": {
+    "quota_value":     "how many dollars of provider-rate work the plan returns per dollar of subscription, derived from published rates",
+    "quota_ceiling":   "absolute headroom at the top tier: can it sustain a full working day of agentic coding without throttling",
+    "price_floor":     "how cheap the usable entry tier is",
+    "guardrail_freedom": "absence of a provider-side filter, plus how much the underlying model actually refuses on ordinary security, scraping and automation work",
+    "coding_power":    "frontier coding capability of the best model the plan unlocks",
+    "web_access":      "native search and page-fetch tooling, and whether the plan includes it or bills it separately",
+    "context_limits":  "context window and max output tokens available on the plan, not on the vendor's best endpoint",
+    "harness_fit":     "quality of the Anthropic/OpenAI compatibility story in Claude Code, OpenCode and similar",
+    "throughput":      "tokens per second and concurrency permitted",
+    "reliability":     "observed uptime, plan stability, and how often the vendor has re-priced or withdrawn tiers",
+    "privacy":         "retention, training policy and jurisdiction"
+  },
+
+  "profiles": {
+    "charter": {
+      "label": "The brief as written",
+      "description": "Flat-rate first, cheap, minimal guardrails, must do both jobs. The weighting implied by the request.",
+      "weights": {
+        "quota_value": 5, "quota_ceiling": 4, "price_floor": 4, "guardrail_freedom": 5,
+        "coding_power": 4, "web_access": 3, "context_limits": 3, "harness_fit": 5,
+        "throughput": 2, "reliability": 3, "privacy": 2
+      }
+    },
+    "max-replacement": {
+      "label": "Genuinely replace Claude Code Max",
+      "description": "Assume all-day agentic coding on a real repo. Capability and headroom dominate; price is secondary.",
+      "weights": {
+        "quota_value": 3, "quota_ceiling": 5, "price_floor": 1, "guardrail_freedom": 3,
+        "coding_power": 5, "web_access": 1, "context_limits": 5, "harness_fit": 5,
+        "throughput": 4, "reliability": 4, "privacy": 2
+      }
+    },
+    "guardrail-free": {
+      "label": "Permissiveness above all",
+      "description": "Refusals are the binding constraint. Willing to trade capability and price for a model that does not argue.",
+      "weights": {
+        "quota_value": 2, "quota_ceiling": 3, "price_floor": 3, "guardrail_freedom": 5,
+        "coding_power": 2, "web_access": 3, "context_limits": 2, "harness_fit": 4,
+        "throughput": 1, "reliability": 2, "privacy": 5
+      }
+    },
+    "web-agent": {
+      "label": "Browse the web at volume",
+      "description": "High request count, long context, cheap per call, native retrieval. Coding ability barely matters.",
+      "weights": {
+        "quota_value": 5, "quota_ceiling": 5, "price_floor": 4, "guardrail_freedom": 4,
+        "coding_power": 1, "web_access": 5, "context_limits": 4, "harness_fit": 3,
+        "throughput": 3, "reliability": 3, "privacy": 3
+      }
+    },
+    "budget": {
+      "label": "Cheapest thing that actually works",
+      "description": "Minimise monthly spend subject to both jobs being possible at all.",
+      "weights": {
+        "quota_value": 5, "quota_ceiling": 2, "price_floor": 5, "guardrail_freedom": 3,
+        "coding_power": 3, "web_access": 2, "context_limits": 3, "harness_fit": 4,
+        "throughput": 1, "reliability": 2, "privacy": 1
+      }
+    }
+  }
+}

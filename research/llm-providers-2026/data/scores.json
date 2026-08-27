@@ -1,0 +1,313 @@
+{
+  "_meta": {
+    "note": "0-5 per criterion for the 20-option shortlist. `tier` A = passed every hard filter. `tier` B = pay-as-you-go, carried forward deliberately because the report recommends them as overflow capacity behind a flat plan; they are scored under the same rubric but quota_value is fixed at 1 (you pay face value) and quota_ceiling at 5 (there is no ceiling), which is what pay-as-you-go means.",
+    "provenance": {
+      "documented": "the number is on the vendor's own pricing or docs page, read on 2026-08-27",
+      "derived": "computed here from published rates — the arithmetic is in scripts/score.py comments or the report",
+      "judged": "an assessment from documentation, third-party measurement and reported behaviour; not measured here"
+    },
+    "honesty": "No benchmark was run for this study. Unlike research/agent-db-2026, every capability score here is documented or judged, never measured on this machine. Section 8 of REPORT.md says what that costs."
+  },
+
+  "scores": {
+    "opencode-go": {
+      "tier": "A",
+      "quota_value":      { "s": 5, "p": "derived",    "why": "$60/month of provider-rate value for $10 = 6.0x, the highest verified multiple in the survey" },
+      "quota_ceiling":    { "s": 3, "p": "documented", "why": "$12 per 5h is real headroom on cheap models (31,650 DeepSeek V4 Flash calls) and thin on expensive ones (110 Kimi K3 calls)" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "$5 first month, $10 after" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no gateway classifier; 16 of 18 models are unmoderated open weights, but GPT 5.6 Luna carries OpenAI's layer" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "Kimi K3, Grok 4.5, Qwen3.8 Max and GLM-5.2 all on one key" },
+      "web_access":       { "s": 1, "p": "documented", "why": "nothing bundled; the harness must supply retrieval" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "1.05M context, 943K max output via Kimi K3" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "Anthropic- and OpenAI-compatible; built by the OpenCode team and documented for Claude Code, Cline, Roo, Kilo and Cherry Studio" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "routed to whichever upstream serves the model; no first-party speed guarantee" },
+      "reliability":      { "s": 4, "p": "documented", "why": "young plan, but overflow falls back to a Zen balance instead of hard-failing" },
+      "privacy":          { "s": 4, "p": "documented", "why": "0-day retention on most models, no training; Grok 4.5 and GPT 5.6 Luna retain 30 days" }
+    },
+
+    "zai-glm-coding": {
+      "tier": "A",
+      "quota_value":      { "s": 4, "p": "derived",    "why": "10,000 credits/week for $18; Pro is 6x that for 4.4x the price and Max 14x for 9.3x, so the multiple improves as you climb" },
+      "quota_ceiling":    { "s": 4, "p": "documented", "why": "140,000 credits/week at Max sustains continuous agent work" },
+      "price_floor":      { "s": 4, "p": "documented", "why": "$18/mo, $12.60 on annual billing" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; refusals are the model's own and concentrated on Chinese political topics, which never intersects coding or ordinary scraping" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "GLM-5.3 scores 60 on Artificial Analysis and ranks first among open-source models on Terminal-Bench 3.0" },
+      "web_access":       { "s": 5, "p": "documented", "why": "web search, page reading and repo access ship as MCP tools at no extra cost on every tier — unique in this survey" },
+      "context_limits":   { "s": 4, "p": "documented", "why": "1M context, 131K max output" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "native Anthropic endpoint at api.z.ai/api/anthropic; documented for Claude Code, OpenCode, Cline, Roo, Kilo and ZCode" },
+      "throughput":       { "s": 4, "p": "documented", "why": "86 output tokens/sec on GLM-5.3, fastest of the frontier-class open models" },
+      "reliability":      { "s": 3, "p": "judged",     "why": "100% observed uptime on the first-party endpoint, but the plan has been repriced repeatedly ($7 to $10 to $18) and users reported slowdowns after the GLM-4.7 launch" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction; prompts processed in China" }
+    },
+
+    "chutes": {
+      "tier": "A",
+      "quota_value":      { "s": 4, "p": "documented", "why": "explicit 5x-of-PAYG cap, stated by the vendor" },
+      "quota_ceiling":    { "s": 3, "p": "derived",    "why": "$100/month of value at the $20 Pro tier, with undisclosed shorter rolling sub-windows" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "$10/mo Plus" },
+      "guardrail_freedom":{ "s": 5, "p": "judged",     "why": "no provider classifier and no policy layer; decentralised operators serve raw open weights" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "serves Kimi K3 at list price" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 4, "p": "documented", "why": "1.05M context but max output capped at 65K against Moonshot's 943K" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible only; no Anthropic endpoint" },
+      "throughput":       { "s": 2, "p": "judged",     "why": "hands-on reports describe sessions getting stuck and needing manual intervention; K3 served at mxfp4" },
+      "reliability":      { "s": 2, "p": "documented", "why": "abandoned its request-count subscription model in February 2026 with a month's notice; stall reports are common" },
+      "privacy":          { "s": 3, "p": "judged",     "why": "distributed operators, no central retention guarantee; TAO payment allows pseudonymity" }
+    },
+
+    "synthetic-new": {
+      "tier": "A",
+      "quota_value":      { "s": 3, "p": "derived",    "why": "500 messages/5h for $30 is generous per message but the vendor publishes no dollar equivalent" },
+      "quota_ceiling":    { "s": 4, "p": "documented", "why": "500 messages per 5h is ~2,400/day, and cheap tool calls are metered at 0.1 credit so the effective count is higher" },
+      "price_floor":      { "s": 3, "p": "documented", "why": "$30/mo, raised from $20 during 2026" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; 16 always-on open weights carry only their own training" },
+      "coding_power":     { "s": 4, "p": "documented", "why": "Kimi K3, GLM, Qwen and DeepSeek in the bundle" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 3, "p": "documented", "why": "262K context" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "native Anthropic API compatibility, marketed as a drop-in for Claude Code" },
+      "throughput":       { "s": 4, "p": "judged",     "why": "measured about three times faster than Chutes on Kimi in hands-on comparison, though inconsistently" },
+      "reliability":      { "s": 4, "p": "judged",     "why": "1 concurrent request per model is a real constraint but the service is stable; it did remove its $60 tier" },
+      "privacy":          { "s": 4, "p": "documented", "why": "US jurisdiction, no training" }
+    },
+
+    "cerebras-code": {
+      "tier": "A",
+      "quota_value":      { "s": 5, "p": "derived",    "why": "24M tokens/day for $50 is ~720M tokens/month; at Qwen3-Coder commodity rates that is several hundred dollars of value" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "120M tokens/day at $200 is the largest published ceiling in the survey and the only one quoted in tokens" },
+      "price_floor":      { "s": 2, "p": "documented", "why": "$50 entry, the second highest floor among tier A" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; Qwen3-Coder's own refusal behaviour only" },
+      "coding_power":     { "s": 3, "p": "judged",     "why": "Qwen3-Coder is a capable coding model but a clear tier below GLM-5.3, K3 and Opus 5" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 2, "p": "documented", "why": "131K context and 32K max output — the binding weakness, and the reason a token quota this large is still spendable" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible only" },
+      "throughput":       { "s": 5, "p": "documented", "why": "up to ~2,000 tokens/sec, roughly 20x typical GPU inference" },
+      "reliability":      { "s": 3, "p": "documented", "why": "has previously paused Code Pro and Max signups when the Qwen Coder endpoint ran at ~100% utilisation" },
+      "privacy":          { "s": 4, "p": "judged",     "why": "US jurisdiction, no training" }
+    },
+
+    "minimax-token-plan": {
+      "tier": "A",
+      "quota_value":      { "s": 5, "p": "derived",    "why": "15,000 requests per 5h for $50 is the highest request-per-dollar figure in the survey" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "30,000 requests per 5h on the $150 Ultra-Highspeed tier" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "$10/mo Starter, $100/year" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; Chinese political filtering only" },
+      "coding_power":     { "s": 3, "p": "documented", "why": "M3 scores 45.4 intelligence and 58.6 coding on Artificial Analysis — solidly mid-tier, which is why the request ceiling can be so high" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "1M context, 512K max output" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "native Anthropic endpoint at api.minimax.io/anthropic" },
+      "throughput":       { "s": 4, "p": "documented", "why": "dedicated high-speed tiers at $80 and $150" },
+      "reliability":      { "s": 3, "p": "documented", "why": "99.5% observed uptime on the first-party endpoint; M3's headline rate is a promotional 50%-off price that could revert" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction" }
+    },
+
+    "kimi-code": {
+      "tier": "A",
+      "quota_value":      { "s": 3, "p": "judged",     "why": "quota is published as agent credits and concurrency rather than tokens or dollars, so the multiple cannot be computed before buying" },
+      "quota_ceiling":    { "s": 3, "p": "documented", "why": "Moderato allows only 2 concurrent tasks; higher tiers lift Kimi Code credits 5x but the 5h window still binds" },
+      "price_floor":      { "s": 3, "p": "documented", "why": "$19/mo Moderato is the cheapest tier that unlocks K3" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; Chinese political filtering only" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "K3 is a 2.8T-parameter MoE scoring 60 on Artificial Analysis, tied at the top of the open-weight field" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none bundled" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "1.05M context and 943K max output, the largest output ceiling in the survey" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "native Anthropic endpoint at api.moonshot.ai/anthropic" },
+      "throughput":       { "s": 2, "p": "documented", "why": "39 output tokens/sec on Artificial Analysis, the slowest of the frontier-class models measured" },
+      "reliability":      { "s": 3, "p": "documented", "why": "97.4% observed uptime on Moonshot's own endpoint; third-party K3 hosts range from 83.9% to 100%" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction" }
+    },
+
+    "nous-portal": {
+      "tier": "A",
+      "quota_value":      { "s": 1, "p": "documented", "why": "$20 buys $22 of credits — a 1.1x multiple. You are buying the tool gateway, not discounted tokens" },
+      "quota_ceiling":    { "s": 2, "p": "documented", "why": "$110/month of credits at the $100 Super tier, with a $50 rollover cap" },
+      "price_floor":      { "s": 4, "p": "documented", "why": "$20/mo Plus" },
+      "guardrail_freedom":{ "s": 5, "p": "documented", "why": "the only vendor whose flagship is deliberately trained for steerability, low refusal and neutral user-directed behaviour, rather than merely lacking a filter" },
+      "coding_power":     { "s": 3, "p": "judged",     "why": "Hermes 4 405B is a Llama-3.1-derived reasoning model well below the current coding frontier; the 248 routed models cover the gap but at their own rates" },
+      "web_access":       { "s": 5, "p": "documented", "why": "managed tool gateway with search, browser automation, code sandboxes, image, video and speech — the only first-party browser automation in the survey" },
+      "context_limits":   { "s": 2, "p": "documented", "why": "131K context on Hermes 4" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible; no Anthropic endpoint" },
+      "throughput":       { "s": 3, "p": "documented", "why": "180 RPM / 720K TPM on unsubscribed keys, higher on plans" },
+      "reliability":      { "s": 3, "p": "judged",     "why": "Portal launched 2026-04-27; short track record" },
+      "privacy":          { "s": 4, "p": "judged",     "why": "US jurisdiction, no training" }
+    },
+
+    "venice": {
+      "tier": "A",
+      "quota_value":      { "s": 2, "p": "documented", "why": "Pro at $18 includes only 100 credits ($1) of API usage; the unlimited claim covers the chat app, not the API" },
+      "quota_ceiling":    { "s": 2, "p": "documented", "why": "22,500 credits ($225) per month at the $200 Max tier" },
+      "price_floor":      { "s": 4, "p": "documented", "why": "$18/mo Pro" },
+      "guardrail_freedom":{ "s": 5, "p": "documented", "why": "genuinely uncensored first-party weights (Venice Uncensored 1.2, Gemma 4 Uncensored, Qwen 3.6 Plus Uncensored) with no provider classifier" },
+      "coding_power":     { "s": 3, "p": "documented", "why": "passes through DeepSeek V4 Pro and Claude Sonnet 5, but caps max output at 32K, which hurts long agent turns" },
+      "web_access":       { "s": 4, "p": "documented", "why": "web search at $10/1K requests and URL scraping at $10/1K URLs, auto-detecting up to 5 per request — first-class but separately metered" },
+      "context_limits":   { "s": 3, "p": "documented", "why": "1M context on some models but 32K max output" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible only" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "no published speed figures" },
+      "reliability":      { "s": 4, "p": "documented", "why": "99.5-99.9% observed uptime as an OpenRouter upstream" },
+      "privacy":          { "s": 5, "p": "documented", "why": "local-only conversation storage, zero retention in private mode, hardware-attested TEE and end-to-end encryption options — the strongest privacy posture in the survey" }
+    },
+
+    "stepfun-step-plan": {
+      "tier": "A",
+      "quota_value":      { "s": 4, "p": "derived",    "why": "1,500 prompts per 5h for $29 works out well against Step-3.5-Flash's $0.10/$0.30 rates" },
+      "quota_ceiling":    { "s": 3, "p": "documented", "why": "5,000 prompts per 5h (~75,000 calls) at the $99 Flash Max tier" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "$6.99/mo, the cheapest real entry point in the survey" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; Chinese political filtering only" },
+      "coding_power":     { "s": 2, "p": "judged",     "why": "Step-3.7-Flash is well below the coding frontier and barely evaluated outside China" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 3, "p": "documented", "why": "262K context, 230K max output" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible; a separate base URL cleanly separates plan traffic from PAYG" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "no published figures" },
+      "reliability":      { "s": 2, "p": "judged",     "why": "thin documentation and little third-party operational history" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction" }
+    },
+
+    "xiaomi-mimo-plan": {
+      "tier": "A",
+      "quota_value":      { "s": 4, "p": "derived",    "why": "1.6B credits for ~$100 against MiMo-V2.5 rates of $0.14/$0.28 is a strong multiple" },
+      "quota_ceiling":    { "s": 4, "p": "documented", "why": "~3,200 estimated tasks per month at the ~$100 Max tier" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "~$6/mo Lite" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; Chinese political filtering only" },
+      "coding_power":     { "s": 3, "p": "judged",     "why": "MiMo-V2.5-Pro is competent and cheap but not a frontier coder" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "1.05M context with a $0.003 cache read, the cheapest million-token context anywhere" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible at api.xiaomimimo.com" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "no published figures" },
+      "reliability":      { "s": 2, "p": "judged",     "why": "newest plan in the set, little operational history" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction" }
+    },
+
+    "alibaba-coding-plan": {
+      "tier": "A",
+      "quota_value":      { "s": 3, "p": "judged",     "why": "CNY 200/month flat, but the credit-to-token conversion is not published in a form you can check beforehand" },
+      "quota_ceiling":    { "s": 4, "p": "documented", "why": "earlier tiers quoted up to 12,000 credits per 5h; Model Studio Pro was documented at 6,000 requests per 5h" },
+      "price_floor":      { "s": 3, "p": "documented", "why": "~$28/month; the Lite tier closed to new signups on 2026-03-20" },
+      "guardrail_freedom":{ "s": 3, "p": "judged",     "why": "no request classifier, but a cloud provider's acceptable-use enforcement sits above the model" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "Qwen3.8-Max scores 58.1 on Artificial Analysis, and the plan also resells GLM, Kimi and MiniMax on one meter" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none bundled" },
+      "context_limits":   { "s": 4, "p": "documented", "why": "1M context, 131K max output" },
+      "harness_fit":      { "s": 4, "p": "documented", "why": "Anthropic-compatible endpoint at dashscope-intl.aliyuncs.com/apps/anthropic" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "no published figures; 100% observed uptime as an OpenRouter upstream" },
+      "reliability":      { "s": 3, "p": "documented", "why": "killed the Qwen Code CLI's 2,000-requests/day free tier and the OAuth free tier in April 2026, and closed Lite to new signups in March" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction, though an international endpoint exists" }
+    },
+
+    "llmgateway-devpass": {
+      "tier": "A",
+      "quota_value":      { "s": 3, "p": "documented", "why": "$29 returns roughly $87 and $179 roughly $537 of provider-rate value — about 3x" },
+      "quota_ceiling":    { "s": 4, "p": "documented", "why": "$537/month of value at the top tier" },
+      "price_floor":      { "s": 2, "p": "documented", "why": "$29/mo entry" },
+      "guardrail_freedom":{ "s": 1, "p": "judged",     "why": "a gateway cannot loosen an upstream's filters; buying Claude or GPT here buys their refusal behaviour intact" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "Claude Opus 5, GPT-5.6 and Gemini 3.1 Pro alongside the open-weight coders" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none bundled" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "up to 1.05M context via the frontier models" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "documented for Claude Code, Cursor, Cline, OpenCode and Zed" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "upstream-dependent" },
+      "reliability":      { "s": 3, "p": "judged",     "why": "a single point of failure in front of every provider it resells" },
+      "privacy":          { "s": 3, "p": "judged",     "why": "gateway logging plus each upstream's own terms" }
+    },
+
+    "cohere-command-code": {
+      "tier": "A",
+      "quota_value":      { "s": 2, "p": "judged",     "why": "credit-based with no published conversion" },
+      "quota_ceiling":    { "s": 2, "p": "judged",     "why": "$100 Max tier, entitlement unpublished" },
+      "price_floor":      { "s": 4, "p": "documented", "why": "$15/mo Pro" },
+      "guardrail_freedom":{ "s": 1, "p": "judged",     "why": "enterprise-first vendor that sells governance as the product — the opposite of the requirement" },
+      "coding_power":     { "s": 3, "p": "judged",     "why": "taste-1 plus Claude and GPT passthrough" },
+      "web_access":       { "s": 3, "p": "documented", "why": "native RAG connectors" },
+      "context_limits":   { "s": 3, "p": "documented", "why": "256K context" },
+      "harness_fit":      { "s": 3, "p": "judged",     "why": "OpenAI-compatible" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "no published figures" },
+      "reliability":      { "s": 3, "p": "judged",     "why": "established vendor, new product" },
+      "privacy":          { "s": 4, "p": "documented", "why": "enterprise zero-retention available; Canadian jurisdiction" }
+    },
+
+    "factory-droid": {
+      "tier": "A",
+      "quota_value":      { "s": 2, "p": "judged",     "why": "token allowances published per tier but not as a value multiple" },
+      "quota_ceiling":    { "s": 3, "p": "judged",     "why": "$200 top tier" },
+      "price_floor":      { "s": 4, "p": "documented", "why": "$20/mo" },
+      "guardrail_freedom":{ "s": 1, "p": "judged",     "why": "resells frontier models and inherits their refusal behaviour exactly; a wrapper cannot be more permissive than what it wraps" },
+      "coding_power":     { "s": 5, "p": "judged",     "why": "routes Claude, GPT and Gemini" },
+      "web_access":       { "s": 4, "p": "judged",     "why": "retrieval built into the agent product" },
+      "context_limits":   { "s": 3, "p": "judged",     "why": "200K context" },
+      "harness_fit":      { "s": 3, "p": "judged",     "why": "OpenAI-compatible, but the product is the agent rather than the endpoint" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "upstream-dependent" },
+      "reliability":      { "s": 3, "p": "judged",     "why": "short track record" },
+      "privacy":          { "s": 3, "p": "judged",     "why": "enterprise controls; upstream terms flow through" }
+    },
+
+    "opencode-zen": {
+      "tier": "B",
+      "quota_value":      { "s": 1, "p": "documented", "why": "pay-as-you-go: you pay face value, no multiple" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "no ceiling; workspace and per-member caps are yours to set" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "no minimum; auto-reload defaults to $20 at a $5 balance" },
+      "guardrail_freedom":{ "s": 3, "p": "judged",     "why": "mixed catalogue — the Claude and GPT entries carry their vendors' layers, the open weights do not" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "Claude Opus 5, GPT-5.6 Sol and Kimi K3 among 50+ models" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "up to 1.05M context" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "Anthropic- and OpenAI-compatible; it is the OpenCode team's own gateway" },
+      "throughput":       { "s": 4, "p": "judged",     "why": "routed to first-party endpoints where available" },
+      "reliability":      { "s": 4, "p": "judged",     "why": "the designated overflow target for Go, so the two are operationally one system" },
+      "privacy":          { "s": 4, "p": "documented", "why": "mostly 0-day retention" }
+    },
+
+    "deepseek-api": {
+      "tier": "B",
+      "quota_value":      { "s": 1, "p": "documented", "why": "pay-as-you-go" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "2,500 concurrent requests on v4-flash, 500 on v4-pro — sold as concurrency, not tokens per minute" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "$0.22/$0.66 off-peak on v4-flash, with cache hits at $0.007" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; independent audits describe weakened safety protocols relative to US models, which is precisely the permissiveness being sought and also the risk" },
+      "coding_power":     { "s": 4, "p": "documented", "why": "V4 Pro scores 53.2 on Artificial Analysis" },
+      "web_access":       { "s": 0, "p": "documented", "why": "none" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "1M context, 384K max output on every model" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "native Anthropic endpoint at api.deepseek.com/anthropic" },
+      "throughput":       { "s": 4, "p": "judged",     "why": "concurrency-based limits suit bursty agent traffic" },
+      "reliability":      { "s": 4, "p": "judged",     "why": "widely resold; first-party endpoint stable" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction" }
+    },
+
+    "zai-api": {
+      "tier": "B",
+      "quota_value":      { "s": 1, "p": "documented", "why": "pay-as-you-go" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "no ceiling" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "GLM-5.3-Flash at $0.075/$0.25, and GLM-4.7-Flash and GLM-4.5-Flash are free" },
+      "guardrail_freedom":{ "s": 4, "p": "judged",     "why": "no provider classifier; Chinese political filtering only" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "GLM-5.3 at 60 intelligence, first among open-source models on Terminal-Bench 3.0" },
+      "web_access":       { "s": 5, "p": "documented", "why": "search and page-reading MCP tools" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "1.31M context on GLM-5.3-Flash, the largest in the survey" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "native Anthropic endpoint" },
+      "throughput":       { "s": 4, "p": "documented", "why": "86 output tokens/sec" },
+      "reliability":      { "s": 4, "p": "documented", "why": "100% observed uptime on the first-party endpoint" },
+      "privacy":          { "s": 2, "p": "judged",     "why": "Chinese jurisdiction" }
+    },
+
+    "xai-grok-api": {
+      "tier": "B",
+      "quota_value":      { "s": 1, "p": "documented", "why": "pay-as-you-go" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "no ceiling" },
+      "price_floor":      { "s": 3, "p": "documented", "why": "$2/$6 per million, with a 2x fast lane at $4/$12" },
+      "guardrail_freedom":{ "s": 5, "p": "documented", "why": "ranked first on modelgrep's unmoderated leaderboard and served with no provider moderation layer, at the highest intelligence score in the survey (60.9)" },
+      "coding_power":     { "s": 5, "p": "judged",     "why": "Grok 4.6 at 61 on Artificial Analysis at high reasoning effort" },
+      "web_access":       { "s": 4, "p": "documented", "why": "Live Search is a first-party tool" },
+      "context_limits":   { "s": 4, "p": "documented", "why": "500K context, 450K max output" },
+      "harness_fit":      { "s": 3, "p": "documented", "why": "OpenAI-compatible; no Anthropic endpoint" },
+      "throughput":       { "s": 4, "p": "documented", "why": "55-61 output tokens/sec" },
+      "reliability":      { "s": 4, "p": "documented", "why": "97.9-98.5% observed uptime; also available via Bedrock at a ~10% premium" },
+      "privacy":          { "s": 3, "p": "judged",     "why": "US jurisdiction; 30-day retention when routed through OpenCode Go" }
+    },
+
+    "openrouter": {
+      "tier": "B",
+      "quota_value":      { "s": 1, "p": "documented", "why": "pay-as-you-go with roughly a 5% credit fee" },
+      "quota_ceiling":    { "s": 5, "p": "documented", "why": "no ceiling; automatic failover across providers" },
+      "price_floor":      { "s": 5, "p": "documented", "why": "many genuinely free tool-capable models with 256K-1M context" },
+      "guardrail_freedom":{ "s": 4, "p": "documented", "why": "291 of 417 catalogued models are served unmoderated, and the API exposes `is_moderated` per endpoint so you can filter on it programmatically" },
+      "coding_power":     { "s": 5, "p": "documented", "why": "every frontier and open-weight coder in one catalogue" },
+      "web_access":       { "s": 2, "p": "documented", "why": "an optional web plugin, billed per use" },
+      "context_limits":   { "s": 5, "p": "documented", "why": "up to 2M context across the catalogue" },
+      "harness_fit":      { "s": 5, "p": "documented", "why": "Anthropic- and OpenAI-compatible, supported by every harness" },
+      "throughput":       { "s": 3, "p": "judged",     "why": "depends entirely on which upstream you land on, and quantisation varies fp4/fp8/bf16 for the same model name" },
+      "reliability":      { "s": 4, "p": "documented", "why": "publishes 30-day uptime per endpoint and fails over automatically" },
+      "privacy":          { "s": 3, "p": "documented", "why": "per-provider policies, filterable in routing preferences" }
+    }
+  }
+}
