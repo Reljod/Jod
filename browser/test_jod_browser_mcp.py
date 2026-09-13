@@ -63,9 +63,38 @@ class FakeSession:
             raise self.fail
         return path
 
+    def wait_for(self, selector: str) -> None:
+        self.calls.append(("wait_for", selector))
+
+    def egress(self) -> str:
+        self.calls.append(("egress",))
+        if self.fail:
+            raise self.fail
+        return self.text
+
     def close(self) -> None:
         self.calls.append(("close",))
         self.closed = True
+
+
+class ChangingSession(FakeSession):
+    """A page that renders in stages and then stops: what a JavaScript page does.
+
+    Reads come back differently each time until the page is done, which is the
+    whole reason the read path polls instead of sleeping.
+    """
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__(text=texts[-1])
+        self._texts = list(texts)
+        self.reads = 0
+
+    def content(self, as_html: bool) -> str:
+        self.reads += 1
+        self.calls.append(("content", as_html))
+        if self._texts:
+            return self._texts.pop(0)
+        return self.text
 
 
 def req(rid, method, params=None):
@@ -170,6 +199,73 @@ def test_browse_honours_an_explicit_wait_until():
     assert ("goto", "https://e.com", "networkidle") in s.calls
 
 
+def settle_window(poll_ms: int = 5, stable_ms: int = 30, max_ms: int = 500):
+    """Shorten the read window for the duration of a test, then restore it.
+
+    The real window is seconds long on purpose, which is the point of it, so a
+    test that exercised it honestly would make the suite slow for nothing.
+    """
+
+    class _Window:
+        def __enter__(self) -> None:
+            self.saved = (srv.SETTLE_POLL_MS, srv.SETTLE_STABLE_MS, srv.SETTLE_MAX_MS)
+            srv.SETTLE_POLL_MS = poll_ms
+            srv.SETTLE_STABLE_MS = stable_ms
+            srv.SETTLE_MAX_MS = max_ms
+
+        def __exit__(self, *exc: object) -> None:
+            srv.SETTLE_POLL_MS, srv.SETTLE_STABLE_MS, srv.SETTLE_MAX_MS = self.saved
+
+    return _Window()
+
+
+def test_browse_reads_real_content_after_a_pause_in_rendering():
+    """The regression this rule exists for, learned from the live page.
+
+    Facebook's own timeline pauses at 435 characters for half a second before
+    the posts arrive. Accepting the first pause as the end returned 536
+    characters of page chrome, so the text has to hold still for a window
+    before it counts as rendered.
+    """
+    s = ChangingSession(["chrome", "chrome", "chrome", "chrome",
+                         "real content", "real content"])
+    with settle_window():
+        body = text_of(call(s, "browse", {"url": "https://e.com"}))
+    assert "real content" in body
+
+
+def test_settle_waits_out_a_blank_shell_rather_than_returning_it():
+    """Two blank reads in a row are not a rendered page."""
+    s = ChangingSession(["", "", "content at last", "content at last"])
+    assert srv._settle(s, as_html=False, poll_ms=5, stable_ms=20, max_ms=500).strip()
+
+
+def test_settle_gives_up_at_the_cap_and_returns_what_it_has():
+    """A page that never stops changing must not hold the call open for ever."""
+
+    class NeverSettles(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def content(self, as_html: bool) -> str:
+            self.reads += 1
+            return f"read {self.reads}"
+
+    s = NeverSettles()
+    assert srv._settle(s, as_html=False, poll_ms=1, stable_ms=5,
+                       max_ms=25) == f"read {s.reads}"
+
+
+def test_browse_does_not_settle_when_html_was_asked_for():
+    """Markup keeps changing on pages that are perfectly readable."""
+    s = ChangingSession(["one", "two", "three"])
+    with settle_window():
+        body = text_of(call(s, "browse", {"url": "https://e.com", "html": True}))
+    assert "one" in body
+    assert s.reads == 1
+
+
 def test_a_missing_url_is_a_tool_error_the_agent_can_read():
     """Not a JSON-RPC error: the call was well-formed, the argument was not,
     and an agent can fix that itself if it is told."""
@@ -257,6 +353,19 @@ def test_status_says_so_when_egress_cannot_be_checked():
     body = text_of(call(s, "browser_status"))
     assert "could not be checked" in body
     assert "connection refused" in body
+
+
+def test_status_never_opens_or_navigates_a_page():
+    """The check that this fix exists for.
+
+    The old status probe opened a page of its own, and a context with a second
+    page in it stopped completing navigations to a heavy site: measured at
+    90.02 s per navigation, the full timeout, for the rest of the session. So
+    the honest assertion is that status touches no page at all."""
+    s = FakeSession(text='{"ip":"1.2.3.4"}')
+    body = text_of(call(s, "browser_status"))
+    assert "1.2.3.4" in body
+    assert s.calls == [("egress",)], "status must not touch a page"
 
 
 # ---- failure handling -----------------------------------------------------
