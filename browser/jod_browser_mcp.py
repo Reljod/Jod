@@ -26,6 +26,18 @@ is tested from values, and the part that needs a 150MB browser download is a
 thin adapter. `test_jod_browser_mcp.py` substitutes a fake `Session` and tests
 the entire tool surface without launching anything.
 
+## One page, and why
+
+The session owns exactly one page and never creates a second one. That is not
+tidiness, it is the fix for a wedge that made the resident browser useless.
+Measured on 2026-09-13: once a Camoufox context has created a third page, a
+navigation to a heavy site (Facebook) stops completing on **every** page, with
+route interception installed or not, and closing pages afterwards does not heal
+it. `browser_status` used to open a page of its own to read the egress IP, so
+the first status call poisoned every navigation after it: measured at 90.02 s
+per navigation, the full timeout, against 2 to 4 s warm. Status now asks the
+proxy directly and opens nothing.
+
 ## Configuration
 
 Environment-only, read from `~/.jod/browser.env` — see `jodbrowser.py`, whose
@@ -35,6 +47,7 @@ loader this reuses rather than duplicating:
     JOD_PROXY_USERNAME
     JOD_PROXY_PASSWORD
     JOD_PROXY_GEOIP     1 by default; 0 disables
+    JOD_PERSIST_PROFILE 1 by default; 0 = throwaway profile per launch
 
 Credentials are never passed on the command line, because argv is world-
 readable through /proc on a shared box.
@@ -53,12 +66,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import traceback
+import urllib.request
 from typing import Any, Callable, Protocol
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from jodbrowser import browser_options, describe  # noqa: E402
+from jodbrowser import (  # noqa: E402
+    browser_options,
+    describe,
+    install_blockers,
+    proxy_config,
+)
 
 # Matches the Rust server's own negotiation, so both of Jod's MCP servers agree
 # with the same clients. See `core/src/mcp.rs`.
@@ -84,10 +104,29 @@ MAX_TEXT_CHARS = 40_000
 
 # How long a navigation may take before it is an error.
 #
-# Generous, because the whole point of the proxy is that traffic takes a detour
-# through somebody else's ISP, and a residential exit is slower than the VPS's
-# own link by a wide margin.
-NAV_TIMEOUT_MS = 90_000
+# Measured on this box, 2026-09-13: a warm navigation to a heavy page
+# (Facebook's own timeline) lands in 2.0 to 3.9 s, and the first navigation of a
+# session, which includes the Firefox launch, in 6.8 s. The proxy is a detour
+# through somebody else's ISP, so the ceiling stays loose, but it no longer has
+# to absorb the 90 s that a wedged page used to burn.
+NAV_TIMEOUT_MS = 45_000
+
+# How the read path decides a page has rendered.
+#
+# Measured on this box, 2026-09-13, Facebook's own timeline after
+# domcontentloaded: 435 chars at 3.9 s, then 1715 at 4.5 s, 1806 at 5.6 s,
+# 3138 at 6.7 s, settling at 2950 from 7.2 s. The renders pause for up to
+# 1.1 s in the middle, so "two reads in a row agree" accepts a half-rendered
+# page: that rule returned 536 chars against this one's 2950. Waiting for a
+# quiet window of 1200 ms catches the real content and costs a floor of about
+# 1.2 s on any page, which is the price of not handing an agent an empty shell.
+SETTLE_POLL_MS = 150
+SETTLE_STABLE_MS = 1200
+SETTLE_MAX_MS = 12_000
+
+# Where the egress check asks what the world sees, and how long it waits.
+EGRESS_URL = "https://api.ipify.org?format=json"
+EGRESS_TIMEOUT_S = 20
 
 
 class Session(Protocol):
@@ -100,6 +139,13 @@ class Session(Protocol):
 
     def goto(self, url: str, wait_until: str) -> str:
         """Navigate, and return the landed URL (which redirects may change)."""
+        ...
+
+    def wait_for(self, selector: str) -> None:
+        """Wait until a CSS selector matches, for SPA content that arrives
+        after load. Kept separate from `goto` so sessions that predate it
+        keep working: callers only invoke it when the agent asked to wait."""
+        ...
 
     def content(self, as_html: bool) -> str:
         """The current page, as innerText or as markup."""
@@ -109,6 +155,13 @@ class Session(Protocol):
 
     def screenshot(self, path: str, full_page: bool) -> str:
         """Save a PNG and return the path it was written to."""
+
+    def egress(self) -> str:
+        """What the world sees as this session's address.
+
+        Answered without a page, because opening one to ask is what used to
+        wedge the session's own navigations."""
+        ...
 
     def close(self) -> None:
         """Release the browser, if one was ever started."""
@@ -127,11 +180,26 @@ class CamoufoxSession:
     def __init__(self) -> None:
         self._browser = None
         self._page = None
+        self._popups = []
         self._camoufox = None
 
     def _ensure(self):
+        """The session's one page, created once and then reused for ever.
+
+        A second page is not a harmless extra here. Measured on 2026-09-13: a
+        context that has created a third page stops completing navigations to a
+        heavy site on every page, whether or not route interception is running,
+        and closing pages afterwards does not heal it. So this reuses the page
+        the context opens with (the browser always opens one) and creates
+        nothing else. Popups that a site opens are tracked for reading and
+        typing, never for navigation.
+        """
         if self._page is not None:
-            return self._page
+            try:
+                if not self._page.is_closed():
+                    return self._page
+            except Exception:  # noqa: BLE001 — a dead handle reads as closed
+                pass
         # Imported here rather than at module scope so that `--selftest`, and
         # the tests, work on a box where camoufox was never installed. An
         # import error at the top would make the whole server unloadable.
@@ -139,16 +207,48 @@ class CamoufoxSession:
 
         self._camoufox = Camoufox(**browser_options())
         self._browser = self._camoufox.__enter__()
-        self._page = self._browser.new_page()
+        opened = list(getattr(self._browser, "pages", []) or [])
+        self._page = opened[0] if opened else self._browser.new_page()
+        install_blockers(self._page)
+        if hasattr(self._browser, "on"):
+            self._browser.on("page", self._track)
         return self._page
+
+    def _track(self, p) -> None:
+        """Record a page the site opened, so a login popup can be read."""
+        if p is self._page or p in self._popups:
+            return
+        install_blockers(p)
+        self._popups.append(p)
+
+    def _live_popup(self):
+        for p in reversed(self._popups):
+            try:
+                if not p.is_closed():
+                    return p
+            except Exception:  # noqa: BLE001 — a dead handle reads as closed
+                continue
+        return None
+
+    def _viewing_target(self):
+        """Where a read, a click or a screenshot goes: popup first, then page.
+
+        A login wall (Shopee to Google) opens its sign-in in a popup, and the
+        agent has to read and type into that popup even though the main tab
+        initiated it. Navigation is the one thing that stays on the main page.
+        """
+        return self._live_popup() or self._ensure()
 
     def goto(self, url: str, wait_until: str) -> str:
         page = self._ensure()
         page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until=wait_until)
         return page.url
 
+    def wait_for(self, selector: str) -> None:
+        self._ensure().wait_for_selector(selector, timeout=NAV_TIMEOUT_MS)
+
     def content(self, as_html: bool) -> str:
-        page = self._ensure()
+        page = self._viewing_target()
         if as_html:
             return page.content()
         # innerText rather than the DOM: an agent reading this pays for every
@@ -156,7 +256,7 @@ class CamoufoxSession:
         return page.evaluate("document.body.innerText")
 
     def act(self, action: str, selector: str, text: str | None) -> str:
-        page = self._ensure()
+        page = self._viewing_target()
         if action == "click":
             page.click(selector, timeout=NAV_TIMEOUT_MS)
             return f"clicked {selector}"
@@ -164,9 +264,33 @@ class CamoufoxSession:
         return f"typed into {selector}"
 
     def screenshot(self, path: str, full_page: bool) -> str:
-        page = self._ensure()
+        page = self._viewing_target()
         page.screenshot(path=path, full_page=full_page)
         return path
+
+    def egress(self) -> str:
+        """The address the world sees, asked of the proxy rather than a page.
+
+        A direct request through the same proxy the browser uses proves that
+        traffic leaves through it and reports the address it presents, which is
+        the question this answers. It costs about half a second and, unlike the
+        page it replaced, it cannot wedge the session. Credentials come from the
+        environment file and are never printed.
+        """
+        proxy = proxy_config()
+        if proxy:
+            server = proxy["server"].split("://", 1)[-1]
+            who = ""
+            if proxy.get("username"):
+                who = f"{proxy['username']}:{proxy.get('password', '')}@"
+            handler = urllib.request.ProxyHandler(
+                {"http": f"http://{who}{server}", "https": f"http://{who}{server}"}
+            )
+        else:
+            handler = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(handler)
+        with opener.open(EGRESS_URL, timeout=EGRESS_TIMEOUT_S) as answer:
+            return answer.read().decode("utf-8", "replace").strip()
 
     def close(self) -> None:
         if self._camoufox is None:
@@ -176,6 +300,7 @@ class CamoufoxSession:
         finally:
             self._browser = None
             self._page = None
+            self._popups = []
             self._camoufox = None
 
 
@@ -211,12 +336,55 @@ class ToolError(Exception):
     """
 
 
+def _maybe_wait(session: Session, args: dict) -> None:
+    wait = args.get("wait")
+    if isinstance(wait, str) and wait.strip():
+        session.wait_for(wait.strip())
+
+
+def _settle(session: Session, as_html: bool, poll_ms: int | None = None,
+            stable_ms: int | None = None, max_ms: int | None = None) -> str:
+    """Read the page once its text has been quiet for a while.
+
+    The alternative, which an agent did by hand, is to sleep for a number nobody
+    can know in advance: too short and the read comes back as page chrome, too
+    long and every call pays it. Two reads agreeing is not enough either, which
+    this learned the hard way: a page renders in stages with pauses of a second
+    or more between them, and the first pause looks exactly like the end. So the
+    text has to hold still for `stable_ms`. HTML is returned immediately,
+    because markup keeps changing on pages that are perfectly readable.
+
+    Defaults come from the module constants so a test can shorten the wait.
+    """
+    poll = SETTLE_POLL_MS if poll_ms is None else poll_ms
+    stable = SETTLE_STABLE_MS if stable_ms is None else stable_ms
+    cap = SETTLE_MAX_MS if max_ms is None else max_ms
+
+    if as_html:
+        return session.content(True)
+    text = session.content(False)
+    last_change = time.monotonic()
+    deadline = last_change + cap / 1000
+    while time.monotonic() < deadline:
+        time.sleep(poll / 1000)
+        again = session.content(False)
+        now = time.monotonic()
+        if again != text:
+            text = again
+            last_change = now
+            continue
+        if text.strip() and (now - last_change) * 1000 >= stable:
+            return text
+    return text
+
+
 def tool_browse(session: Session, args: dict) -> str:
-    """Fetch one URL and read it. The overwhelmingly common case."""
+    """Fetch one URL, wait for it to settle, and read it. The common case."""
     url = _require(args, "url")
     as_html = bool(args.get("html", False))
     landed = session.goto(url, args.get("wait_until") or "domcontentloaded")
-    body = _clip(session.content(as_html))
+    _maybe_wait(session, args)
+    body = _clip(_settle(session, as_html))
     header = f"[jod] {landed} via {describe()}"
     return f"{header}\n\n{body}"
 
@@ -225,6 +393,7 @@ def tool_open(session: Session, args: dict) -> str:
     """Navigate the resident page without reading it."""
     url = _require(args, "url")
     landed = session.goto(url, args.get("wait_until") or "domcontentloaded")
+    _maybe_wait(session, args)
     return f"at {landed}"
 
 
@@ -258,14 +427,16 @@ def tool_close(session: Session, args: dict) -> str:
 def tool_status(session: Session, args: dict) -> str:
     """Which IP the world sees, which is the only honest way to check a proxy.
 
-    Reads it through the browser rather than asking the proxy what it claims,
-    because "the proxy is configured" and "traffic is leaving through it" are
-    different facts and only the second one matters.
+    Asked over a plain request through the configured proxy, not through a
+    browser page. "The proxy is configured" and "traffic is leaving through it"
+    are different facts and only the second one matters, but the page that used
+    to answer this question cost every later navigation in the session
+    (measured: 90.02 s each, the full timeout). This costs about half a second
+    and leaves the agent's page exactly where it was.
     """
     config = describe()
     try:
-        session.goto("https://api.ipify.org?format=json", "domcontentloaded")
-        seen = session.content(False).strip()
+        seen = session.egress().strip()
     except Exception as e:  # noqa: BLE001 — reported, never raised
         return f"proxy: {config}\negress: could not be checked ({e})"
     return f"proxy: {config}\negress: {seen}"
@@ -278,7 +449,9 @@ TOOLS: list[dict[str, Any]] = [
             "Fetch a web page through Jod's stealth browser and return its text. "
             "Use this for ANY web page. It is a real Firefox with patched "
             "fingerprints egressing through a residential proxy, so it reaches "
-            "pages that a plain HTTP fetch is blocked from."
+            "pages that a plain HTTP fetch is blocked from. It waits for the "
+            "page's text to stop changing before reading, so a JavaScript page "
+            "comes back with its content instead of an empty shell."
         ),
         "handler": tool_browse,
         "schema": {
@@ -295,6 +468,12 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": ["domcontentloaded", "load", "networkidle"],
                     "description": "How long to wait before reading. Use "
                     "networkidle for pages that render themselves in JS.",
+                },
+                "wait": {
+                    "type": "string",
+                    "description": "CSS selector to wait for before reading "
+                    "(e.g. a product card on Shopee). Essential for SPAs where "
+                    "domcontentloaded fires before the content exists.",
                 },
             },
             "required": ["url"],
@@ -315,6 +494,10 @@ TOOLS: list[dict[str, Any]] = [
                 "wait_until": {
                     "type": "string",
                     "enum": ["domcontentloaded", "load", "networkidle"],
+                },
+                "wait": {
+                    "type": "string",
+                    "description": "CSS selector to wait for after navigating.",
                 },
             },
             "required": ["url"],

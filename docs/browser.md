@@ -57,8 +57,8 @@ those tools over any built-in fetch. Nothing has to be asked for or remembered.
 
 | Tool | For |
 |---|---|
-| `browse` | fetch one page and read it — the 90% case |
-| `browser_open` / `browser_read` | navigate, then read after it settles |
+| `browse` | fetch one page, wait for it to render, read it — the 90% case |
+| `browser_open` / `browser_read` | navigate without reading, then read the page as it is now |
 | `browser_click` / `browser_type` | drive a page; cookies persist between calls |
 | `browser_screenshot` | save a PNG |
 | `browser_status` | which proxy, and which IP the world actually sees |
@@ -73,6 +73,46 @@ The server is resident: one Firefox launch serves many pages, started lazily on
 first use so runs that never browse pay nothing. It speaks line-delimited
 JSON-RPC on stdio and depends on nothing but camoufox — the protocol is
 hand-rolled, as it is on the Rust side.
+
+**It owns exactly one page, and that is a fix, not tidiness.** Once a Camoufox
+context had created a third page, navigations to a heavy site stopped completing
+on every page — route interception or not, and closing pages did not heal it.
+`browser_status` used to open a page of its own to read the egress address, so
+the first status call poisoned every browse after it: measured at **90.02 s** per
+navigation, the full timeout, against **2 to 4 s** warm. Status now asks the
+proxy directly and opens nothing, the session reuses the page the context opens
+with, and popups a site opens are tracked for reading and typing only.
+
+**Reads wait for the page instead of guessing.** `browse` polls the text until it
+has held still for 1200 ms, then returns it. The obvious cheaper rule, "two reads
+in a row agree", was measured and rejected: Facebook's own timeline pauses at 435
+characters for half a second before the posts arrive, and that rule returned 536
+characters of page chrome where the quiet window returns 2950. The cost is a
+floor of about 1.2 s per read; the alternative is an agent sleeping for a number
+it cannot know and often reading a shell.
+
+Measured on this box on 2026-09-13, against a Facebook profile as the heavy case:
+
+| Path | Before | After |
+|---|---:|---:|
+| Navigation, browser already warm | 8.33 s (one process per page) | **2.0 to 2.8 s** |
+| Any browse after `browser_status` | **90.02 s**, then every later one too | **1.94 s** |
+| `browser_status` itself | 4.36 s, plus the wedge | **0.70 s** |
+| Read a JS page's real content | 8.33 s + a guessed 6 to 14 s sleep, often chrome | 7 to 11 s, self-timed, verified 1825 to 2944 chars |
+| Re-read an already-rendered page | new browser, so the above again | **0.01 s** |
+
+Reproduce any row with `browser/bench_browse.py`:
+
+```sh
+~/.jod/browser-venv/bin/python browser/bench_browse.py cold <url>            # one process, one page
+~/.jod/browser-venv/bin/python browser/bench_browse.py warm <url> 3          # resident: launch, then 3 navigations
+~/.jod/browser-venv/bin/python browser/bench_browse.py status-first <url> 3  # the wedge repro
+~/.jod/browser-venv/bin/python browser/bench_browse.py read <url> 3          # browse, then re-reads
+```
+
+`NAV_TIMEOUT_MS` came down from 90 s to 45 s on the same evidence: a warm
+navigation is 2 to 4 s and a cold one 6.8 s, so the old ceiling only bought a
+wedged page 45 more seconds of an agent's run.
 
 ### Setup and the one-shot script
 
@@ -119,13 +159,21 @@ The `org` field should no longer name a hosting company.
 ### Proving it
 
 A configured proxy and a *working* proxy are different facts, and only the
-second is worth anything. `browser_status` answers the second by reading the IP
-back through the browser rather than asking the proxy what it claims:
+second is worth anything. `browser_status` answers the second by making a
+request through the same proxy the browser uses and reporting the address that
+comes back:
 
 ```
 proxy: http://<host>:<port> as <user>
 egress: {"ip":"<the address the world sees>"}
 ```
+
+It used to do that from inside a browser page instead, on the argument that only
+the browser's own egress proved anything. That page was the wedge described
+above: the first status call made every later navigation in the session hang for
+the full timeout. A request through the configured proxy answers the question
+that matters — is traffic leaving through it, and as what — without touching the
+agent's page.
 
 This is not a formality. The first live run of it reported `direct` while
 traffic was in fact going through the proxy: `describe()` read the environment
