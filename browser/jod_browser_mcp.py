@@ -35,6 +35,7 @@ loader this reuses rather than duplicating:
     JOD_PROXY_USERNAME
     JOD_PROXY_PASSWORD
     JOD_PROXY_GEOIP     1 by default; 0 disables
+    JOD_PERSIST_PROFILE 1 by default; 0 = throwaway profile per launch
 
 Credentials are never passed on the command line, because argv is world-
 readable through /proc on a shared box.
@@ -58,7 +59,7 @@ from typing import Any, Callable, Protocol
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from jodbrowser import browser_options, describe  # noqa: E402
+from jodbrowser import browser_options, describe, install_blockers  # noqa: E402
 
 # Matches the Rust server's own negotiation, so both of Jod's MCP servers agree
 # with the same clients. See `core/src/mcp.rs`.
@@ -100,6 +101,13 @@ class Session(Protocol):
 
     def goto(self, url: str, wait_until: str) -> str:
         """Navigate, and return the landed URL (which redirects may change)."""
+        ...
+
+    def wait_for(self, selector: str) -> None:
+        """Wait until a CSS selector matches, for SPA content that arrives
+        after load. Kept separate from `goto` so sessions that predate it
+        keep working: callers only invoke it when the agent asked to wait."""
+        ...
 
     def content(self, as_html: bool) -> str:
         """The current page, as innerText or as markup."""
@@ -126,12 +134,12 @@ class CamoufoxSession:
 
     def __init__(self) -> None:
         self._browser = None
-        self._page = None
+        self._pages = []
         self._camoufox = None
 
     def _ensure(self):
-        if self._page is not None:
-            return self._page
+        if self._browser is not None:
+            return self._active()
         # Imported here rather than at module scope so that `--selftest`, and
         # the tests, work on a box where camoufox was never installed. An
         # import error at the top would make the whole server unloadable.
@@ -139,13 +147,46 @@ class CamoufoxSession:
 
         self._camoufox = Camoufox(**browser_options())
         self._browser = self._camoufox.__enter__()
-        self._page = self._browser.new_page()
-        return self._page
+        if hasattr(self._browser, "on"):
+            self._browser.on("page", self._track)
+        self._pages.append(self._new_page())
+        return self._active()
+
+    def _track(self, p) -> None:
+        install_blockers(p)
+        self._pages.append(p)
+
+    def _new_page(self):
+        assert self._browser is not None
+        p = self._browser.new_page()
+        install_blockers(p)
+        return p
+
+    def _active(self):
+        """The most recently opened page that is still open.
+
+        A login wall (Shopee -> Google) opens its sign-in in a popup, and the
+        agent must be able to read/type into that popup even though the main
+        tab initiated it. Favour the newest surviving page; when every popup
+        has closed it falls back to the original tab, which is what an OAuth
+        callback leaves behind once the popup is done.
+        """
+        for p in reversed(self._pages):
+            try:
+                if not p.is_closed():
+                    return p
+            except Exception:  # noqa: BLE001 — a dead handle reads as closed
+                continue
+        self._pages = [self._new_page()]
+        return self._pages[-1]
 
     def goto(self, url: str, wait_until: str) -> str:
         page = self._ensure()
         page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until=wait_until)
         return page.url
+
+    def wait_for(self, selector: str) -> None:
+        self._ensure().wait_for_selector(selector, timeout=NAV_TIMEOUT_MS)
 
     def content(self, as_html: bool) -> str:
         page = self._ensure()
@@ -175,7 +216,7 @@ class CamoufoxSession:
             self._camoufox.__exit__(None, None, None)
         finally:
             self._browser = None
-            self._page = None
+            self._pages = []
             self._camoufox = None
 
 
@@ -211,11 +252,18 @@ class ToolError(Exception):
     """
 
 
+def _maybe_wait(session: Session, args: dict) -> None:
+    wait = args.get("wait")
+    if isinstance(wait, str) and wait.strip():
+        session.wait_for(wait.strip())
+
+
 def tool_browse(session: Session, args: dict) -> str:
     """Fetch one URL and read it. The overwhelmingly common case."""
     url = _require(args, "url")
     as_html = bool(args.get("html", False))
     landed = session.goto(url, args.get("wait_until") or "domcontentloaded")
+    _maybe_wait(session, args)
     body = _clip(session.content(as_html))
     header = f"[jod] {landed} via {describe()}"
     return f"{header}\n\n{body}"
@@ -225,6 +273,7 @@ def tool_open(session: Session, args: dict) -> str:
     """Navigate the resident page without reading it."""
     url = _require(args, "url")
     landed = session.goto(url, args.get("wait_until") or "domcontentloaded")
+    _maybe_wait(session, args)
     return f"at {landed}"
 
 
@@ -261,13 +310,33 @@ def tool_status(session: Session, args: dict) -> str:
     Reads it through the browser rather than asking the proxy what it claims,
     because "the proxy is configured" and "traffic is leaving through it" are
     different facts and only the second one matters.
+
+    Uses a throwaway page so the agent's current page is left exactly where
+    it was — the old version navigated the *active* tab to ipify and destroyed
+    whatever login walk or form state the agent had in flight.
     """
     config = describe()
+    probe = None
     try:
-        session.goto("https://api.ipify.org?format=json", "domcontentloaded")
-        seen = session.content(False).strip()
+        if isinstance(session, CamoufoxSession):
+            session._ensure()
+            assert session._browser is not None
+            probe = session._new_page()
+            probe.goto("https://api.ipify.org?format=json",
+                       timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+            seen = probe.evaluate("document.body.innerText").strip()
+        else:
+            # Fake sessions in tests have a single page; fall back to it.
+            session.goto("https://api.ipify.org?format=json", "domcontentloaded")
+            seen = session.content(False).strip()
     except Exception as e:  # noqa: BLE001 — reported, never raised
         return f"proxy: {config}\negress: could not be checked ({e})"
+    finally:
+        if probe is not None:
+            try:
+                probe.close()
+            except Exception:  # noqa: BLE001 — best effort cleanup
+                pass
     return f"proxy: {config}\negress: {seen}"
 
 
@@ -296,6 +365,12 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "How long to wait before reading. Use "
                     "networkidle for pages that render themselves in JS.",
                 },
+                "wait": {
+                    "type": "string",
+                    "description": "CSS selector to wait for before reading "
+                    "(e.g. a product card on Shopee). Essential for SPAs where "
+                    "domcontentloaded fires before the content exists.",
+                },
             },
             "required": ["url"],
         },
@@ -315,6 +390,10 @@ TOOLS: list[dict[str, Any]] = [
                 "wait_until": {
                     "type": "string",
                     "enum": ["domcontentloaded", "load", "networkidle"],
+                },
+                "wait": {
+                    "type": "string",
+                    "description": "CSS selector to wait for after navigating.",
                 },
             },
             "required": ["url"],
